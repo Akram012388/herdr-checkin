@@ -92,17 +92,27 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
   human-name-with-id-fallback), **`entry_detail`** (`{status} · {title} · {waited}`), and
   `describe_entry` (the one-line `destination · detail` join used by the `peek` toast). `startup`
   resolves all four identity fields from `pane list` + `workspace list` + `tab list`.
-- `src/pane.rs` (~1150) — the ratatui TUI. **Two-line rows:** `Row::{Spacer,Header,Entry(i),Detail(i)}`
-  — `layout_rows` emits `Entry` then `Detail` per waiter (one `Row` per painted line, so the
-  scrollbar/click math is unchanged); the pane renders `entry_destination` bright on the `Entry` line
-  and `entry_detail` dim+indented on the `Detail` line. **Selection band** `SELECTION_BG`
-  (`Color::DarkGray`) highlights both lines of the focused entry — the live selection while
-  navigating, the captured reply target while composing (survives the compose dim veil). **Reply
-  input = `tui-textarea`:** `ReplyDraft.input: TextArea<'static>`; the event loop intercepts
-  `Esc`/`Enter`(+`ctrl+m`)/`ctrl+c` and feeds everything else to `reply_input`; `Event::Paste` →
-  `reply_paste` (flatten control chars); `draw_compose` renders the widget (`Reply to <label>` rule +
-  the field + centered? no — right-aligned `enter send · esc cancel` hint). Bracketed paste is
-  enabled/disabled in `run()` alongside mouse capture.
+- `src/pane/` — the ratatui TUI, **split into a shell + two render surfaces (Slice 0)** so the coming
+  Agents view is a sibling module, not more weight in the loop:
+  - `pane/mod.rs` (~1100, mostly tests) — the **shell**: `run`/`event_loop`/tick, the pure
+    `PaneModel` + `ReplyDraft`, the `on_enter`/`on_drop`/`on_reply_submit`/`on_confirm_clear`/
+    `on_mouse` handlers, and the top-level `draw` layout. The event loop intercepts
+    `Esc`/`Enter`(+`ctrl+m`)/`ctrl+u`/`ctrl+c` and feeds everything else to `reply_input`;
+    `Event::Paste` → `reply_paste` (flatten control chars). Bracketed paste is enabled/disabled in
+    `run()` alongside mouse capture.
+  - `pane/queue_view.rs` (~470) — the durable Queue render. **Two-line rows:**
+    `Row::{Spacer,Header,Entry(i),Detail(i)}` — `layout_rows` emits `Entry` then `Detail` per waiter
+    (one `Row` per painted line, so the scrollbar/click math is unchanged); `draw_list` renders
+    `entry_destination` bright on the `Entry` line and `entry_detail` dim+indented on the `Detail`
+    line, with the **selection band** `SELECTION_BG` (`Color::DarkGray`) on both lines of the focused
+    entry (live selection while navigating, captured reply target while composing — survives the
+    compose dim veil). Owns `row_for_click`, `header_text`, `confirm_prompt`, and the scrollbar.
+  - `pane/compose.rs` (~150) — the inline-reply strip: `draw_compose` (the `Reply to <label>` rule +
+    the `tui-textarea` field + right-aligned `enter send · esc cancel` hint) and `dim_area` (the veil).
+  - **Testing foundation:** ratatui `TestBackend` snapshot tests in `pane/mod.rs` lock the rendered
+    *content* (empty queue, grouped CHECKIN/DONE sections, the compose strip, the `> ` cursor) in CI
+    with no herdr. They trim horizontal styling (centering, band, dim/bold) on purpose — that stays
+    under live tuning; the maintainer confirms the pixel look at the terminal.
 - `src/main.rs` — one-line entry into `lib::run_from_env`.
 - `tests/cli.rs` — end-to-end tests that spawn the built binary against a fake `herdr` on
   `HERDR_BIN_PATH`.
@@ -258,10 +268,10 @@ Claude Code's agent view but powered by herdr primitives. **Fully aligned with t
   reads cramped. Surface is a `--placement` flag, so the choice stays cheaply reversible.
 - Live data via a **worker thread** (never CLI on the render tick); `roster.json` is a **separate,
   prunable** store from `state.json` (new **invariant #7**).
-- **Build order (tracer-bullet, each green + eyeballed):** Slice 0 split `pane.rs` → 1 data seam +
-  `roster.rs` + hidden `roster` debug cmd → 2 tab toggle + read-only live roster (the tracer bullet) →
-  3 jump/reply parity → 4 last-line column → 5 `roster.json` + time-in-state → 6 pin-to-top. Full slice
-  table in the design doc §8.
+- **Build order (tracer-bullet, each green + eyeballed):** ~~Slice 0 split `pane.rs`~~ **DONE** → 1
+  data seam + `roster.rs` + hidden `roster` debug cmd (**START HERE, issue #2**) → 2 tab toggle +
+  read-only live roster (the tracer bullet) → 3 jump/reply parity → 4 last-line column → 5
+  `roster.json` + time-in-state → 6 pin-to-top. Full slice table in the design doc §8.
 - **Per-slice tracker: GitHub issues [#1–#7](https://github.com/Akram012388/herdr-checkin/issues)**
   (Slice 0→#1 … Slice 6→#7), dependency-ordered, labeled `ready-for-agent` (AFK: #1/#2/#6) or
   `ready-for-human` (HITL live-eyeball: #3/#4/#5/#7). This doc + the design doc are the durable

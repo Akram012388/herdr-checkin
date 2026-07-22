@@ -12,24 +12,32 @@
 //! - **`Enter` evicts only after a successful focus.** We do not rely on herdr emitting a
 //!   `pane.focused` event to auto-evict; eviction is idempotent, so an explicit evict is safe
 //!   whether or not that event also fires.
+//!
+//! This module is the **shell**: terminal setup, the event loop and tick, the pure [`PaneModel`],
+//! and the top-level [`draw`] layout. The two render surfaces live in sibling modules — the durable
+//! queue in [`queue_view`], the inline-reply compose strip in [`compose`] — so the coming Agents
+//! view slots in as a third sibling without growing the loop.
+
+mod compose;
+mod queue_view;
 
 use crate::{
-    agent_label, clear, current_unix_ms, entry_destination, entry_detail, evict, load_entries,
-    Herdr, PluginError, QueueEntry, RuntimeEnv, StateStore, WaitStatus,
+    agent_label, clear, current_unix_ms, evict, load_entries, Herdr, PluginError, QueueEntry,
+    RuntimeEnv, StateStore,
 };
+use compose::{dim_area, draw_compose};
+use queue_view::{confirm_prompt, draw_list, header_text, layout_rows, row_for_click, Row};
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::style::{Color, Style, Stylize};
+use ratatui::widgets::{ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use std::time::Duration;
 use tui_textarea::TextArea;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// How long the input poll blocks each tick before we re-read the queue and repaint, so queue
 /// changes and the ticking "waited" column appear promptly without busy-spinning.
@@ -302,25 +310,6 @@ fn on_mouse(model: &mut PaneModel, mouse: MouseEvent, list_area: Option<Rect>, o
     }
 }
 
-/// Map a click at terminal cell `(col, row)` to the queue index it lands on, or `None` if the
-/// click is outside the list `area`, on a section header, or on a blank row below the last row.
-/// `offset` is the index of the first visible row (the list's scroll position), so the clicked
-/// display row is `offset + (row - area.y)`; that row is translated back to an entry index through
-/// the grouped `rows` layout (headers map to `None`). Pure and unit-tested.
-fn row_for_click(area: Rect, offset: usize, rows: &[Row], col: u16, row: u16) -> Option<usize> {
-    let inside_x = col >= area.x && col < area.x.saturating_add(area.width);
-    let inside_y = row >= area.y && row < area.y.saturating_add(area.height);
-    if !inside_x || !inside_y {
-        return None;
-    }
-    let display_index = offset + (row - area.y) as usize;
-    match rows.get(display_index) {
-        // A click on either the destination line or its dim detail selects that entry.
-        Some(Row::Entry(index) | Row::Detail(index)) => Some(*index),
-        _ => None,
-    }
-}
-
 /// Remove a pane from the queue as a delta under the lock (never a full model write-back).
 fn evict_pane(runtime: &RuntimeEnv, pane_id: &str) -> Result<(), PluginError> {
     StateStore::new(&runtime.state_dir).update(|mut entries| {
@@ -488,59 +477,6 @@ impl PaneModel {
 
 // --- view ------------------------------------------------------------------
 
-/// The section header text for each `WaitStatus`, in the order sections are shown: agents that need
-/// input first (on-brand `CHECKIN`), then finished ones (`DONE`).
-const CHECKIN_HEADER: &str = "CHECKIN";
-const DONE_HEADER: &str = "DONE";
-
-/// The selection band: a soft grey fill behind the selected entry (both its lines), instead of a
-/// full reversed-video swap which reads as a harsh white band on a dark theme. Tunable by eye — a
-/// lighter grey such as `Color::Indexed(244)` for a more visible band, darker for a subtler one.
-const SELECTION_BG: Color = Color::DarkGray;
-
-/// One rendered line of the grouped agents-view: a blank spacer, a non-selectable section header,
-/// an entry's **primary** line (the go-to destination, carrying its index into `entries` — the
-/// selection source of truth), or that entry's **detail** line (the dim second line beneath it).
-/// Built per-frame by [`layout_rows`]. Keeping one `Row` per painted line preserves the invariant
-/// the click hit-testing and scrollbar math rely on. `Entry` is the selectable/clickable line;
-/// `Detail` clicks map back to the same entry, but the cursor and highlight anchor on `Entry`.
-enum Row {
-    Spacer,
-    Header(&'static str),
-    Entry(usize),
-    Detail(usize),
-}
-
-/// Group the queue into status sections for display — `CHECKIN` (`blocked`) then `DONE` (`done`),
-/// FIFO within each — as a pure view transform. Each non-empty section is preceded by a blank
-/// spacer row so the groups read as visually distinct blocks (and the first spacer separates them
-/// from the count line above). It never reorders `entries`: each `Row::Entry` keeps the entry's
-/// original index, and a section (spacer + header) is emitted only when that section has at least
-/// one entry (so an all-`done` queue shows no `CHECKIN` heading). This is the only place the
-/// on-screen row order diverges from `entries`; `draw` and `row_for_click` both go through it, so
-/// the paint and the click hit-testing always agree.
-fn layout_rows(entries: &[QueueEntry]) -> Vec<Row> {
-    let mut rows = Vec::new();
-    for (header, status) in [
-        (CHECKIN_HEADER, WaitStatus::Blocked),
-        (DONE_HEADER, WaitStatus::Done),
-    ] {
-        let mut section: Vec<Row> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.status == status)
-            // Each entry paints as two lines: its destination (Entry) then its dim detail (Detail).
-            .flat_map(|(index, _)| [Row::Entry(index), Row::Detail(index)])
-            .collect();
-        if !section.is_empty() {
-            rows.push(Row::Spacer);
-            rows.push(Row::Header(header));
-            rows.append(&mut section);
-        }
-    }
-    rows
-}
-
 fn draw(
     frame: &mut Frame,
     model: &PaneModel,
@@ -617,302 +553,13 @@ fn draw(
     }
 }
 
-/// Render the grouped queue into `area`, recording the painted rect into `list_area` for click
-/// hit-testing and drawing a scrollbar when the rows overflow. The focused entry gets a soft grey
-/// band ([`SELECTION_BG`]) in both modes: the live selection while navigating, the captured reply
-/// target while composing (so the answered agent stays obvious under the dim veil the caller adds).
-fn draw_list(
-    frame: &mut Frame,
-    model: &PaneModel,
-    now_ms: u64,
-    list_state: &mut ListState,
-    list_area: &mut Option<Rect>,
-    area: Rect,
-    compose: Option<&ReplyDraft>,
-) {
-    // The CC-agents-view look: entries grouped into status sections with non-selectable headers.
-    // `layout_rows` is a pure view over the FIFO queue — it never reorders `entries`, so `selected`
-    // stays an index into `entries` and we translate it to its on-screen row here.
-    let rows = layout_rows(&model.entries);
-
-    // The soft grey band marks the focused entry in BOTH modes: while navigating it's the selection;
-    // while composing it's the reply target (so it's obvious which agent you're answering, on top of
-    // the `> ` marker). In compose mode the whole list is then veiled dim by the caller, but the
-    // band's background survives the DIM (which only mutes the foreground), so the target still reads.
-    let highlight_index = match compose {
-        Some(draft) => model.entries.iter().position(|e| e.pane_id == draft.target),
-        None => Some(model.selected),
-    };
-    let highlight_style = Style::new().bg(SELECTION_BG);
-
-    // Each entry is two lines: the go-to destination (bright, the selectable/anchored line) and its
-    // detail (indented under it). The detail of the focused entry takes the same band — not dim — so
-    // its two lines read as one highlighted block.
-    let items: Vec<ListItem> = rows
-        .iter()
-        .map(|row| match row {
-            Row::Spacer => ListItem::new(""),
-            Row::Header(title) => ListItem::new(*title).bold(),
-            Row::Entry(index) => match entry_destination(&model.entries[*index]) {
-                Some(destination) => ListItem::new(destination),
-                // No destination resolved yet (un-enriched/legacy row): fall back to the detail so
-                // the row is never blank.
-                None => ListItem::new(entry_detail(&model.entries[*index], now_ms)),
-            },
-            Row::Detail(index) => {
-                let entry = &model.entries[*index];
-                // The primary line already carries the detail when no destination resolved, so this
-                // line stays blank rather than repeat it.
-                if entry_destination(entry).is_none() {
-                    ListItem::new("")
-                } else {
-                    let detail = format!("  {}", entry_detail(entry, now_ms));
-                    if highlight_index == Some(*index) {
-                        ListItem::new(detail).bg(SELECTION_BG)
-                    } else {
-                        ListItem::new(detail).dim()
-                    }
-                }
-            }
-        })
-        .collect();
-    // Highlight the display row that carries the highlighted entry (headers are never selected).
-    let selected_row = highlight_index.and_then(|target| {
-        rows.iter()
-            .position(|row| matches!(row, Row::Entry(index) if *index == target))
-    });
-    list_state.select(selected_row);
-
-    let list = List::new(items)
-        .highlight_style(highlight_style)
-        .highlight_symbol("> ");
-
-    // Reserve the right-most column for a scrollbar when the grouped rows overflow the viewport, so
-    // the list text never collides with the thumb. `List`+`ListState` already scrolls to keep the
-    // selection in view; the scrollbar only makes that off-screen content discoverable. Each
-    // `ListItem` is one row, so display-row count == item count == the units `offset()` counts in.
-    let viewport = area.height as usize;
-    let overflow = rows.len() > viewport;
-    let list_rect = if overflow {
-        Rect {
-            width: area.width.saturating_sub(1),
-            ..area
-        }
-    } else {
-        area
-    };
-    // Record the list's rect for this frame so mouse clicks can be hit-tested against exactly what
-    // was painted; `render_stateful_widget` updates `list_state`'s scroll offset in place.
-    *list_area = Some(list_rect);
-    frame.render_stateful_widget(list, list_rect, list_state);
-    if overflow {
-        let track = Rect {
-            x: area.x + area.width - 1,
-            width: 1,
-            ..area
-        };
-        render_list_scrollbar(frame, track, rows.len(), viewport, list_state.offset());
-    }
-}
-
-/// Draw the inline-reply compose strip: a titled rule, the input, and a hint row. The input is a
-/// single fixed row rendered by the `TextArea` widget itself — it scrolls horizontally and draws
-/// its own placeholder and block cursor, so there's no manual wrapping or caret math here.
-fn draw_compose(
-    frame: &mut Frame,
-    draft: &ReplyDraft,
-    rule_area: Rect,
-    input_area: Rect,
-    hint_area: Rect,
-) {
-    // The titled rule announces the mode switch and names the captured target (pinned at arm time,
-    // so it stays correct even if the queue re-orders under the dimmed list).
-    frame.render_widget(reply_rule(&draft.label, rule_area.width), rule_area);
-
-    // 1-col left pad aligns the input under the rule's "Reply" label; the TextArea draws its own
-    // placeholder + block cursor, so no manual caret (ratatui hides the hardware cursor when
-    // `set_cursor_position` is not called).
-    let input_rect = Rect {
-        x: input_area.x + 1,
-        width: input_area.width.saturating_sub(1),
-        ..input_area
-    };
-    frame.render_widget(&draft.input, input_rect);
-
-    // The affordances: dim (reference, not the work), right-aligned to keep the typing edge clean.
-    frame.render_widget(
-        Paragraph::new(reply_hint(hint_area.width))
-            .dim()
-            .alignment(Alignment::Right),
-        hint_area,
-    );
-}
-
-/// Stamp every cell in `area` with the `DIM` modifier over whatever was already drawn there — the
-/// same post-hoc veil herdr uses to recede content behind a modal. Dims the queue uniformly while
-/// an inline reply is composed, including any scrollbar, so the compose strip reads as active.
-fn dim_area(frame: &mut Frame, area: Rect) {
-    let buf = frame.buffer_mut();
-    for y in area.y..area.y.saturating_add(area.height) {
-        for x in area.x..area.x.saturating_add(area.width) {
-            let cell = &mut buf[(x, y)];
-            let dimmed = cell.style().add_modifier(Modifier::DIM);
-            cell.set_style(dimmed);
-        }
-    }
-}
-
-/// The compose strip's titled rule: `─ Reply to <label> ───`, the "Reply to <label>" bold, the
-/// leading and trailing dashes dim. The label (never the words "Reply to") is ellipsis-truncated on
-/// a narrow popup so the rule keeps a few trailing dashes and always fits one line.
-fn reply_rule(label: &str, width: u16) -> Paragraph<'static> {
-    const PREFIX: &str = "Reply to ";
-    const HEAD: usize = 2; // the leading "─ "
-    const GAP: usize = 1; // the space before the trailing dashes
-    const MIN_TAIL: usize = 3; // keep at least a few trailing dashes
-
-    let width = width as usize;
-    let label_budget = width
-        .saturating_sub(HEAD + display_width(PREFIX) + GAP + MIN_TAIL)
-        .max(1);
-    let title = format!("{PREFIX}{}", truncate_display(label, label_budget));
-    let tail = width.saturating_sub(HEAD + display_width(&title) + GAP);
-    Paragraph::new(Line::from(vec![
-        "─ ".dim(),
-        title.bold(),
-        Span::raw(" "),
-        "─".repeat(tail).dim(),
-    ]))
-}
-
-/// The full send/cancel hint, degrading to a terse form before it would clip on a narrow popup.
-fn reply_hint(width: u16) -> &'static str {
-    const FULL: &str = "enter send · esc cancel";
-    const SHORT: &str = "enter · esc";
-    if (width as usize) >= display_width(FULL) {
-        FULL
-    } else {
-        SHORT
-    }
-}
-
-/// Truncate `s` to at most `max` display columns, marking a cut with a trailing `…` (which itself
-/// occupies the last column). Returns `s` unchanged when it already fits.
-fn truncate_display(s: &str, max: usize) -> String {
-    if display_width(s) <= max {
-        return s.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let budget = max - 1; // reserve one column for the ellipsis
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in s.chars() {
-        let ch_width = char_width(ch);
-        if used + ch_width > budget {
-            break;
-        }
-        out.push(ch);
-        used += ch_width;
-    }
-    out.push('…');
-    out
-}
-
-/// Display width of a string in terminal columns (wide/CJK characters count as 2).
-fn display_width(s: &str) -> usize {
-    UnicodeWidthStr::width(s)
-}
-
-/// Display width of a single character in terminal columns; control characters count as 0.
-fn char_width(ch: char) -> usize {
-    UnicodeWidthChar::width(ch).unwrap_or(0)
-}
-
-/// The footer prompt shown while a clear-all confirm is pending. Only armed on a non-empty queue,
-/// so `count >= 1`; pluralized so the singular case doesn't read "1 entries".
-fn confirm_prompt(count: usize) -> String {
-    match count {
-        1 => "clear all 1 entry? y/n".to_string(),
-        n => format!("clear all {n} entries? y/n"),
-    }
-}
-
-/// The one-line count shown at the top of the pane. herdr draws the pane name ("Check-in") on the
-/// popup's border title, so this line carries only the live count — no redundant "Check-in —" prefix.
-fn header_text(count: usize) -> String {
-    match count {
-        0 => "queue empty".to_string(),
-        1 => "1 agent waiting".to_string(),
-        n => format!("{n} agents waiting"),
-    }
-}
-
-/// Geometry of a vertical scrollbar thumb: its top offset within the track and its length, both in
-/// cells. Produced by [`scrollbar_thumb`], consumed by [`render_list_scrollbar`].
-struct Thumb {
-    top: u16,
-    len: u16,
-}
-
-/// Proportional geometry for a vertical scrollbar thumb — the same shape herdr draws for its own
-/// popups (thumb length scaled to the visible fraction, position scaled to the scroll offset),
-/// reduced to integer math and kept colorless. Returns `None` when everything fits (no scrollbar).
-/// `total` display rows, `viewport` visible rows, `offset` index of the first visible row.
-fn scrollbar_thumb(
-    total: usize,
-    viewport: usize,
-    offset: usize,
-    track_height: u16,
-) -> Option<Thumb> {
-    if viewport == 0 || track_height == 0 || total <= viewport {
-        return None;
-    }
-    let track = track_height as usize;
-    // total > viewport here, so max_offset >= 1 and the divisions below never hit zero.
-    let len = (viewport * track / total).clamp(1, track);
-    let max_top = track - len;
-    let max_offset = total - viewport;
-    let top = if max_top == 0 {
-        0
-    } else {
-        offset.min(max_offset) * max_top / max_offset
-    };
-    Some(Thumb {
-        top: top as u16,
-        len: len as u16,
-    })
-}
-
-/// Draw a 1-column vertical scrollbar in `track` when the grouped rows overflow the viewport: a dim
-/// track with a brighter thumb, both colorless to match the pane. A no-op when it all fits.
-fn render_list_scrollbar(
-    frame: &mut Frame,
-    track: Rect,
-    total: usize,
-    viewport: usize,
-    offset: usize,
-) {
-    let Some(thumb) = scrollbar_thumb(total, viewport, offset, track.height) else {
-        return;
-    };
-    let buf = frame.buffer_mut();
-    for y in track.y..track.y.saturating_add(track.height) {
-        buf[(track.x, y)]
-            .set_symbol("▕")
-            .set_style(Style::new().dim());
-    }
-    let thumb_top = track.y.saturating_add(thumb.top);
-    for y in thumb_top..thumb_top.saturating_add(thumb.len) {
-        buf[(track.x, y)].set_symbol("▐");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::WaitStatus;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::Terminal;
 
     fn entry(pane_id: &str) -> QueueEntry {
         entry_with_status(pane_id, WaitStatus::Blocked)
@@ -1036,12 +683,6 @@ mod tests {
     }
 
     #[test]
-    fn confirm_prompt_pluralizes() {
-        assert_eq!(confirm_prompt(1), "clear all 1 entry? y/n");
-        assert_eq!(confirm_prompt(3), "clear all 3 entries? y/n");
-    }
-
-    #[test]
     fn begin_reply_captures_the_selected_target_and_label() {
         let mut m = model(&["w1:p1", "w2:p1"]);
         m.move_down(); // select w2:p1
@@ -1141,142 +782,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn truncate_display_keeps_short_labels_and_ellipsizes_long_ones() {
-        assert_eq!(truncate_display("Claude", 10), "Claude");
-        // Cut to 5 columns: 4 chars + the ellipsis cell.
-        assert_eq!(truncate_display("claude-backend", 5), "clau…");
-        assert_eq!(truncate_display("anything", 0), "");
-    }
-
-    #[test]
-    fn reply_hint_degrades_on_a_narrow_popup() {
-        assert_eq!(reply_hint(40), "enter send · esc cancel");
-        assert_eq!(reply_hint(12), "enter · esc");
-    }
-
-    // The list rect used across the click tests: starts at row 1 (row 0 is the top header line),
-    // 10 rows tall, 40 wide.
-    fn list_area() -> Rect {
-        Rect {
-            x: 0,
-            y: 1,
-            width: 40,
-            height: 10,
-        }
-    }
-
-    // All-blocked entries render as [Spacer, Header("CHECKIN"), Entry(0), Detail(0), Entry(1),
-    // Detail(1), ...] — a spacer then the header occupy the first two display rows, then each entry
-    // is two rows (its destination then its dim detail), so entry N's primary sits at display
-    // index 2 + 2N and its detail at 3 + 2N.
-    fn blocked_rows(count: usize) -> Vec<Row> {
-        let entries: Vec<QueueEntry> = (0..count).map(|i| entry(&format!("w{i}:p1"))).collect();
-        layout_rows(&entries)
-    }
-
-    #[test]
-    fn row_for_click_maps_rows_to_entries_past_the_header() {
-        // No scroll: row 1 spacer, row 2 CHECKIN header, so row 3 (index 2) is entry 0's primary,
-        // row 4 (index 3) is entry 0's detail (same entry), row 5 (index 4) is entry 1's primary.
-        let rows = blocked_rows(3);
-        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 3), Some(0)); // primary
-        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 4), Some(0)); // detail -> same entry
-        assert_eq!(row_for_click(list_area(), 0, &rows, 0, 5), Some(1)); // next entry's primary
-    }
-
-    #[test]
-    fn row_for_click_skips_the_spacer_and_section_header() {
-        // The leading spacer (row 1) and the CHECKIN header (row 2) select nothing, like a blank row.
-        let rows = blocked_rows(3);
-        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 1), None); // spacer
-        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 2), None); // header
-    }
-
-    #[test]
-    fn row_for_click_accounts_for_scroll_offset() {
-        // Scrolled down by 2: display row at area.y is display index 2 — Entry(0)'s primary here
-        // ([Spacer, Header, Entry(0), Detail(0), Entry(1), ...]).
-        let rows = blocked_rows(5);
-        assert_eq!(row_for_click(list_area(), 2, &rows, 10, 1), Some(0));
-        assert_eq!(row_for_click(list_area(), 2, &rows, 10, 3), Some(1));
-    }
-
-    #[test]
-    fn row_for_click_rejects_blank_rows_below_the_last_entry() {
-        // Spacer + header + 3 entries × 2 rows = 8 display rows (indices 0..7); a click on display
-        // row 8 (row 9) is past the last detail line and selects nothing.
-        let rows = blocked_rows(3);
-        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 9), None);
-    }
-
-    #[test]
-    fn row_for_click_rejects_clicks_outside_the_area() {
-        let rows = blocked_rows(3);
-        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 0), None); // above the list
-        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 11), None); // below the list
-        assert_eq!(row_for_click(list_area(), 0, &rows, 40, 3), None); // one past the right edge (entry 0 primary)
-    }
-
-    #[test]
-    fn row_for_click_is_safe_on_an_empty_queue() {
-        let rows = blocked_rows(0);
-        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 1), None);
-    }
-
-    #[test]
-    fn layout_rows_groups_by_status_fifo_without_reordering_entries() {
-        // A queue interleaving blocked and done: the layout emits a spacer + CHECKIN (blocked, FIFO)
-        // then a spacer + DONE (done, FIFO), each Entry keeping its original index into `entries`.
-        let entries = vec![
-            entry_with_status("w0:p1", WaitStatus::Blocked),
-            entry_with_status("w1:p1", WaitStatus::Done),
-            entry_with_status("w2:p1", WaitStatus::Blocked),
-            entry_with_status("w3:p1", WaitStatus::Done),
-        ];
-        let rows = layout_rows(&entries);
-        let shape: Vec<String> = rows
-            .iter()
-            .map(|row| match row {
-                Row::Spacer => "~".to_string(),
-                Row::Header(title) => format!("#{title}"),
-                Row::Entry(index) => format!("{index}"),
-                Row::Detail(index) => format!("d{index}"),
-            })
-            .collect();
-        assert_eq!(
-            shape,
-            vec!["~", "#CHECKIN", "0", "d0", "2", "d2", "~", "#DONE", "1", "d1", "3", "d3"],
-            "each entry is its Entry line then its Detail line; sections FIFO, indices unchanged"
-        );
-    }
-
-    #[test]
-    fn layout_rows_omits_an_empty_section() {
-        // All done: no CHECKIN spacer/heading — the DONE section (spacer + header) leads.
-        let entries = vec![
-            entry_with_status("w0:p1", WaitStatus::Done),
-            entry_with_status("w1:p1", WaitStatus::Done),
-        ];
-        let rows = layout_rows(&entries);
-        assert!(matches!(rows.first(), Some(Row::Spacer)));
-        assert!(
-            matches!(rows.get(1), Some(Row::Header(DONE_HEADER))),
-            "an all-done queue leads with the DONE section, not CHECKIN"
-        );
-        assert_eq!(
-            rows.len(),
-            6,
-            "spacer + header + two entries × (Entry + Detail)"
-        );
-    }
-
     fn mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
         MouseEvent {
             kind,
             column: col,
             row,
             modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    // The list rect used across the mouse tests: starts at row 1 (row 0 is the top header line),
+    // 10 rows tall, 40 wide — matching what `draw` records for a queue this size.
+    fn list_area() -> Rect {
+        Rect {
+            x: 0,
+            y: 1,
+            width: 40,
+            height: 10,
         }
     }
 
@@ -1354,53 +876,120 @@ mod tests {
         assert_eq!(m.selected, 1);
     }
 
-    #[test]
-    fn header_text_pluralizes() {
-        assert_eq!(header_text(0), "queue empty");
-        assert_eq!(header_text(1), "1 agent waiting");
-        assert_eq!(header_text(3), "3 agents waiting");
+    // --- render snapshots (TestBackend) ------------------------------------
+    //
+    // These lock the pane's rendered *content* and vertical layout in CI with no herdr: they draw
+    // the real `draw` into an off-screen `TestBackend` and compare the text of each row. Horizontal
+    // styling (centering, the grey selection band, dim/bold) is deliberately not asserted here —
+    // it stays under live tuning (HANDOFF §6) and the maintainer confirms it at the terminal — so
+    // `content_lines` trims each row to its text. One extra test locks the `> ` selection marker.
+
+    fn render_buffer(model: &PaneModel, width: u16, height: u16) -> Buffer {
+        let mut terminal =
+            Terminal::new(TestBackend::new(width, height)).expect("test terminal builds");
+        let mut list_state = ListState::default();
+        let mut list_area = None;
+        terminal
+            .draw(|frame| draw(frame, model, 1_000, &mut list_state, &mut list_area))
+            .expect("draw succeeds");
+        terminal.backend().buffer().clone()
+    }
+
+    // The text of each rendered row, trimmed of the leading/trailing padding the widgets add
+    // (center/right alignment, the list's highlight-symbol column). Blank rows become "".
+    fn content_lines(buffer: &Buffer) -> Vec<String> {
+        let area = buffer.area;
+        (0..area.height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..area.width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line.trim().to_string()
+            })
+            .collect()
     }
 
     #[test]
-    fn scrollbar_thumb_is_none_when_everything_fits() {
-        // Content shorter than or equal to the viewport needs no scrollbar.
-        assert!(scrollbar_thumb(5, 10, 0, 10).is_none());
-        assert!(scrollbar_thumb(10, 10, 0, 10).is_none());
-        // Degenerate tracks/viewports are also a no-op (never divide by zero).
-        assert!(scrollbar_thumb(20, 0, 0, 10).is_none());
-        assert!(scrollbar_thumb(20, 10, 0, 0).is_none());
-    }
-
-    #[test]
-    fn scrollbar_thumb_scales_length_and_slides_with_the_offset() {
-        // 20 rows through a 10-row viewport: the thumb spans half the track (10 * 10 / 20 = 5),
-        // and its top slides from 0 (top) through the middle to max_top (bottom) as we scroll.
-        let at = |offset| scrollbar_thumb(20, 10, offset, 10).expect("overflow => thumb");
-        let top = at(0);
-        assert_eq!((top.top, top.len), (0, 5), "scrolled to the top");
-        let mid = at(5);
-        assert_eq!((mid.top, mid.len), (2, 5), "5 * (10-5) / (20-10) = 2");
-        let bottom = at(10);
+    fn snapshot_empty_queue_shows_the_caught_up_message() {
+        let m = model(&[]);
         assert_eq!(
-            (bottom.top, bottom.len),
-            (5, 5),
-            "max offset pins the thumb to the bottom"
-        );
-        // An offset past the max is clamped, never overruns the track.
-        let over = at(99);
-        assert_eq!(
-            over.top + over.len,
-            10,
-            "thumb bottom never exceeds the track height"
+            content_lines(&render_buffer(&m, 80, 6)),
+            vec![
+                "queue empty",
+                "No agents waiting — you're all caught up.",
+                "",
+                "",
+                "",
+                "j/k move  ·  Enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit",
+            ]
         );
     }
 
     #[test]
-    fn scrollbar_thumb_length_is_at_least_one_cell() {
-        // A huge list through a tiny viewport still shows a visible (>= 1 cell) thumb.
-        let thumb = scrollbar_thumb(1_000, 1, 0, 8).expect("overflow => thumb");
-        assert!(thumb.len >= 1, "the thumb is never zero-height");
-        assert!(thumb.top + thumb.len <= 8, "and stays within the track");
+    fn snapshot_queue_groups_checkin_then_done_sections() {
+        let m = PaneModel::new(vec![
+            entry_with_status("w1:p1", WaitStatus::Blocked),
+            entry_with_status("w2:p1", WaitStatus::Blocked),
+            entry_with_status("w3:p1", WaitStatus::Done),
+        ]);
+        assert_eq!(
+            content_lines(&render_buffer(&m, 80, 13)),
+            vec![
+                "3 agents waiting",
+                "",
+                "CHECKIN",
+                "> w1 · pane 1", // the selection cursor sits on the first entry
+                "blocked · t · just now",
+                "w2 · pane 1",
+                "blocked · t · just now",
+                "",
+                "DONE",
+                "w3 · pane 1",
+                "done · t · just now",
+                "",
+                "j/k move  ·  Enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit",
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_compose_strip_renders_the_rule_input_and_hint() {
+        let mut m = model(&["w1:p1"]);
+        m.begin_reply();
+        m.reply.as_mut().unwrap().input.insert_str("hi");
+        assert_eq!(
+            content_lines(&render_buffer(&m, 80, 8)),
+            vec![
+                "1 agent waiting".to_string(),
+                "".to_string(),
+                "CHECKIN".to_string(),
+                "> w1 · pane 1".to_string(), // the reply target keeps the cursor while composing
+                "blocked · t · just now".to_string(),
+                format!("─ Reply to Claude {}", "─".repeat(62)),
+                "hi".to_string(),
+                "enter send · esc cancel".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_marks_the_selected_entry_with_the_cursor() {
+        // Two blocked entries render as [header][spacer][CHECKIN][E0][D0][E1][D1]... The selection
+        // starts on entry 0, so its destination row (terminal row 3) carries the "> " marker while
+        // the unselected entry's row (row 5) does not.
+        let m = model(&["w1:p1", "w2:p1"]);
+        let buffer = render_buffer(&m, 80, 9);
+        assert_eq!(
+            buffer[(0, 3)].symbol(),
+            ">",
+            "selected entry gets the cursor"
+        );
+        assert_eq!(
+            buffer[(0, 5)].symbol(),
+            " ",
+            "the unselected entry has no marker"
+        );
     }
 
     // --- reply submit (impure: reads/writes state.json, talks to a fake herdr) ---------------
