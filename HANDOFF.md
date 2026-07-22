@@ -7,28 +7,39 @@ later pivoted to a popup: [docs/triage-overlay-design.md](docs/triage-overlay-de
 
 **Version:** **0.4.0 — the triage-popup release — is cut** (version in `Cargo.toml` +
 `herdr-plugin.toml` + `Cargo.lock`, CHANGELOG dated 2026-07-22). **NOT tagged** — the maintainer tags
-on request. This session's polish lands on top of the untagged 0.4.0 (folded into its CHANGELOG
-entry). · **License:** MIT · **Repo:** https://github.com/Akram012388/herdr-checkin · **State:**
-`main` is green (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` =
-**79 lib + 5 CLI tests**) and pushed. No open branches/worktrees, working tree clean.
+on request. **The Agents-view work below is post-0.4.0 internal feature work — NOT in the CHANGELOG.**
+· **License:** MIT · **Repo:** https://github.com/Akram012388/herdr-checkin · **State:** `main` is
+green (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` = **118 lib + 5
+CLI tests**), pushed, tip **`1e8de9e`**. Working tree clean, no open branches/worktrees.
 
-**START HERE (§6): one known bug to fix, then continue polishing.**
-- **`ctrl+u` in the reply bar does not clear the whole line to the left of the cursor** (it should be
-  delete-to-line-start). Noted live by the maintainer; **deferred to this session on purpose.** Start
-  from §6 Task A.
+**START HERE (§6): the popup is now TWO tabs — the durable Queue + a live Agents roster, `Tab`/`Ctrl+S`
+to toggle. Slices 0-3 of the Agents view shipped this session.** Next:
+- **(a) Quick HITL confirm** — the Agents-view jump+reply E2E (#3/#4): open the popup, `Tab` to
+  Agents, `Enter` to jump to a real agent and `space` to reply. Built + CI-green + visually confirmed,
+  but that last live drive wasn't explicitly signed off. Confirm, then close #3/#4.
+- **(b) Build Slice 4 / issue #5** — the last-line status column. Full plan in §6.
 
-**What shipped this session (all folded into the untagged 0.4.0).** The status pane stays a centered
-**popup modal** (herdr `--placement popup`) — that direction is settled (see §6 "Decisions"). On top
-of it this session:
-- **Rows are location-first and two lines each**, mirroring herdr's own `prefix+g` go-to picker: a
-  bright **destination** line `{workspace} · {tab} · {pane}` over a dim **detail** line
-  `{status} · {title} · {waited}`. Human names with positional-id fallback at every segment.
-- **The reply input is now `tui-textarea`** (single-line) — real cursor editing (`ctrl+a`/`ctrl+e`,
-  arrows, `ctrl+w`/`ctrl+k`, correct unicode) + **bracketed paste** with newline-flattening.
-- **Softer highlights**: selection is a soft grey band (not reversed video); the reply target keeps
-  the band while composing; the footer hint bar is centered; the placeholder is faint + non-italic.
-- Verified live against herdr 0.7.5: the identity fields resolve correctly (`state.json` inspected);
-  the visuals were eyeballed by the maintainer at the terminal.
+**What shipped this session (all on `main`; post-0.4.0, not in the CHANGELOG):**
+- **Slice 2 (#3, `9bb25ce`)** — `Tab`/`Ctrl+S` toggle + a live Agents roster fed by a **`RosterSampler`
+  worker thread**: samples `herdr agent list` once immediately then every ~1s over an **mpsc**; the
+  250ms render tick drains it non-blocking (`try_recv`, newest-wins) so the CLI never runs on the tick;
+  interruptible `recv_timeout` shutdown, **joined on `Drop`** (every exit path tears it down).
+  `RuntimeEnv` gained **`herdr_bin_path`** so the worker builds its own `CliHerdr` (a borrowed
+  `&dyn Herdr` is neither `Send` nor `'static`).
+- **Slice 3 (#4, `f59ecc4`)** — full interaction parity in the Agents view: `j`/`k`/click selection
+  (**anchored by `pane_id`** across the 1s refresh so the cursor never jumps), `space` reply via a
+  shared **`arm_reply(pane_id,label)`** target, `Enter` jump via one shared `on_enter` (focus then
+  evict-on-success, idempotent — a no-op when the agent wasn't queued). A **persistent tab bar** now
+  tops BOTH views (active tab banded) + a dim **`tab · switch`** tooltip. This reversed the earlier
+  "keep the Queue byte-identical" stance (maintainer wanted a clear, consistent indicator).
+- **Names (`91a68f8`)** — the roster is **enriched** (`herdr::enrich_roster_labels`, best-effort) from
+  `workspace list`/`tab list`/`pane list`, so rows read `home / ~ · pane 1` like herdr's own sidebar
+  instead of raw ids. `RosterAgent` gained `workspace_label`/`tab_label`/`pane_label`.
+- **Empty-queue default (`1e8de9e`)** — the popup opens on **Agents when the queue is empty**, else
+  Queue (decided once in `PaneModel::new`; never re-evaluates — `tab` only moves via `toggle_tab`).
+- **Architectural fork considered + parked** — "do we even need the Queue now the Agents view is
+  dominant?" Fable-5 consulted; decision = **keep both tabs** + the empty-queue default. See §6.
+- Maintainer live-confirmed the view/names/tooltip/empty-queue behavior at the terminal.
 
 ---
 
@@ -69,7 +80,8 @@ title, status, enqueued_at_ms, last_touched_ms}`. The four label/id location fie
 
 **Files** (`lib.rs` was split into cohesive modules; each holds its own `#[cfg(test)]` tests; `lib.rs`
 re-exports items as `pub(crate)` so `crate::X` paths still resolve):
-- `src/lib.rs` (~160) — argv dispatch (`run_from_env`/`run`), subcommand parsing, `RuntimeEnv`, the
+- `src/lib.rs` (~170) — argv dispatch (`run_from_env`/`run`), subcommand parsing, `RuntimeEnv` (now
+  carries **`herdr_bin_path`** so the pane's roster sampler thread can build its own `CliHerdr`), the
   `mod`/`pub(crate) use` wiring. **The `status-changed` dispatch injects `herdr::enrich_location` as a
   closure** into `on_status_changed`, so the enqueue path can resolve identity from herdr while
   `queue.rs` stays free of the `Herdr` trait.
@@ -80,47 +92,63 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
   `label`); parsers `parse_pane_infos`, `parse_workspace_labels`/`parse_tab_labels` (shared
   `parse_id_label_map`), `parse_status_event`. Trait methods: `pane_status_map`, `pane_infos`,
   **`workspace_labels`**, **`tab_labels`**, **`agent_list`** (`parse_agent_list` over `herdr agent
-  list` into `roster::RosterAgent` — the Agents view), `focus_agent`, `prompt_agent`, `show_notification`,
-  `popup_close`. **`enrich_location(&dyn Herdr, &mut StatusEvent)`** fills `tab_id`+`pane_label` (from
-  `pane list`), `workspace_label` (from `workspace list`), `tab_label` (from `tab list`) — best-effort,
-  never fails the enqueue.
+  list`, then **`enrich_roster_labels`** fills each `RosterAgent`'s `workspace_label`/`tab_label`/
+  `pane_label` from `workspace list`/`tab list`/`pane list` — best-effort, so the Agents view reads
+  human names; a missed lookup degrades to ids), `focus_agent`, `prompt_agent`, `show_notification`,
+  `popup_close`. **`enrich_location(&dyn Herdr, &mut StatusEvent)`** is the Queue's analogue for the
+  enqueue path (fills `tab_id`+`pane_label`/`workspace_label`/`tab_label`), best-effort, never fails
+  the enqueue. **NB:** the Agents-view sampler calls `agent_list` ~1s, so that's ~4 short herdr CLI
+  spawns/sec off the render tick (agent+workspace+tab+pane list) — fine today; cache the label maps if
+  it ever janks.
 - `src/queue.rs` (~230) — pure queue transitions (`enqueue`/`evict`/`is_live`) and the event handlers
   (`on_status_changed`/`on_focused`/`on_closed`). **Never depends on the `Herdr` trait.**
   `on_status_changed(runtime, enrich: impl FnOnce(&mut StatusEvent))` runs `enrich` **before the
   lock** and **only when it will enqueue** (a `working` eviction pays for no lookups).
-- `src/roster.rs` (~230) — the Agents-view roster (Slice 1). **Herdr-free like `queue.rs`** (invariant
-  #6): pure types `AgentStatus` (idle/working/blocked/done/**unknown catch-all**), `RosterAgent`,
-  `RosterSnapshot`, `WorkspaceGroup`; `group_by_workspace` (encounter order; the pins hook for Slice 6)
-  and `render_roster_text` (the hidden `roster` debug dump). `herdr.rs` parses into these; this module
-  never touches the `Herdr` trait. `src/fixtures/agent_list.json` is a **pristine live capture** of
-  `herdr agent list` that the `parse_agent_list` test `include_str!`s (one agent listed live with no
-  `agent_session`/`terminal_title`, so the missing-session path is covered by real data).
+- `src/roster.rs` (~420) — the Agents-view roster's **pure core**. **Herdr-free like `queue.rs`**
+  (invariant #6): types `AgentStatus` (idle/working/blocked/done/**unknown catch-all**), `RosterAgent`
+  (now carries `workspace_label`/`tab_label`/`pane_label` — the enriched human names), `RosterSnapshot`,
+  `WorkspaceGroup`. Functions: `group_by_workspace` + **`agents_in_display_order`** (the flattened
+  grouped order the live view's selection cursor + click hit-testing both index into — they can't
+  drift); the per-row formatters **`agent_destination`** (`{tab} · {pane}`, name-with-id fallback),
+  **`agent_detail`** (`{status} · {title}`), **`workspace_display_label`** (the group header name),
+  **`roster_reply_label`** (capitalized agent name for the reply footer); and `render_roster_text` (the
+  hidden `roster` debug dump). `herdr.rs` parses + enriches into these; this module never touches the
+  `Herdr` trait. `src/fixtures/agent_list.json` is a **pristine live capture** the `parse_agent_list`
+  test `include_str!`s (one agent has no `agent_session`/`terminal_title` — the missing-session path,
+  and the no-`agent_session` case that matters for the parked overlay's identity join, §6).
 - `src/actions.rs` (~640) — the actions (`next`/`peek`/`clear`/`startup`), the toast copy, and the
   **row-render helpers**: `agent_label`, **`entry_destination`** (`{workspace} · {tab} · {pane}`,
   human-name-with-id-fallback), **`entry_detail`** (`{status} · {title} · {waited}`), and
   `describe_entry` (the one-line `destination · detail` join used by the `peek` toast). `startup`
   resolves all four identity fields from `pane list` + `workspace list` + `tab list`.
-- `src/pane/` — the ratatui TUI, **split into a shell + two render surfaces (Slice 0)** so the coming
-  Agents view is a sibling module, not more weight in the loop:
-  - `pane/mod.rs` (~1100, mostly tests) — the **shell**: `run`/`event_loop`/tick, the pure
-    `PaneModel` + `ReplyDraft`, the `on_enter`/`on_drop`/`on_reply_submit`/`on_confirm_clear`/
-    `on_mouse` handlers, and the top-level `draw` layout. The event loop intercepts
-    `Esc`/`Enter`(+`ctrl+m`)/`ctrl+u`/`ctrl+c` and feeds everything else to `reply_input`;
-    `Event::Paste` → `reply_paste` (flatten control chars). Bracketed paste is enabled/disabled in
-    `run()` alongside mouse capture.
-  - `pane/queue_view.rs` (~470) — the durable Queue render. **Two-line rows:**
-    `Row::{Spacer,Header,Entry(i),Detail(i)}` — `layout_rows` emits `Entry` then `Detail` per waiter
-    (one `Row` per painted line, so the scrollbar/click math is unchanged); `draw_list` renders
-    `entry_destination` bright on the `Entry` line and `entry_detail` dim+indented on the `Detail`
-    line, with the **selection band** `SELECTION_BG` (`Color::DarkGray`) on both lines of the focused
-    entry (live selection while navigating, captured reply target while composing — survives the
-    compose dim veil). Owns `row_for_click`, `header_text`, `confirm_prompt`, and the scrollbar.
-  - `pane/compose.rs` (~150) — the inline-reply strip: `draw_compose` (the `Reply to <label>` rule +
-    the `tui-textarea` field + right-aligned `enter send · esc cancel` hint) and `dim_area` (the veil).
-  - **Testing foundation:** ratatui `TestBackend` snapshot tests in `pane/mod.rs` lock the rendered
-    *content* (empty queue, grouped CHECKIN/DONE sections, the compose strip, the `> ` cursor) in CI
-    with no herdr. They trim horizontal styling (centering, band, dim/bold) on purpose — that stays
-    under live tuning; the maintainer confirms the pixel look at the terminal.
+- `src/pane/` — the ratatui TUI, **a shell + three render surfaces**. Two tabs (`ActiveTab::{Queue,
+  Agents}`) share one popup; `draw` dispatches on the active tab.
+  - `pane/mod.rs` (~1700, mostly tests) — the **shell**: `run`/`event_loop`/tick, the pure `PaneModel`
+    (now holds `tab`, `roster: Option<RosterSnapshot>`, `roster_selected`) + `ReplyDraft`, the
+    `on_enter`/`on_drop`/`on_reply_submit`/`on_confirm_clear`/`on_mouse` handlers (all **tab-aware** —
+    they dispatch on `model.tab`), `draw` + `draw_queue` + `draw_tab_bar`, and the **`RosterSampler`**
+    (the worker thread + mpsc + `Drop`-join described in the header). `PaneModel::new` picks the opening
+    tab (Agents if the queue is empty). `begin_reply` funnels both views through `arm_reply(pane_id,
+    label)`; `move_up`/`move_down`/`on_enter`/`on_mouse` each branch Queue vs. Agents. The event loop
+    handles `Tab`/`Ctrl+S` (toggle), `j`/`k`/`space`/`Enter` (both tabs), and `d`/`c` (Queue only).
+  - `pane/queue_view.rs` (~470) — the durable Queue render (unchanged in substance). Two-line rows
+    `Row::{Spacer,Header,Entry(i),Detail(i)}`, `entry_destination` bright + `entry_detail` dim, the
+    **selection band** `SELECTION_BG` (`Color::DarkGray`, now `pub(super)`), `row_for_click`,
+    `header_text`, `confirm_prompt`, and the scrollbar (`scrollbar_thumb`/`render_list_scrollbar`, now
+    `pub(super)` so the Agents view reuses them).
+  - `pane/agents_view.rs` (~300) — the **live Agents render** (sibling of `queue_view`). Its own
+    `Row`/`layout_rows`/`row_for_click`/`draw_roster` mirror the queue's idiom (selection band, `> `
+    cursor, scrollbar) but group by **workspace** with herdr's human names; rows = `agent_destination`
+    over `agent_detail`; a placeholder distinguishes "Sampling agents..." (pre-first-sample) from "No
+    agents running." Read-only never — reply/jump are wired through `mod.rs`.
+  - `pane/compose.rs` (~150) — the inline-reply strip, shared by both views: `draw_compose` (`Reply to
+    <label>` rule + `tui-textarea` field + `enter send · esc cancel` hint) and `dim_area` (the veil),
+    both `pub(super)`.
+  - **Testing foundation:** ratatui `TestBackend` snapshot tests in `pane/mod.rs` lock rendered
+    *content* (empty/grouped queue, the tab bar row `Queue     Agents      tab · switch`, the compose
+    strip, the grouped roster + cursor, the placeholders, the toggle) in CI with no herdr, plus model
+    tests for tab-aware selection/reply/jump/anchoring. They trim horizontal styling on purpose (stays
+    under live tuning; the maintainer confirms the pixel look at the terminal).
 - `src/main.rs` — one-line entry into `lib::run_from_env`.
 - `tests/cli.rs` — end-to-end tests that spawn the built binary against a fake `herdr` on
   `HERDR_BIN_PATH`.
@@ -138,10 +166,21 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
 - **`next`** focuses the oldest still-live waiter (`herdr agent focus <pane_id>`) and evicts it **only
   after** the focus succeeds. **`peek`** shows the queue as a toast. **`clear`** empties it.
   **`startup`** re-seeds from `pane list` after a herdr restart.
-- **Status-pane keys:** `j`/`k`/arrows or **left-click** move/select (headers/spacers/detail lines are
-  non-selectable to `j`/`k`, but a click on either row of an entry selects it), `Enter` jump+evict-on-
-  success (**and closes the popup**), **`space` reply inline**, `d` drop, `c` clear-all (`y`/`n`
-  confirm), `q`/`Esc` close.
+- **Two tabs (`Tab`/`Ctrl+S` toggle), one popup.** A persistent **tab bar** tops both views (`Queue |
+  Agents`, active tab banded, dim `tab · switch` tooltip). The popup **opens on Queue when there are
+  waiters, else on Agents** (decided once in `PaneModel::new`; never re-evaluates). The toggle is a
+  pure view switch — it never touches the popup lifecycle (invariant #5); each view keeps its own
+  selection across a toggle.
+- **Queue-view keys:** `j`/`k`/arrows or **left-click** move/select (headers/spacers non-selectable),
+  `Enter` jump+evict-on-success (**and closes the popup**), **`space` reply inline**, `d` drop, `c`
+  clear-all (`y`/`n` confirm), `q`/`Esc` close.
+- **Agents-view keys (full parity, Slice 3):** live roster of **every** agent pane (all states),
+  grouped by workspace with herdr's **human names** (`home / ~ · pane 1`), refreshed ~1s by the
+  sampler thread. `j`/`k`/click select (**selection anchored by `pane_id`** so the 1s refresh never
+  yanks the cursor); `space` reply and `Enter` jump target the selected roster agent through the SAME
+  handlers as the Queue (`arm_reply`, `on_enter` — focus then evict-on-success, idempotent since the
+  agent may not be queued). `d`/`c` are Queue-only (durable-queue ops). No time-in-state / last-line
+  yet (Slices 4-5).
 - **Row copy (the render — this session's redesign):** each waiter is **two lines** — the bright
   destination `{workspace} · {tab} · {pane}` then the dim detail `{status} · {title} · {waited}` —
   location-first, mirroring herdr's `prefix+g` go-to breadcrumb. Every segment prefers its human name
@@ -257,57 +296,77 @@ key. After editing: `herdr config check && herdr server reload-config`.
 
 ## 6. Next up (START HERE)
 
-### BIG FEATURE (priority) — the Agents view. See [docs/agents-view-design.md](docs/agents-view-design.md).
-The next evolution: add a live **Agents view** roster beside the durable queue in the popup, mirroring
-Claude Code's agent view but powered by herdr primitives. **Fully aligned with the maintainer**
-(research → interview → Fable advisory, 2026-07-22) and specced end-to-end in
-`docs/agents-view-design.md` — read it first. In brief:
-- Two views in one popup, `Tab`/`Ctrl+S` toggle: **Queue** (durable, unchanged) + **Agents** (live).
-- Agents lists **every** detected agent pane (all states), grouped by workspace; row status = the last
-  terminal line via `agent read`; time = **time-in-state stamped by the `status-changed` event binary**
-  (the pane isn't running to observe transitions — poll-loop tracking would fabricate zeros).
-- Actions: `Enter` jump, `space` reply. **Peek deferred; reorder is pin-to-top only.**
-- **Surface: the popup modal is KEPT** (re-ruled under the live-roster premise, not the old
-  triage-queue one — Fable, design doc §9). Not a dedicated pane/tab: the Agents view is a
-  *switchboard* (cross-workspace consolidation on demand, rows are jump targets), which is a summon
-  job; herdr toasts + the workspace itself already own ambient awareness. Two refinements fold in:
-  (a) **ratatui `TestBackend` snapshot tests** (Slice 0/2) to retire the eyeball-only QA pain;
-  (b) treat popup **width/height as a tunable** — bump 50%×50% toward ~85–90% at Slice 2 if the roster
-  reads cramped. Surface is a `--placement` flag, so the choice stays cheaply reversible.
-- Live data via a **worker thread** (never CLI on the render tick); `roster.json` is a **separate,
-  prunable** store from `state.json` (new **invariant #7**).
-- **Build order (tracer-bullet, each green + eyeballed):** ~~Slice 0 split `pane.rs`~~ **DONE** →
-  ~~1 data seam + `roster.rs` + hidden `roster` debug cmd~~ **DONE** → 2 tab toggle + read-only live
-  roster — the tracer bullet (**START HERE, issue #3**) → 3 jump/reply parity → 4 last-line column →
-  5 `roster.json` + time-in-state → 6 pin-to-top. Full slice table in the design doc §8.
-- **Per-slice tracker: GitHub issues [#1–#7](https://github.com/Akram012388/herdr-checkin/issues)**
-  (Slice 0→#1 … Slice 6→#7), dependency-ordered, labeled `ready-for-agent` (AFK: #1/#2/#6) or
-  `ready-for-human` (HITL live-eyeball: #3/#4/#5/#7). This doc + the design doc are the durable
-  in-repo tracker; the issues are the work queue. **Start with #1** (Slice 0, AFK, no blockers).
+### The Agents view — Slices 0-3 DONE, next is Slice 4. See [docs/agents-view-design.md](docs/agents-view-design.md).
+The live **Agents view** roster now sits beside the durable Queue in the popup (`Tab`/`Ctrl+S`).
+Slices 0-3 shipped this session (see the header for the commit-by-commit summary and `agents-view-
+design.md` §8 for the full slice table). **Remaining work, in order:**
 
-### DONE this session (folded into untagged 0.4.0)
-- **`ctrl+u` in the reply bar** now clears to line-start. Root cause: tui-textarea 0.7 binds `ctrl+u`
-  to `undo` (delete-to-head is on `ctrl+j`), so the old binding did nothing expected. Fix: intercept
-  `Char('u')+CONTROL` in the reply branch → `delete_line_by_head` (`pane.rs`), unit-tested. **Watch out:**
-  the live pane runs `target/release/herdr-checkin` — a `cargo test` (debug) does NOT update it; rebuild
-  `--release` before eyeballing.
-- **CI clippy break fixed** — `collapsible_match` in the `Event::Paste` arm (`pane.rs`) had shipped on
-  `6f6f9fc`; `main` is green again.
+1. **HITL confirm (#3/#4), then close them.** The Agents-view jump+reply was built + CI-green +
+   visually confirmed (names/tab bar/cursor/empty-queue default), but the live drive — `Enter` to jump
+   to a real agent, `space` to reply — wasn't explicitly signed off. Open the popup, `Tab` to Agents,
+   do both against a real agent (use `/herdr` to spawn/prompt one). If good, close #3 and #4. **The
+   live pane runs `target/release/herdr-checkin`** — `cargo test` (debug) does NOT update it; `cargo
+   build --release` before eyeballing.
+2. **Slice 4 / issue [#5](https://github.com/Akram012388/herdr-checkin/issues/5)** — the last-line
+   status column: a **2s** visible-rows `herdr agent read` sweep on the sampler thread, budgeted
+   round-robin (~15 panes/sweep), invalidate-immediately-on-status-change, **never-blank cache**
+   (a row keeps its last known line while a fresh read is in flight). Row becomes `{status} · {title}`
+   → `{status} · {last terminal line}`. HITL: smooth with 5+ agents, lines track real output.
+3. **Slice 5 / issue [#6](https://github.com/Akram012388/herdr-checkin/issues/6)** — `roster.json` +
+   `RosterStore` (a **separate, prunable** store from `state.json` = **new invariant #7**: deleting it
+   only degrades timers/pins, never a ping). Time-in-state is **stamped by the `status-changed` event
+   binary** into the store (the pane isn't running to observe transitions — poll-loop tracking would
+   fabricate `0s`); rows show `blocked 4m` / an honest `~` when unknown. Startup seeds additively
+   (idempotence test). AFK-ish + a data-path test.
+4. **Slice 6 / issue [#7](https://github.com/Akram012388/herdr-checkin/issues/7)** — pin-to-top,
+   persisted by **`agent_session` uuid, not `pane_id`** (positional/reusable), with tombstone GC. Pins
+   float to the top **of their workspace group**. Survives popup reopen + pane-slot reuse.
+
+- **Tracker: GitHub issues [#1–#7](https://github.com/Akram012388/herdr-checkin/issues)** (Slice 0→#1
+  … Slice 6→#7). **#1 (Slice 0)** stays open pending the maintainer's pixel-identical popup eyeball.
+  #2 done. #3/#4 built (see step 1). **#5 is the next build.** This doc + the design doc are the
+  durable in-repo tracker; the issues are the work queue.
+
+### PARKED architectural fork — "dissolve the Queue view into the roster" (do NOT start without a re-decision)
+The maintainer mused whether the Queue is still needed now the Agents view is dominant. Explored +
+**Fable-5 consulted**; decision: **keep both tabs** + the empty-queue→Agents default (both shipped).
+The unification idea is **deferred, not dead**, and slices 4-6 build its machinery anyway. If it's
+ever revisited, the Fable guidance to honor (do not re-derive):
+- **The backbone stays.** A 1s foreground poll CANNOT replace the durable event path: `herdr agent
+  list` carries **no timestamps** (only `revision`/`state_change_seq`), and the plugin **has no
+  daemon** — the event binaries are the only code running while the popup is closed (so wait-time,
+  FIFO, "you never saw this `done`", and notifications are not reconstructible from polling). Kill the
+  Queue *view* if anything, never the ledger + notifications.
+- **#1 risk = identity join.** Key the durable ledger by **`agent_session` uuid, NOT `pane_id`**
+  (positional + reusable → a new agent in a reused pane inherits a stale badge). Needs a fallback:
+  our own fixture's `amp` agent has **no `agent_session`**. This is where "never lose a ping" dies
+  silently — write the join rule as code with a fixture test in the very first slice.
+- **Ordering = partition, don't pick a winner:** a pinned "Needs you (N)" FIFO section on top, the
+  normal stable workspace-grouped roster below. And **freeze row re-ordering while a selection is
+  active** (else the FIFO head moves between glance and keystroke → wrong-agent jump under load).
+- **Acknowledgment asymmetry:** `done` → ack clears the badge; `blocked` → a dismissed badge on a
+  still-blocked agent is a lie, so it clears only by *answering* (act-then-clear-badge-on-success — the
+  same shape as today's act-then-evict, keep the tests). Keep ONE `Enter` (always jumps).
+- **Reversible first step:** a READ-ONLY overlay on the Agents view (badge + `blocked 8m` wait-time +
+  pinned needs-you section, `state.json`-sourced, **zero writes**, both tabs alive). Live a week; delete
+  the Queue view only if you stop reaching for `Tab`. The ack/eviction rewiring lands BEFORE the view
+  deletion, and port the invariant tests first.
 
 ### Continue polishing (maintainer's standing intent)
 Small, tasteful, terminal-first QoL — the same bar as this session. Candidates, low-priority, pick by
 feel and eyeball live: fine-tune the `SELECTION_BG` grey shade if it reads too dark/light; the reply
-placeholder shade; the two-line indent. **Refresh `docs/pane-demo.gif`** — it predates all of this
-session's changes (old single-line reply footer, no two-line rows, no grey band); regenerate with the
+placeholder shade; the two-line indent. **Refresh `docs/pane-demo.gif`** — now badly stale: it
+predates the two-line rows/grey band AND the entire Agents view (no tab bar, no roster, no `tab ·
+switch`); a good refresh should show the `Tab` toggle and the live roster. Regenerate with the
 **`demo-gif`** skill (VHS; `scripts/pane-demo.tape` + `scripts/pane-demo-setup.sh`, no real agents)
-once the polish settles. **Deferred by the maintainer until all polish is done.** Two findings from
-a first pass, apply when regenerating:
+once the feature settles. **Deferred by the maintainer.** Two findings from a first pass, apply when
+regenerating:
   1. **Seed needs the four identity fields.** `pane-demo-setup.sh`'s `state.json` predates the
      redesign — add `tab_id`/`workspace_label`/`tab_label` (leave `pane_label:null`) to each entry
      so the two-line destination renders human names (`api-server · claude · pane 1`) instead of
      sparse id fallbacks.
   2. **The tape's mid-sequence `Enter` now EXITS the pane.** A successful jump returns `Ok(())` and
-     closes the pane regardless of popup mode (`pane.rs` ~L160), and the demo's fake `agent focus`
+     closes the pane regardless of popup mode (`on_enter` in `pane/mod.rs`), and the demo's fake `agent focus`
      always succeeds — so the current tape's `Enter` (between reply and `d`) drops to the shell and
      the following `d`/`c`/`y`/`q` leak there. Reorder so the jump is the FINAL action (end on it
      instead of `q`), or drop the jump step.
@@ -352,9 +411,9 @@ call — **do NOT tag autonomously.**
   `herdr pane/workspace/tab list`, `agent prompt`/`focus`. The tool for any live probe or E2E.
 - **`demo-gif`** — regenerate the README demo gif (VHS; no real agents).
 - **Sonnet-5 subagents** for research/exploration and mechanical implementation (maintainer preference:
-  delegate mechanical work; this session's tui-textarea swap was a Sonnet implementation from a recorded
-  spec). A **Fable-5 advisor** for genuine load-bearing calls, used sparingly (this session: the input-
-  scope call).
+  delegate mechanical work; this session's empty-queue-default was a clean Sonnet implementation from a
+  tightly-scoped spec). A **Fable-5 advisor** for genuine load-bearing calls, used sparingly (this
+  session: the "do we still need the Queue?" architecture consult — see §6's parked fork).
 - **`/handoff`** — to snapshot again at the end of the next session.
 
 ## 7. How we work here (see CLAUDE.md for the short version)
