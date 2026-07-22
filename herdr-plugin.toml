@@ -1,0 +1,43 @@
+id = "Akram012388.checkin"
+name = "Check-in"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Durable attention queue for agent panes: queue agents that go blocked or done, then jump to the oldest waiter on demand."
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+platforms = ["linux", "macos"]
+
+# Actions. Keybinds live in the user's herdr config (~/.config/herdr/config.toml),
+# not here — bind Akram012388.checkin.next to prefix+alt+o there.
+[[actions]]
+id = "next"
+title = "Check-in: next waiter"
+contexts = ["global", "workspace"]
+command = ["./target/release/herdr-checkin", "next"]
+
+[[actions]]
+id = "peek"
+title = "Check-in: peek queue"
+contexts = ["global", "workspace"]
+command = ["./target/release/herdr-checkin", "peek"]
+
+[[actions]]
+id = "clear"
+title = "Check-in: clear queue"
+contexts = ["global", "workspace"]
+command = ["./target/release/herdr-checkin", "clear"]
+
+# Events. Enqueue on agent status changes; evict on focus and close.
+[[events]]
+on = "pane.agent_status_changed"
+command = ["./target/release/herdr-checkin", "status-changed"]
+
+[[events]]
+on = "pane.focused"
+command = ["./target/release/herdr-checkin", "focused"]
+
+[[events]]
+on = "pane.closed"
+command = ["./target/release/herdr-checkin", "closed"]
