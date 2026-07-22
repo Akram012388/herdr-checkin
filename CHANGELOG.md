@@ -4,23 +4,51 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-07-22
+
+The triage-overlay release: the status pane becomes an agents-view console you can **reply into**,
+rendered as an overlay. Bundles the previously-unreleased pane features (clear-all, mouse-select,
+module split) with the overlay, inline reply, and grouped render as one interface release.
 
 ### Added
+- **Triage overlay — the status pane is now an agents-view console.** `open-pane` opens the pane as
+  an **overlay** (previously a split), styled after the Claude Code agents view: enqueued waiters are
+  grouped into **AWAITING YOU** (`blocked`) and **DONE** (`done`) sections, oldest-first within each.
+  It stays an inbox of what pinged you — only enqueued waiters ever appear, never a live roster of all
+  agents. Section headers are non-selectable; `j`/`k` and click move in on-screen order across the
+  sections, and selection stays anchored to its entry as the queue changes. Launcher-only switch
+  (`--placement overlay`); the open/focus/close toggle is unchanged (it keys off the pane label). The
+  overlay persists on blur and stays keyboard-interactive.
+- **Inline reply (`space`).** Reply to the selected waiter without leaving the pane: `space` opens a
+  reply line, you type an answer, and `Enter` routes it into that agent's session via
+  `herdr agent prompt <pane_id>`, then drops the entry. Fire-and-forget — the entry leaves the queue
+  the instant the send is accepted (reply *is* acknowledgment of the debt); if that agent finishes
+  again it re-enqueues at the tail as a fresh waiter. A failed send **keeps** the entry (act, then
+  evict on success only — the same discipline as `Enter`/jump); `Esc` cancels; an empty/whitespace
+  reply sends nothing and stays in reply mode. The reply target is captured when reply mode is armed,
+  so a concurrent queue refresh can't retarget it.
 - **In-pane `c` = clear-all**, with a confirm. Pressing `c` in the status pane (on a non-empty
   queue) arms a `clear all N entries? y/n` prompt in the footer; `y`/`Y` empties the queue, any
   other key cancels. Reuses the existing `clear` path, so the wipe is a delta under the state lock,
   never a full write-back. No-op on an empty queue, like `d`/`Enter`.
 - **Mouse click-to-select** in the status pane. A left click selects the clicked row, exactly like
-  `j`/`k` landing on it (other mouse events are ignored). A click while a clear-all confirm is
-  pending cancels the confirm rather than reselecting. Mouse capture is enabled/disabled by hand
-  around the TUI (ratatui's init/restore don't touch it) on every exit path, including a chained
-  panic hook so a panic can't leave the shell emitting mouse escapes.
+  `j`/`k` landing on it (other mouse events are ignored); a click on a section header selects
+  nothing, and a click while a clear-all confirm or a reply is pending cancels it rather than
+  reselecting. Mouse capture is enabled/disabled by hand around the TUI (ratatui's init/restore don't
+  touch it) on every exit path, including a chained panic hook so a panic can't leave the shell
+  emitting mouse escapes.
+
+### Changed
+- **`src/lib.rs` split into cohesive modules** (`state`, `herdr`, `queue`, `actions`, `pane`, and a
+  test-only `test_support`), each carrying its own tests; `lib.rs` is now the argv-dispatch
+  orientation page that re-wires the pieces. The queue transitions no longer depend on the herdr seam
+  (enforced by the module boundary, not just a comment). No behavior change.
 
 ### Docs
-- README now embeds an animated demo of the status pane (`docs/pane-demo.gif`), regenerable offline
-  with no real agents via `scripts/pane-demo.tape` + `scripts/pane-demo-setup.sh` (VHS). The key
-  table and the text fallback also now list the `c` (clear) and left-click bindings.
+- README now documents the overlay/agents-view console, the grouped **AWAITING YOU** / **DONE**
+  sections, and the `space` inline-reply key, with a refreshed animated demo (`docs/pane-demo.gif`)
+  — still regenerable offline with no real agents via `scripts/pane-demo.tape` +
+  `scripts/pane-demo-setup.sh` (VHS).
 
 ## [0.3.0] - 2026-07-22
 

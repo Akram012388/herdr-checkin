@@ -5,18 +5,19 @@ User-facing docs: [README.md](README.md). Release log: [CHANGELOG.md](CHANGELOG.
 and the model-tier strategy: [CLAUDE.md](CLAUDE.md). The active feature's authoritative design:
 [docs/triage-overlay-design.md](docs/triage-overlay-design.md).
 
-**Version:** 0.3.0 shipped · **no standalone 0.4.0** — the unshipped `[Unreleased]` pane features
-ship bundled with the triage overlay as the next release (working label 0.5.0; final number at cut
-time) · **License:** MIT · **Repo:** https://github.com/Akram012388/herdr-checkin · **State:** `main`
-is green (fmt + clippy + test, **71 lib + 5 CLI tests**) and pushed, **HEAD `f29f4dc`**. No open
-branches, no worktrees, working tree clean.
+**Version:** **0.4.0 — the triage-overlay release — is cut** (version bumped in `Cargo.toml` +
+`herdr-plugin.toml` + `Cargo.lock`, CHANGELOG dated 2026-07-22, README + demo gif refreshed). **NOT
+tagged** — the maintainer tags on request. · **License:** MIT · **Repo:**
+https://github.com/Akram012388/herdr-checkin · **State:** `main` is green (fmt + clippy + test,
+**71 lib + 5 CLI tests**) and pushed, **HEAD `<this commit>`**. No open branches, no worktrees,
+working tree clean.
 
-**Right now we are mid-build on the triage overlay** (the chosen next interface — a status pane that
-looks and behaves like a Claude Code agents-view TUI, rendered in a herdr overlay). It is
-design-gated (probes passed + a Fable advisor pass) and being built on a 7-slice plan.
-**Slices 1–6 are DONE and committed** — the inline-reply mechanism, the grouped agents-view render,
-and the overlay launcher, all **verified live end-to-end** in herdr 0.7.5 (§6). **START AT §6 — the
-only task left is slice 7**, the docs refresh + the bundled release.
+**The triage overlay is DONE.** All 7 slices shipped: the status pane is now a Claude Code
+agents-view console rendered as a herdr overlay — enqueued waiters grouped into AWAITING YOU
+(`blocked`) / DONE (`done`), navigable/reply-able by keyboard, **verified live end-to-end** in herdr
+0.7.5 (§6). It was design-gated (probes + a Fable advisor pass) and built tracer-bullet on the
+7-slice plan. **START AT §6 — there is no in-flight feature; the release just needs the maintainer's
+tag, and only parked/optional items remain.**
 
 ---
 
@@ -191,14 +192,18 @@ evicted. To exercise placement, open with `herdr plugin pane open … --placemen
 `herdr config check && herdr server reload-config`. (No keybind is needed for `space` reply — that is
 a pane-internal key, handled inside the running TUI.)
 
-## 6. Next up (START HERE) — finish the triage overlay (slice 5 onward)
+## 6. Next up (START HERE) — the triage overlay shipped as 0.4.0; only the tag + parked items remain
 
-The **triage overlay is THE chosen interface** (maintainer decision): a status pane that **looks and
-behaves like a Claude Code agents-view TUI session, rendered via herdr's overlay primitive**. The
-authoritative design (verified probes + Fable advisor pass) is
-[docs/triage-overlay-design.md](docs/triage-overlay-design.md); its §5 is the 7-slice build plan.
-**There is no standalone 0.4.0** — the queued `[Unreleased]` pane features ship bundled with the
-overlay as one release (version set at cut time).
+The **triage overlay was THE chosen interface** (maintainer decision) and is now **built, verified
+live, and cut as 0.4.0**: a status pane that **looks and behaves like a Claude Code agents-view TUI
+session, rendered via herdr's overlay primitive**. The authoritative design (verified probes + Fable
+advisor pass) is [docs/triage-overlay-design.md](docs/triage-overlay-design.md); its §5 was the
+7-slice build plan, **all 7 slices done**.
+
+**Immediate next step: none required.** `main` is green and pushed at 0.4.0 but **not tagged** — the
+maintainer tags on request (do NOT tag autonomously). If asked to release, the code/docs/version are
+all in place; tagging `v0.4.0` at the current HEAD is the only remaining act. Otherwise, only the
+**Parked / optional** items below remain, and they all wait on upstream herdr.
 
 **Data-model guardrail (maintainer + advisor confirmed — do not drift):** the agents-view is a
 **look**, not a pivot. The console stays an **inbox** — only *enqueued waiters* appear, grouped by
@@ -259,12 +264,19 @@ operate on an enqueued entry?* If no, reject.
   agent** routed the typed text into its session via `herdr agent prompt` (the agent began acting) and
   evicted the entry on submit success with a `replied to Claude` footer.
 
-### NEXT — slice 7 (the only task left): docs + the bundled release
-- **Slice 7 — docs + the bundled release.** Update `README.md` (the `space` reply keybind + the
-  overlay/agents-view note + a fresh demo gif via the `demo-gif` skill), `CHANGELOG.md`, and this
-  HANDOFF. Since there is no standalone 0.4.0, this ships the `[Unreleased]` pane features **and** the
-  overlay as one release; set the version at cut time. **Do NOT tag** — the maintainer tags on
-  request.
+- **Slice 7 — docs + the bundled release (cut as 0.4.0).** `README.md` rewritten for the overlay/
+  agents-view console (the `space` reply key, the grouped AWAITING-YOU/DONE sections, headers non-
+  selectable, the fire-and-forget reply semantics) with a **refreshed demo gif** (`docs/pane-demo.gif`,
+  via the updated `scripts/pane-demo.tape` — the tape now shows the grouped view + a `space` reply,
+  rendered offline with the fake herdr; the `*` catch-all covers `agent prompt`). `CHANGELOG.md` has a
+  `[0.4.0] - 2026-07-22` section bundling the overlay, inline reply, grouped render, clear-all,
+  mouse-select, and the module split. Version bumped to **0.4.0** in `Cargo.toml`, `herdr-plugin.toml`,
+  and `Cargo.lock`. **Not tagged** (maintainer tags on request).
+
+### The release is cut — remaining action is the maintainer's tag
+Everything for 0.4.0 is committed and pushed on `main`. The only unreleased step is tagging `v0.4.0`
+at HEAD, which is the maintainer's call — do NOT tag autonomously. Beyond that, see **Parked /
+optional** below (all upstream-gated).
 
 (Commit/push at own discretion is pre-approved for this repo — see the memory index.)
 

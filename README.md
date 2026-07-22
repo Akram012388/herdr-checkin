@@ -6,7 +6,9 @@ Herdr's native jump-to-notification only reaches the toast that is currently on 
 Once a toast fades the ping is gone, and if two agents ping at once you can only reach the
 last one. `herdr-checkin` remembers them: every agent that goes **blocked** (needs input) or
 **done** (finished) is queued, and one keypress jumps you to the oldest waiter and pops it —
-so no ping is lost and agents queue instead of racing.
+so no ping is lost and agents queue instead of racing. A keyboard-driven status pane (styled after
+the Claude Code agents view) groups the waiters and lets you jump to — or reply straight into — the
+one you pick.
 
 ## How it works
 
@@ -31,36 +33,49 @@ consistent.
 | `Akram012388.checkin.next` | Focus the oldest waiting agent and pop it from the queue. Cross-workspace jumps are allowed. Stale entries (pane gone, or resumed to `working`) are skipped. An empty queue is a clean no-op. |
 | `Akram012388.checkin.peek` | Show the current queue as a herdr toast — how many agents are waiting, and for each: agent, status, title, workspace, and how long it has waited. |
 | `Akram012388.checkin.clear` | Empty the queue. |
-| `Akram012388.checkin.open-pane` | Open the **status pane** (see below) — a persistent, keyboard-driven queue view in a split. |
+| `Akram012388.checkin.open-pane` | Open the **status pane** (see below) — a persistent, keyboard-driven triage console, rendered as an overlay. |
 
 `next` uses `herdr agent focus`, which brings the agent's workspace, tab, and pane all into
 view, so a single press takes you straight to the waiting agent wherever it lives.
 
 ## The status pane
 
-`open-pane` opens a persistent TUI in a split — "mission control" for pending agents, a richer
-alternative to the transient `peek` toast. It lists the live queue and lets you jump without
-leaving the keyboard:
+`open-pane` opens a persistent TUI overlay — a triage console styled after the Claude Code agents
+view, and a richer alternative to the transient `peek` toast. Waiters are grouped by status
+(**AWAITING YOU** for `blocked`, **DONE** for `done`, oldest-first within each), and you act on them
+without leaving the keyboard — jump to one, or reply to it inline:
 
-![The status pane: navigate the queue, jump to an agent, drop entries, and clear it](docs/pane-demo.gif)
+![The status pane: grouped waiters, reply inline, jump to an agent, drop entries, and clear the queue](docs/pane-demo.gif)
 
 The same thing as text, if the GIF doesn't load:
 
 ```
-Check-in — 2 agents waiting
-> 1. Claude — blocked — needs your input [wA, 3m]
-  2. Codex — done — build finished [wB, just now]
-j/k move  ·  Enter jump  ·  d drop  ·  c clear  ·  q quit
+Check-in — 4 agents waiting
+  AWAITING YOU
+> Claude — blocked — migrate auth to JWT [api, 8m]
+  Codex — blocked — review terraform plan [infra, 3m]
+  DONE
+  Claude — done — fix flaky snapshot test [web, 5m]
+  Claude — done — rewrite README intro [docs, 1m]
+j/k move  ·  Enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit
 ```
+
+Only enqueued waiters ever appear — it is an inbox of what pinged you, not a live roster of every
+agent (that is herdr's own view). Section headers are labels, not rows: they can't be selected.
 
 | Key | Action |
 | --- | --- |
-| `j` / `k` (or down / up) | Move the selection. |
-| Left click | Select the clicked row (same as `j` / `k`). |
+| `j` / `k` (or down / up) | Move the selection, in on-screen order across the sections. |
+| Left click | Select the clicked row (a click on a section header selects nothing). |
 | `Enter` | Jump to the selected agent (`herdr agent focus`, cross-workspace) and drop it from the queue. If the jump fails, the entry stays and the error shows in the footer. |
-| `d` | Drop the selected entry without jumping. |
+| `space` | **Reply inline:** open a reply line for the selected agent, type an answer, and `Enter` routes it into that agent's session (`herdr agent prompt`), then drops the entry. `Esc` cancels. A failed send keeps the entry. |
+| `d` | Drop the selected entry without acting on it. |
 | `c` | Clear the whole queue, after a `y` / `n` confirm in the footer. |
 | `q` / `Esc` | Close the pane. |
+
+Reply is fire-and-forget: the answer is delivered into the agent's session and the entry leaves the
+queue the instant the send is accepted — the pane never blocks waiting for the agent's next turn. If
+that agent later finishes again it re-enqueues at the tail, as a fresh waiter.
 
 The pane refreshes itself — herdr delivers events only to short-lived handlers, not to a
 running pane, so it re-reads the shared queue on a 250ms tick. As agents queue and drain (or you

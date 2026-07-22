@@ -11,7 +11,7 @@ Set Theme "TokyoNight"
 Set FontSize 13
 Set FontFamily "JetBrainsMono Nerd Font"
 Set Width 1200
-Set Height 460
+Set Height 500
 Set Padding 24
 Set TypingSpeed 60ms
 
@@ -22,17 +22,21 @@ Type "clear" Enter
 Show
 Sleep 500ms
 
-# --- Open the pane: four agents waiting ---------------------------------
+# --- Open the pane: waiters grouped into AWAITING YOU / DONE sections ----
 Type "herdr-checkin pane" Enter
 Sleep 2.5s
 
-# --- Move the selection with j / k --------------------------------------
+# --- Move the selection with j (display order, across the sections) ------
 Type "j"
-Sleep 700ms
-Type "j"
-Sleep 700ms
-Type "k"
 Sleep 900ms
+
+# --- space: reply inline — route an answer into the agent, then evict ----
+Type " "
+Sleep 1s
+Type "rebase onto main"
+Sleep 1.2s
+Enter
+Sleep 2.2s
 
 # --- Enter: jump to the selected agent and drop it ----------------------
 Enter
@@ -44,7 +48,7 @@ Sleep 1.8s
 
 # --- c: clear-all, with a confirm ---------------------------------------
 Type "c"
-Sleep 1.8s
+Sleep 1.5s
 Type "y"
 Sleep 2s
 
