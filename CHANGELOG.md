@@ -24,13 +24,19 @@ release.
   `q`/`Esc` dismisses it, and a successful `Enter` jump closes it too (the pane calls the
   `popup.close` socket method on exit).
 - **Inline reply (`space`).** Reply to the selected waiter without leaving the pane: `space` opens a
-  reply line, you type an answer, and `Enter` routes it into that agent's session via
+  compose strip, you type an answer, and `Enter` routes it into that agent's session via
   `herdr agent prompt <pane_id>`, then drops the entry. Fire-and-forget — the entry leaves the queue
   the instant the send is accepted (reply *is* acknowledgment of the debt); if that agent finishes
   again it re-enqueues at the tail as a fresh waiter. A failed send **keeps** the entry (act, then
   evict on success only — the same discipline as `Enter`/jump); `Esc` cancels; an empty/whitespace
   reply sends nothing and stays in reply mode. The reply target is captured when reply mode is armed,
-  so a concurrent queue refresh can't retarget it.
+  so a concurrent queue refresh can't retarget it. Composing darkens the queue as one veil so the
+  strip is the only lit surface: a titled `Reply to <label>` rule, a 1-3 row input that character-
+  wraps by display width (unicode-width aware) and drives the real terminal cursor, and a
+  right-aligned `enter send · esc cancel` hint — colorless, matching herdr's restrained modal look.
+- **Scrollbar when the queue overflows the popup.** When the grouped rows exceed the visible height,
+  a 1-column scrollbar (dim track, brighter thumb) appears at the right edge so off-screen waiters
+  are discoverable; the list already scrolls to keep the selection in view.
 - **In-pane `c` = clear-all**, with a confirm. Pressing `c` in the status pane (on a non-empty
   queue) arms a `clear all N entries? y/n` prompt in the footer; `y`/`Y` empties the queue, any
   other key cancels. Reuses the existing `clear` path, so the wipe is a delta under the state lock,

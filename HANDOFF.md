@@ -9,14 +9,14 @@ later pivoted to a popup: [docs/triage-overlay-design.md](docs/triage-overlay-de
 `herdr-plugin.toml` + `Cargo.lock`, CHANGELOG dated 2026-07-22, README + demo gif refreshed). **NOT
 tagged** — the maintainer tags on request. · **License:** MIT · **Repo:**
 https://github.com/Akram012388/herdr-checkin · **State:** `main` is green (fmt + clippy + test,
-**67 lib + 5 CLI tests**) and pushed; latest substantive commit `1d21213` (the overlay→popup switch).
-No open branches, no worktrees, working tree clean.
+**77 lib + 5 CLI tests**) and pushed; HEAD `9ce89c0`. No open branches, no worktrees, working tree
+clean.
 
-**START HERE — the maintainer has pending edits to land.** Before anything else, the maintainer is
-handing you a specific set of edits (they will describe them directly at the start of the session).
-Those edits are the immediate task: apply them, keep the CI gate green after each change
-(`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`), then commit and push
-(pre-approved for this repo). Everything below is orientation and what remains once those edits are in.
+**A UI/UX/DX polish pass landed on top of the 0.4.0 cut (untagged, folded into the 0.4.0 CHANGELOG
+entry):** popup sized to **50% x 50%** (`1b6018f`); a **scrollbar** on queue overflow (`c7622bb`);
+and the **inline reply redesigned as a docked compose strip** (`9ce89c0`) — dim-the-queue veil,
+titled `Reply to <label>` rule, 1-3 row unicode-width-aware wrapped input on the **real terminal
+cursor** (the fake `_` is gone), right-aligned degrading hint, dim-italic placeholder. See §6.
 
 **The status pane shipped as a centered popup modal.** It looks and behaves like herdr's own
 `prefix+s` settings popup: a session-level `--placement popup` that herdr draws with a border +
@@ -76,10 +76,13 @@ code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still re
 - `src/test_support.rs` (~165) — `#[cfg(test)]`-only shared fake `Herdr` + state fixtures. The
   `FakeHerdr` records `focused`, `prompts` (`(pane_id, text)`), and `notifications`, with
   `with_failing_focus`/`with_failing_prompt` toggles; `popup_close` is a no-op.
-- `src/pane.rs` (~880) — the ratatui TUI (`PaneModel`, event loop, grouped view, mouse hit-testing),
-  the **inline reply mode**, the **grouped CHECKIN/DONE render** (`layout_rows` → `Row::Spacer |
-  Header | Entry`), and the **popup lifecycle** (close-on-exit + close-on-jump). Pure model code is
-  unit-tested; the terminal loop is thin.
+- `src/pane.rs` (~1100) — the ratatui TUI (`PaneModel`, event loop, grouped view, mouse hit-testing),
+  the **inline reply compose strip** (`draw_compose` + the pure `wrap_display` / `truncate_display` /
+  `reply_hint` / `input_width` helpers + the `dim_area` veil + real-cursor placement), the **overflow
+  scrollbar** (`draw_list` reserves a column; pure `scrollbar_thumb` + thin `render_list_scrollbar`),
+  the **grouped CHECKIN/DONE render** (`layout_rows` → `Row::Spacer | Header | Entry`), and the
+  **popup lifecycle** (close-on-exit + close-on-jump). Pure model + view helpers are unit-tested; the
+  terminal loop and buffer-drawing shells are thin.
 - `src/main.rs` — one-line entry into `lib::run_from_env`.
 - `tests/cli.rs` — end-to-end tests that spawn the built binary against a fake `herdr` on
   `HERDR_BIN_PATH`.
@@ -107,11 +110,25 @@ code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still re
   Pure view over the ordered `Vec` — it never reorders `entries`. `selected` stays an index into
   `entries`; only `draw`/`row_for_click` learn the spacer+header offsets. The top line is just the
   count (herdr draws "Check-in" on the popup border).
-- **Inline reply:** `space` opens a reply line for the selected waiter; you type an answer and
+- **Inline reply:** `space` opens a **compose strip** for the selected waiter; you type an answer and
   `Enter` routes it into that agent's session via `herdr agent prompt <pane_id> <text>`, then evicts
   the entry **only on submit success** (a failed submit keeps it). `Esc`/click cancels; the reply's
   **target is captured when reply mode is armed**, so a concurrent queue refresh can't retarget it.
-  Empty/whitespace `Enter` sends nothing and stays in reply mode.
+  Empty/whitespace `Enter` sends nothing and stays in reply mode. The strip (`draw_compose`) dims the
+  header + queue as one `dim_area` veil (focus by receding everything else) and drops the reversed
+  highlight to a plain `> ` marker on the captured target; it shows a titled `Reply to <label>` rule
+  (label bold, dim dashes, ellipsis-truncated on a narrow popup), a **1-`MAX_INPUT_ROWS`(=3)** input
+  that **character-wraps by display width** (`wrap_display`, unicode-width aware so wide chars don't
+  drift the caret) showing the tail, and a right-aligned `enter send · esc cancel` hint that degrades
+  to `enter · esc` under width pressure. It drives the **real terminal cursor**
+  (`Frame::set_cursor_position`) to the end of the text — no fake `_` caret — and shows a dim-italic
+  `type your reply` placeholder on an empty buffer. Colorless throughout (bold/dim/italic/reversed
+  only), matching herdr's restrained modal aesthetic.
+- **Overflow scrollbar:** when the grouped rows exceed the visible height, `draw_list` reserves the
+  right-most column and draws a 1-column scrollbar (dim track, brighter thumb) sized/positioned from
+  the list's live `ListState` offset. `List`+`ListState` already scrolls to keep the selection in
+  view; the bar only makes off-screen waiters discoverable. Thumb geometry (`scrollbar_thumb`) is
+  pure and unit-tested.
 
 **Invariants (do not regress — each has a regression test):**
 1. **Mutations are deltas** through `StateStore::update` (read-modify-write under the lock), never a
@@ -232,37 +249,42 @@ a pane-internal key.)
 
 ## 6. Next up (START HERE)
 
-### 0. Pending maintainer edits — the immediate task
-The maintainer has a specific set of edits to land and will describe them to you directly at the
-start of the session. **Apply those first.** Keep the CI gate green after each change
-(`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`), then commit/push
-(pre-approved for this repo). Only once those are in should you weigh the items below.
+### 0. The UI/UX/DX polish pass — DONE this session
+The maintainer's three polish edits are landed, green, and pushed (folded into the untagged 0.4.0):
+**(1)** popup sized **50% x 50%** in both `herdr-plugin.toml` `[[panes]]` and `scripts/open-pane.sh`
+(`1b6018f`); **(2)** an **overflow scrollbar** in `draw_list` (`c7622bb`); **(3)** the **inline reply
+compose strip** (`9ce89c0`). Grounded in two subagent studies of the herdr 0.7.5 source (bg-dim
+reachability + scroll mechanics) and a Fable design pass on the reply strip. Nothing pending here.
 
 ### Release status
-0.4.0 is **cut but not tagged**. All code/docs/version are in place on `main`. Tagging `v0.4.0` at
-HEAD is the maintainer's call — **do NOT tag autonomously.** (Note: the pending edits above may add
-commits on top of the current HEAD before any tag.)
+0.4.0 is **cut but not tagged**, now with the polish pass on top. All code/docs/version are in place
+on `main`. Tagging `v0.4.0` at HEAD (`9ce89c0`) is the maintainer's call — **do NOT tag
+autonomously.**
 
-### Two open follow-ups the maintainer flagged (both optional)
-1. **Background-dim upstream PR (herdr-core, optional).** The popup does not dim the panes behind it
-   the way `prefix+s` settings does. This is **not fixable from the plugin** — dimming is herdr-core-
-   only (`render_popup_pane` in the herdr source never calls `dim_background`; only its `Mode`-driven
-   native modals do, over `frame.area()`). Closing it means a small (~1-line) contribution to
-   `ogulcancelik/herdr`: call `dim_background(frame, frame.area())` around `render_popup_pane`
-   (`src/ui.rs`, ~the `render_popup_pane` call site), gated on `app.popup_pane.is_some()`. It only
-   takes effect after merge + a herdr release + the user updating herdr — a slow external track. The
-   maintainer chose to **ship 0.4.0 without the dim** (border + centering + title already read as a
-   modal). Draft the PR only if the maintainer asks.
-2. **Popup size tuning (plugin-side, trivial).** The popup is sized `width="60%" height="55%"` — set
-   in **two places that must stay in sync**: the `[[panes]]` entry in `herdr-plugin.toml` (integer =
-   cells, `"NN%"` string = percent) and the `--width`/`--height` flags in `scripts/open-pane.sh`.
-   Retuning is a one-line edit in each; re-run `herdr plugin link "$PWD"` to pick up the manifest
-   change.
+### One open follow-up (optional, upstream-gated)
+1. **Background-dim upstream PR (herdr-core).** The popup still does not dim the panes *behind* it the
+   way `prefix+s` settings does. **Confirmed not fixable from the plugin** — a Sonnet source study of
+   herdr 0.7.5 (`ogulcancelik/herdr`, at `c234f22`) verified `render_popup_pane` never calls
+   `dim_background` and there is no manifest/config/IPC knob for it; `dim_background` is a private
+   `fn` in `src/ui.rs:552` that only the five `Mode`-driven native modals call. The dim is drawn by
+   herdr's compositor over the surrounding panes, which our TUI process can't reach. **Exact upstream
+   fix:** in `src/ui/panes.rs`, function `render_popup_pane` (~lines 401-429), insert
+   `super::dim_background(frame, area);` right after the three early-return guards and before the
+   `Clear`/`Block`/`rt.render` calls — mirroring `settings.rs:44`. No visibility changes needed
+   (`panes.rs` is a sibling module under `ui`). One line. It only takes effect after merge + a herdr
+   release + the user updating herdr — a slow external track. Draft the PR only if the maintainer asks.
+   (Note: the plugin *does* dim its **own** interior queue while composing a reply — see §3 `dim_area`
+   — but that is inside our pane and unrelated to dimming the background panes behind the popup.)
 
-### Parked / optional (all upstream-gated)
-- **Global-summon popup** — the popup is summoned by a herdr keybind (`prefix+alt+q`) and is
-  session-global, which is the value. A dedicated `prefix+s`-style global-summon binding for it is
-  not wired; low priority.
+### Parked / optional
+- **Refresh the demo gif (docs, plugin-side).** `docs/pane-demo.gif` predates the polish pass, so it
+  still shows the old single-line reply footer (with the fake `_` caret) and the 55%-tall popup, not
+  the new compose strip / 50% size. Regenerate with the **`demo-gif`** skill (VHS;
+  `scripts/pane-demo.tape` + `scripts/pane-demo-setup.sh`, no real agents). Left for after the
+  maintainer eyeballs the new look live.
+- **Global-summon popup** *(upstream-gated)* — the popup is summoned by a herdr keybind
+  (`prefix+alt+q`) and is session-global, which is the value. A dedicated `prefix+s`-style
+  global-summon binding for it is not wired; low priority.
 - **Docs note** — herdr 0.7.5 made plugin install/enabled state global-per-user; only relevant if a
   per-session-install section is ever added to the README.
 

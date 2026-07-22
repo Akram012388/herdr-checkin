@@ -71,7 +71,7 @@ agent (that is herdr's own view). Section headers are labels, not rows: they can
 | `j` / `k` (or down / up) | Move the selection, in on-screen order across the sections. |
 | Left click | Select the clicked row (a click on a section header selects nothing). |
 | `Enter` | Jump to the selected agent (`herdr agent focus`, cross-workspace), drop it from the queue, and close the popup. If the jump fails, the entry stays, the popup stays open, and the error shows in the footer. |
-| `space` | **Reply inline:** open a reply line for the selected agent, type an answer, and `Enter` routes it into that agent's session (`herdr agent prompt`), then drops the entry. `Esc` cancels. A failed send keeps the entry. |
+| `space` | **Reply inline:** open a compose strip for the selected agent (the queue dims behind it), type an answer, and `Enter` routes it into that agent's session (`herdr agent prompt`), then drops the entry. `Esc` cancels. A failed send keeps the entry. |
 | `d` | Drop the selected entry without acting on it. |
 | `c` | Clear the whole queue, after a `y` / `n` confirm in the footer. |
 | `q` / `Esc` | Close the pane, dismissing its popup. |
