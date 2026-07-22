@@ -8,14 +8,14 @@ and the model-tier strategy: [CLAUDE.md](CLAUDE.md). The active feature's author
 **Version:** 0.3.0 shipped · **no standalone 0.4.0** — the unshipped `[Unreleased]` pane features
 ship bundled with the triage overlay as the next release (working label 0.5.0; final number at cut
 time) · **License:** MIT · **Repo:** https://github.com/Akram012388/herdr-checkin · **State:** `main`
-is green (fmt + clippy + test, **67 lib + 5 CLI tests**) and pushed, **HEAD `646c285`**. No open
+is green (fmt + clippy + test, **70 lib + 5 CLI tests**) and pushed, **HEAD `74220d2`**. No open
 branches, no worktrees, working tree clean.
 
 **Right now we are mid-build on the triage overlay** (the chosen next interface — a status pane that
 looks and behaves like a Claude Code agents-view TUI, rendered in a herdr overlay). It is
 design-gated (probes passed + a Fable advisor pass) and being built on a 7-slice plan.
-**Slices 1–4 are DONE and committed** (the inline-reply mechanism). **START AT §6 — the next task is
-slice 5**, the interface-defining grouped agents-view render.
+**Slices 1–5 are DONE and committed** (the inline-reply mechanism + the grouped agents-view render).
+**START AT §6 — the next task is slice 6**, the launcher overlay switch + the first live manual E2E.
 
 ---
 
@@ -227,25 +227,36 @@ operate on an enqueued entry?* If no, reject.
     `space reply`.
   - Support: `agent_label` extracted to `src/actions.rs` (shared list+footer naming);
     `FakeHerdr::with_failing_prompt` for the keep-on-failure test.
+- **Slice 5** (`74220d2`): the **grouped agents-view render** in `src/pane.rs` — the CC-agents-view
+  look. Pure view + click-mapping; no new model state, no queue-invariant surface. What exists now:
+  - `layout_rows(&[QueueEntry]) -> Vec<Row>` groups the FIFO queue into sections — `AWAITING YOU`
+    (`blocked`) then `DONE` (`done`), FIFO within each — as a pure view transform. `Row` is
+    `Header(&'static str) | Entry(usize)`; each `Entry` keeps its **original index into `entries`**,
+    and a section header is emitted only when that section is non-empty. It never reorders `entries`.
+  - `draw` renders through `layout_rows` and highlights the display row carrying `model.selected`
+    (headers are never selected). The leading `N.` numbering is gone — section membership + the `>`
+    cursor replace it.
+  - `selected` stays an **index into `entries`** (design doc §4 option a); only `draw` and
+    `row_for_click` learn the header offsets, so `selected_pane_id`/`sync`/the `j/k` clamp are
+    untouched. **Note (accepted, per design):** `j`/`k` traverse `entries` in FIFO order, so on an
+    *interleaved* blocked/done queue the cursor can jump between the two on-screen sections. Deemed
+    fine for slice 5 (kept model logic intact); revisit only if display-order traversal is wanted.
+  - `row_for_click(area, offset, &rows, col, row)` maps a click back to an entry index via the
+    grouped `rows`, returning `None` on a header (a header click selects nothing). `on_mouse`
+    recomputes `layout_rows` — entries are unchanged between draw and the click, so it reproduces
+    exactly what was painted.
+  - `WaitStatus` re-export in `lib.rs` is no longer test-only (production `draw`/`layout_rows` name
+    it). Tests: `layout_rows` grouping/FIFO/empty-section, header-skip on click, updated click/mouse.
 
-### NEXT — slice 5: the grouped agents-view render (the interface-defining slice)
-This is the visual identity — the reply mechanism is proven; now make it *look* like the CC agents
-view. It is **pure view + click-mapping**; no new model state, no queue-invariant surface. Per design
-doc §3 (layout) and §4 (the seams):
-- In `draw` (`src/pane.rs`), render the queue in **status sections** — `AWAITING YOU` (`blocked`) then
-  `DONE` (`done`) — FIFO within each. Only enqueued entries appear; no "working"/"idle" section.
-- **Section headers are non-selectable rows.** Keep `PaneModel.selected` an **index into `entries`**
-  (the source of truth — matches `selected_pane_id`, `sync`'s selection-preservation, and the `j/k`
-  clamp); compute the on-screen row from the grouped layout in `draw`. Do NOT reorder `entries`.
-- **`row_for_click` must skip header rows** (a click on a header selects nothing, like a blank row
-  today). Extend its unit tests for the header case.
-- Mock and rationale: design doc §3. Keep the CI gate green.
+### NEXT — slice 6: launcher overlay + the first live manual E2E
+- **Switch `scripts/open-pane.sh`'s open to `--placement overlay`** (the `pane-decision` toggle is
+  placement-independent — it keys off the pane `label`, so no decision-logic change).
+- **Run the full manual E2E in real herdr** — this is the first live end-to-end run of the reply path
+  *and* the grouped render. Verify: grouped AWAITING-YOU/DONE render, `space` reply routes into the
+  agent + evicts, `Enter` jump, overlay summon/blur (persists on blur). See §5 for the recipe (the
+  reply path needs a real agent — `agent prompt` only accepts agent panes). Suggested skill: `/herdr`.
 
-### THEN — slices 6–7
-- **Slice 6 — launcher overlay + manual E2E.** Switch `scripts/open-pane.sh`'s open to
-  `--placement overlay` (the `pane-decision` toggle is placement-independent — it keys off the pane
-  `label`). Run the full manual E2E in real herdr: grouped render, reply, jump, overlay summon/blur.
-  (This is the first live run of the reply path end-to-end — see §5 for the recipe.)
+### THEN — slice 7
 - **Slice 7 — docs + the bundled release.** Update `README.md` (the `space` reply keybind + the
   overlay/agents-view note + a fresh demo gif via the `demo-gif` skill), `CHANGELOG.md`, and this
   HANDOFF. Since there is no standalone 0.4.0, this ships the `[Unreleased]` pane features **and** the
