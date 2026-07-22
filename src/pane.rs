@@ -490,13 +490,35 @@ impl PaneModel {
         self.reply = None;
     }
 
+    /// The entry indices in on-screen order — the `layout_rows` grouping projected down to just its
+    /// entries (headers dropped). `j`/`k` step through *this* order, not raw `entries` order, so the
+    /// cursor moves monotonically down the screen even when the FIFO queue interleaves blocked and
+    /// done. Derived from the same `layout_rows` the view paints, so traversal and layout can't drift.
+    fn display_order(&self) -> Vec<usize> {
+        layout_rows(&self.entries)
+            .into_iter()
+            .filter_map(|row| match row {
+                Row::Entry(index) => Some(index),
+                Row::Header(_) => None,
+            })
+            .collect()
+    }
+
     fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        let order = self.display_order();
+        if let Some(pos) = order.iter().position(|&index| index == self.selected) {
+            if pos > 0 {
+                self.selected = order[pos - 1];
+            }
+        }
     }
 
     fn move_down(&mut self) {
-        if self.selected + 1 < self.entries.len() {
-            self.selected += 1;
+        let order = self.display_order();
+        if let Some(pos) = order.iter().position(|&index| index == self.selected) {
+            if pos + 1 < order.len() {
+                self.selected = order[pos + 1];
+            }
         }
     }
 
@@ -690,6 +712,39 @@ mod tests {
         assert_eq!(m.selected, 1);
         m.move_up();
         assert_eq!(m.selected, 0);
+    }
+
+    #[test]
+    fn move_down_and_up_follow_display_order_across_sections() {
+        // FIFO entries interleave blocked/done: [blocked0, done1, blocked2, done3]. The grouped
+        // display order is AWAITING YOU (0, 2) then DONE (1, 3), so j/k must visit 0 -> 2 -> 1 -> 3
+        // — crossing the section boundary monotonically down-screen, not stepping through `entries`.
+        let mut m = PaneModel::new(vec![
+            entry_with_status("w0:p1", WaitStatus::Blocked),
+            entry_with_status("w1:p1", WaitStatus::Done),
+            entry_with_status("w2:p1", WaitStatus::Blocked),
+            entry_with_status("w3:p1", WaitStatus::Done),
+        ]);
+        assert_eq!(m.selected, 0); // blocked0, the first AWAITING YOU row
+        m.move_down();
+        assert_eq!(
+            m.selected, 2,
+            "next display row is blocked2, not entries[1]"
+        );
+        m.move_down();
+        assert_eq!(m.selected, 1, "then crosses into DONE: done1");
+        m.move_down();
+        assert_eq!(m.selected, 3);
+        m.move_down();
+        assert_eq!(m.selected, 3, "clamps at the last display row");
+        m.move_up();
+        assert_eq!(m.selected, 1);
+        m.move_up();
+        assert_eq!(m.selected, 2);
+        m.move_up();
+        assert_eq!(m.selected, 0);
+        m.move_up();
+        assert_eq!(m.selected, 0, "clamps at the first display row");
     }
 
     #[test]

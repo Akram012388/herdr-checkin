@@ -237,10 +237,11 @@ operate on an enqueued entry?* If no, reject.
     (headers are never selected). The leading `N.` numbering is gone — section membership + the `>`
     cursor replace it.
   - `selected` stays an **index into `entries`** (design doc §4 option a); only `draw` and
-    `row_for_click` learn the header offsets, so `selected_pane_id`/`sync`/the `j/k` clamp are
-    untouched. **Note (accepted, per design):** `j`/`k` traverse `entries` in FIFO order, so on an
-    *interleaved* blocked/done queue the cursor can jump between the two on-screen sections. Deemed
-    fine for slice 5 (kept model logic intact); revisit only if display-order traversal is wanted.
+    `row_for_click` learn the header offsets, so `selected_pane_id`/`sync`/reply-target capture are
+    untouched. **`j`/`k` traverse in on-screen display order** (`PaneModel::display_order` — the same
+    `layout_rows` grouping projected to its entries), so the cursor moves monotonically down-screen
+    even when the FIFO queue interleaves blocked/done. The selection *representation* is unchanged (an
+    entry index); only the traversal *order* is derived from the layout, so it can't drift from paint.
   - `row_for_click(area, offset, &rows, col, row)` maps a click back to an entry index via the
     grouped `rows`, returning `None` on a header (a header click selects nothing). `on_mouse`
     recomputes `layout_rows` — entries are unchanged between draw and the click, so it reproduces
