@@ -9,7 +9,7 @@ and the model-tier strategy: [CLAUDE.md](CLAUDE.md). The active feature's author
 `herdr-plugin.toml` + `Cargo.lock`, CHANGELOG dated 2026-07-22, README + demo gif refreshed). **NOT
 tagged** — the maintainer tags on request. · **License:** MIT · **Repo:**
 https://github.com/Akram012388/herdr-checkin · **State:** `main` is green (fmt + clippy + test,
-**71 lib + 5 CLI tests**) and pushed, **HEAD `<this commit>`**. No open branches, no worktrees,
+**71 lib + 5 CLI tests**) and pushed, **release commit `1a618ae`**. No open branches, no worktrees,
 working tree clean.
 
 **The triage overlay is DONE.** All 7 slices shipped: the status pane is now a Claude Code
