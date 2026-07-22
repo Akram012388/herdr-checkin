@@ -13,14 +13,17 @@ All notable changes to this project are documented here. The format is based on
   re-reads the shared queue on a 250ms tick, so the list and waiting-times stay live.
 - New `pane` binary subcommand, a `[[panes]]` manifest entry, and an `open-pane` action that
   summons the pane as a split.
+- **Idempotent `open-pane` toggle**, scoped to the current tab: opens the pane if absent,
+  focuses it if it exists but isn't focused, closes it if it is the focused pane. Backed by a new
+  unit-tested `pane-decision` subcommand (reads `pane list`, emits `OPEN`/`FOCUS`/`CLOSE`) and a
+  `scripts/open-pane.sh` launcher; degrades to open on any error, and validates target pane ids
+  are flag-safe.
 
 ### Notes
 - `Enter` focuses first and only drops the entry on a successful jump; a failed jump keeps the
   entry and surfaces the error in the footer.
 - Pane mutations (`Enter`, `d`) go through the same lockfile-guarded state store as the event
   handlers, so concurrent enqueues are never clobbered.
-- Opening the pane again opens a second split rather than toggling; both share one queue safely.
-  An idempotent open-or-focus toggle is planned.
 
 ## [0.1.0] - 2026-07-22
 

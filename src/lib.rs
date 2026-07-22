@@ -39,6 +39,13 @@ pub fn run_from_env() -> i32 {
         }
     };
 
+    // The launch decision reads `pane list` JSON on stdin and prints OPEN/FOCUS/CLOSE — it needs
+    // neither the state dir nor the herdr binary, and must never fail the launcher, so it runs
+    // before the environment checks below.
+    if subcommand == Subcommand::PaneDecision {
+        return pane::decide_from_stdin();
+    }
+
     let state_dir = match env_path("HERDR_PLUGIN_STATE_DIR") {
         Ok(path) => path,
         Err(error) => {
@@ -81,6 +88,8 @@ fn run(subcommand: Subcommand, runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Resul
         Subcommand::Peek => peek(runtime, herdr),
         Subcommand::Clear => clear(runtime),
         Subcommand::Pane => pane::run(runtime, herdr),
+        // Handled in `run_from_env` before the environment is read.
+        Subcommand::PaneDecision => unreachable!("pane-decision is dispatched before run()"),
     }
 }
 
@@ -296,6 +305,7 @@ enum Subcommand {
     Peek,
     Clear,
     Pane,
+    PaneDecision,
 }
 
 enum ParseCommandError {
@@ -322,6 +332,7 @@ where
         "peek" => Ok(Subcommand::Peek),
         "clear" => Ok(Subcommand::Clear),
         "pane" => Ok(Subcommand::Pane),
+        "pane-decision" => Ok(Subcommand::PaneDecision),
         "help" | "--help" | "-h" => Err(ParseCommandError::Usage(usage())),
         other => Err(ParseCommandError::Usage(format!(
             "unknown subcommand: {other}\n{}",
@@ -331,7 +342,8 @@ where
 }
 
 fn usage() -> String {
-    "usage: herdr-checkin <status-changed|focused|closed|next|peek|clear|pane>".to_string()
+    "usage: herdr-checkin <status-changed|focused|closed|next|peek|clear|pane|pane-decision>"
+        .to_string()
 }
 
 fn env_path(name: &str) -> Result<PathBuf, PluginError> {

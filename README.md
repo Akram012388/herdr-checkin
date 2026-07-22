@@ -60,9 +60,10 @@ The pane refreshes itself — herdr delivers events only to short-lived handlers
 running pane, so it re-reads the shared queue on a 250ms tick. As agents queue and drain (or you
 act elsewhere), the list and the waiting-times update on their own.
 
-Opening the pane again opens a second split rather than toggling; that's only cosmetic — every
-pane reads the same queue and all changes go through a lockfile, so nothing is lost or corrupted.
-Close extras with `q`. (An idempotent open-or-focus toggle is planned.)
+`open-pane` is an idempotent toggle, scoped to the current tab: it opens the pane if there
+isn't one, focuses it if it exists but isn't focused, and closes it if it is the focused pane —
+so the same key summons and dismisses it. Scoping to the current tab means the toggle never
+yanks you into another workspace.
 
 ## Install
 

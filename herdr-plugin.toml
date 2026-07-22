@@ -29,19 +29,14 @@ title = "Check-in: clear queue"
 contexts = ["global", "workspace"]
 command = ["./target/release/herdr-checkin", "clear"]
 
-# open-pane summons the status pane (below) as a split. herdr actions run a command, so this
-# shells `herdr plugin pane open` via the injected $HERDR_BIN_PATH. A repeat press opens another
-# split rather than toggling — panes share state.json safely (mutations are lock-guarded), so a
-# duplicate is only cosmetic; close extras with q. (Idempotent open/focus/toggle is a follow-up.)
+# open-pane summons the status pane (below) as a split. Idempotent and scoped to the current
+# tab via scripts/open-pane.sh: opens if absent, focuses an existing one, closes it if it is the
+# focused pane (toggle). The OPEN/FOCUS/CLOSE decision is computed by `herdr-checkin pane-decision`.
 [[actions]]
 id = "open-pane"
 title = "Check-in: open queue pane"
 contexts = ["global", "workspace"]
-command = [
-  "/bin/sh",
-  "-c",
-  "exec \"$HERDR_BIN_PATH\" plugin pane open --plugin Akram012388.checkin --entrypoint queue --placement split --direction right --focus",
-]
+command = ["/bin/sh", "scripts/open-pane.sh"]
 
 # The status pane: a persistent TUI listing the live queue with select-and-jump. herdr spawns
 # this long-running binary into the split; it re-reads state.json on a tick to stay current.
