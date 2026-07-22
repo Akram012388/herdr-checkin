@@ -23,7 +23,7 @@ mod compose;
 mod queue_view;
 
 use crate::herdr::CliHerdr;
-use crate::roster::RosterSnapshot;
+use crate::roster::{agents_in_display_order, roster_reply_label, RosterAgent, RosterSnapshot};
 use crate::{
     agent_label, clear, current_unix_ms, evict, load_entries, Herdr, PluginError, QueueEntry,
     RuntimeEnv, StateStore,
@@ -185,20 +185,21 @@ fn event_loop(
                             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 model.toggle_tab()
                             }
-                            // The Queue view's row bindings. Gated on the active tab so the Agents
-                            // view stays read-only in Slice 2 (no j/k/Enter/d/c/reply there yet).
-                            _ if model.tab == ActiveTab::Queue => match key.code {
-                                KeyCode::Char('j') | KeyCode::Down => model.move_down(),
-                                KeyCode::Char('k') | KeyCode::Up => model.move_up(),
-                                KeyCode::Enter => {
-                                    // A successful jump closes the popup (run() fires popup.close).
-                                    if on_enter(model, runtime, herdr) {
-                                        return Ok(());
-                                    }
+                            // Selection, reply, and jump work in BOTH views — each dispatches on the
+                            // active tab (queue entry vs roster agent). `Enter` is the one shared
+                            // close path: a successful jump closes the popup (run() fires popup.close).
+                            KeyCode::Char('j') | KeyCode::Down => model.move_down(),
+                            KeyCode::Char('k') | KeyCode::Up => model.move_up(),
+                            KeyCode::Char(' ') => model.begin_reply(),
+                            KeyCode::Enter => {
+                                if on_enter(model, runtime, herdr) {
+                                    return Ok(());
                                 }
+                            }
+                            // Drop and clear are durable-queue operations — Queue view only.
+                            _ if model.tab == ActiveTab::Queue => match key.code {
                                 KeyCode::Char('d') | KeyCode::Char('x') => on_drop(model, runtime),
                                 KeyCode::Char('c') => model.request_clear(),
-                                KeyCode::Char(' ') => model.begin_reply(),
                                 _ => {}
                             },
                             _ => {}
@@ -213,8 +214,9 @@ fn event_loop(
                         // A click while a clear-all confirm is pending cancels it, like any other
                         // non-`y` input — never a reselect.
                         model.confirm_clear = false;
-                    } else if model.tab == ActiveTab::Queue {
-                        // Clicks select a queue row; the read-only Agents view ignores them (Slice 2).
+                    } else {
+                        // A left click selects a row in whichever view is active; `on_mouse`
+                        // dispatches on the tab and is safe when there's nothing to click.
                         on_mouse(model, mouse, list_area, list_state.offset());
                     }
                 }
@@ -231,7 +233,7 @@ fn event_loop(
         // Non-blocking (`try_recv`): the tick never waits on the CLI, and a tick with no new sample
         // leaves the cached roster in place so a row never blanks (design §5).
         if let Some(snapshot) = sampler.drain_latest() {
-            model.roster = Some(snapshot);
+            model.apply_roster(snapshot);
         }
 
         // Refresh from the shared file every tick. Parse-and-compare (no mtime guard: mtime has
@@ -243,18 +245,22 @@ fn event_loop(
     }
 }
 
-/// `Enter`: focus the selected agent, then — only on success — evict it from the queue. Returns
-/// `true` when the jump succeeded, signaling the pane should close: as a popup it floats over the
-/// whole session, so once we've navigated to the agent it must get out of the way. Returns `false`
-/// when nothing is selected or the focus failed (the entry stays and the error shows in the
-/// footer), keeping the pane open.
+/// `Enter`: jump to the focused agent in whichever view is active — one shared close path. Both
+/// variants act-then-evict-on-success (invariant #2): focus first, and only on success evict the
+/// pane from the durable queue. Returns `true` when the jump succeeded, signaling the pane should
+/// close (as a popup it floats over the whole session, so once navigated it must get out of the way).
 fn on_enter(model: &mut PaneModel, runtime: &RuntimeEnv, herdr: &dyn Herdr) -> bool {
-    let Some(pane_id) = model.selected_pane_id().map(str::to_owned) else {
+    let target = match model.tab {
+        ActiveTab::Queue => model.selected_pane_id().map(str::to_owned),
+        ActiveTab::Agents => model.roster_selected_agent().map(|a| a.pane_id.clone()),
+    };
+    let Some(pane_id) = target else {
         return false;
     };
     match herdr.focus_agent(&pane_id) {
         Ok(()) => {
             // The jump worked; if the drop can't be persisted, say so rather than imply success.
+            // Evicting is idempotent — a no-op when the agent (an Agents-view row) wasn't queued.
             model.status = match evict_pane(runtime, &pane_id) {
                 Ok(()) => None,
                 Err(error) => Some(format!("jumped, but drop failed: {error}")),
@@ -336,13 +342,28 @@ fn on_mouse(model: &mut PaneModel, mouse: MouseEvent, list_area: Option<Rect>, o
     if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
         return;
     }
-    if let Some(area) = list_area {
-        // Recompute the grouped layout the same way `draw` did this frame — the entries are
-        // unchanged between draw and this click (the next `sync` runs only after event handling),
-        // so it reproduces exactly what was painted. A click on a header row selects nothing.
-        let rows = layout_rows(&model.entries);
-        if let Some(index) = row_for_click(area, offset, &rows, mouse.column, mouse.row) {
-            model.selected = index;
+    let Some(area) = list_area else {
+        return;
+    };
+    // Recompute the same grouped layout `draw` painted this frame (entries/roster are unchanged
+    // between draw and this click — the next sync/drain runs only after event handling), so the
+    // hit-test reproduces exactly what was on screen. A click on a header/spacer selects nothing.
+    match model.tab {
+        ActiveTab::Queue => {
+            let rows = layout_rows(&model.entries);
+            if let Some(index) = row_for_click(area, offset, &rows, mouse.column, mouse.row) {
+                model.selected = index;
+            }
+        }
+        ActiveTab::Agents => {
+            let index = {
+                let agents = model.roster_display_agents();
+                let rows = agents_view::layout_rows(&agents);
+                agents_view::row_for_click(area, offset, &rows, mouse.column, mouse.row)
+            };
+            if let Some(index) = index {
+                model.roster_selected = index;
+            }
         }
     }
 }
@@ -476,13 +497,16 @@ struct PaneModel {
     /// `Some` while composing an inline reply (armed by `space`). Distinct from `confirm_clear` so
     /// the two modals never overlap — `begin_reply` refuses to arm while a clear-confirm is pending.
     reply: Option<ReplyDraft>,
-    /// Which view is showing. The Queue keeps all its state (selection, reply, confirm) across a
-    /// toggle, so flipping to the Agents view and back is lossless.
+    /// Which view is showing. Each view keeps its own selection across a toggle, so flipping to the
+    /// Agents view and back is lossless.
     tab: ActiveTab,
     /// The latest roster the sampler delivered, or `None` until its first sample lands. Replaced
-    /// wholesale each delivery and never persisted (design §5) — the Agents view renders it, the
-    /// Queue view ignores it.
+    /// wholesale each delivery (re-anchoring [`roster_selected`](Self::roster_selected) by pane id)
+    /// and never persisted (design §5) — the Agents view renders it, the Queue view ignores it.
     roster: Option<RosterSnapshot>,
+    /// The Agents view's selection cursor: an index into the display-order agent list
+    /// (`roster::agents_in_display_order`), independent of the Queue's `selected`.
+    roster_selected: usize,
 }
 
 impl PaneModel {
@@ -495,7 +519,43 @@ impl PaneModel {
             reply: None,
             tab: ActiveTab::Queue,
             roster: None,
+            roster_selected: 0,
         }
+    }
+
+    /// Replace the roster with a fresh sample, keeping the Agents-view selection anchored to the same
+    /// pane where possible (so the 1s refresh never yanks the cursor), else clamping it into range.
+    /// The roster is never persisted (design §5) — this is the Agents-view twin of [`sync`](Self::sync).
+    fn apply_roster(&mut self, snapshot: RosterSnapshot) {
+        let anchor = self
+            .roster_selected_agent()
+            .map(|agent| agent.pane_id.clone());
+        self.roster = Some(snapshot);
+        let (len, anchored) = {
+            let order = self.roster_display_agents();
+            let anchored = anchor.and_then(|id| order.iter().position(|a| a.pane_id == id));
+            (order.len(), anchored)
+        };
+        self.roster_selected = match anchored {
+            Some(position) => position,
+            None => self.roster_selected.min(len.saturating_sub(1)),
+        };
+    }
+
+    /// The Agents-view agents in on-screen (grouped-by-workspace) order — the sequence `j`/`k`,
+    /// clicks, and the render all index into. Empty until the first sample lands.
+    fn roster_display_agents(&self) -> Vec<&RosterAgent> {
+        match &self.roster {
+            Some(snapshot) => agents_in_display_order(&snapshot.agents),
+            None => Vec::new(),
+        }
+    }
+
+    /// The agent the Agents-view cursor is on, or `None` when the roster is empty.
+    fn roster_selected_agent(&self) -> Option<&RosterAgent> {
+        self.roster_display_agents()
+            .get(self.roster_selected)
+            .copied()
     }
 
     /// `Tab`/`Ctrl+S`: switch between the Queue and Agents views. A pure view flip — it leaves the
@@ -516,24 +576,40 @@ impl PaneModel {
         }
     }
 
-    /// `space`: begin an inline reply to the selected agent. No-op on an empty queue (nothing
-    /// selected) or while a clear-all confirm is pending, so the two modals never overlap. Captures
-    /// the target pane id and display label now (see [`ReplyDraft`]).
+    /// `space`: begin an inline reply to the selected agent in whichever view is active — the Queue's
+    /// selected entry or the Agents view's selected roster agent. No-op when nothing is selected, so
+    /// the shared compose target (a `pane_id` + display `label`) is captured now (see [`ReplyDraft`]),
+    /// never re-read from the live selection at submit time.
     fn begin_reply(&mut self) {
+        let target = match self.tab {
+            ActiveTab::Queue => self
+                .entries
+                .get(self.selected)
+                .map(|entry| (entry.pane_id.clone(), agent_label(entry).to_string())),
+            ActiveTab::Agents => self
+                .roster_selected_agent()
+                .map(|agent| (agent.pane_id.clone(), roster_reply_label(agent))),
+        };
+        if let Some((target, label)) = target {
+            self.arm_reply(target, label);
+        }
+    }
+
+    /// Arm reply mode against an explicit target, the shared path both views funnel through. No-op
+    /// while a clear-all confirm is pending, so the two modals never overlap.
+    fn arm_reply(&mut self, target: String, label: String) {
         if self.confirm_clear {
             return;
         }
-        if let Some(entry) = self.entries.get(self.selected) {
-            let mut input = TextArea::default();
-            input.set_placeholder_text("type your reply");
-            input.set_placeholder_style(Style::new().fg(Color::DarkGray));
-            input.set_cursor_line_style(Style::default()); // no full-line underline; keep the strip clean
-            self.reply = Some(ReplyDraft {
-                target: entry.pane_id.clone(),
-                label: agent_label(entry).to_string(),
-                input,
-            });
-        }
+        let mut input = TextArea::default();
+        input.set_placeholder_text("type your reply");
+        input.set_placeholder_style(Style::new().fg(Color::DarkGray));
+        input.set_cursor_line_style(Style::default()); // no full-line underline; keep the strip clean
+        self.reply = Some(ReplyDraft {
+            target,
+            label,
+            input,
+        });
     }
 
     /// Feed a key event to the reply input (no-op outside reply mode). The TextArea's default
@@ -585,20 +661,40 @@ impl PaneModel {
             .collect()
     }
 
+    /// `k`/up: move the active view's cursor one row up the screen. Dispatches on the tab — the Queue
+    /// steps through its grouped display order, the Agents view down its display-order agent list.
     fn move_up(&mut self) {
-        let order = self.display_order();
-        if let Some(pos) = order.iter().position(|&index| index == self.selected) {
-            if pos > 0 {
-                self.selected = order[pos - 1];
+        match self.tab {
+            ActiveTab::Queue => {
+                let order = self.display_order();
+                if let Some(pos) = order.iter().position(|&index| index == self.selected) {
+                    if pos > 0 {
+                        self.selected = order[pos - 1];
+                    }
+                }
+            }
+            ActiveTab::Agents => {
+                self.roster_selected = self.roster_selected.saturating_sub(1);
             }
         }
     }
 
+    /// `j`/down: move the active view's cursor one row down the screen (see [`move_up`](Self::move_up)).
     fn move_down(&mut self) {
-        let order = self.display_order();
-        if let Some(pos) = order.iter().position(|&index| index == self.selected) {
-            if pos + 1 < order.len() {
-                self.selected = order[pos + 1];
+        match self.tab {
+            ActiveTab::Queue => {
+                let order = self.display_order();
+                if let Some(pos) = order.iter().position(|&index| index == self.selected) {
+                    if pos + 1 < order.len() {
+                        self.selected = order[pos + 1];
+                    }
+                }
+            }
+            ActiveTab::Agents => {
+                let len = self.roster_display_agents().len();
+                if len > 0 && self.roster_selected + 1 < len {
+                    self.roster_selected += 1;
+                }
             }
         }
     }
@@ -642,13 +738,28 @@ fn draw(
 ) {
     match model.tab {
         ActiveTab::Queue => draw_queue(frame, model, now_ms, list_state, list_area),
-        ActiveTab::Agents => {
-            // The read-only Agents view has no clickable rows in Slice 2, so it records no list
-            // rect: `on_mouse` is gated off in this tab and never reads a stale Queue rect.
-            *list_area = None;
-            agents_view::draw_agents(frame, model);
-        }
+        ActiveTab::Agents => agents_view::draw_agents(frame, model, list_state, list_area),
     }
+}
+
+/// The tab bar shown as the top row of both views: the two tabs side by side, the active one carrying
+/// the same soft grey band the selected row uses (bold, undimmed), the inactive one dim. It is the
+/// consistent, always-visible affordance for the `Tab`/`Ctrl+S` toggle — identical on both surfaces.
+fn draw_tab_bar(frame: &mut Frame, area: Rect, active: ActiveTab) {
+    use ratatui::text::{Line, Span};
+
+    let band = Style::new().bold().bg(queue_view::SELECTION_BG);
+    let idle = Style::new().dim();
+    let (queue_style, agents_style) = match active {
+        ActiveTab::Queue => (band, idle),
+        ActiveTab::Agents => (idle, band),
+    };
+    let line = Line::from(vec![
+        Span::styled(" Queue ", queue_style),
+        Span::raw("   "),
+        Span::styled(" Agents ", agents_style),
+    ]);
+    frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
 
 fn draw_queue(
@@ -667,6 +778,7 @@ fn draw_queue(
 
     let areas = match &compose {
         Some(_) => Layout::vertical([
+            Constraint::Length(1), // tab bar
             Constraint::Length(1), // count header
             Constraint::Min(0),    // the queue (dimmed while composing)
             Constraint::Length(1), // titled rule
@@ -675,16 +787,19 @@ fn draw_queue(
         ])
         .split(interior),
         None => Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
+            Constraint::Length(1), // tab bar
+            Constraint::Length(1), // count header
+            Constraint::Min(0),    // the queue
+            Constraint::Length(1), // footer
         ])
         .split(interior),
     };
 
+    draw_tab_bar(frame, areas[0], ActiveTab::Queue);
+
     frame.render_widget(
         Paragraph::new(header_text(model.entries.len())).bold(),
-        areas[0],
+        areas[1],
     );
 
     if model.entries.is_empty() {
@@ -692,24 +807,24 @@ fn draw_queue(
             Paragraph::new("No agents waiting — you're all caught up.")
                 .dim()
                 .alignment(Alignment::Center),
-            areas[1],
+            areas[2],
         );
     } else {
         draw_list(
-            frame, model, now_ms, list_state, list_area, areas[1], compose,
+            frame, model, now_ms, list_state, list_area, areas[2], compose,
         );
     }
 
     match compose {
-        // Composing: darken the header + queue as one veil so the strip is the only lit surface
-        // (focus by receding everything else, not by brightening the input), then draw the strip.
+        // Composing: darken the tab bar + header + queue as one veil so the strip is the only lit
+        // surface (focus by receding everything else, not by brightening the input), then draw it.
         Some(draft) => {
             let veil = Rect {
-                height: areas[0].height + areas[1].height,
+                height: areas[0].height + areas[1].height + areas[2].height,
                 ..areas[0]
             };
             dim_area(frame, veil);
-            draw_compose(frame, draft, areas[2], areas[3], areas[4]);
+            draw_compose(frame, draft, areas[3], areas[4], areas[5]);
         }
         // Navigating: the one-line footer carries the clear-confirm, a transient status, or hints.
         None => {
@@ -721,7 +836,7 @@ fn draw_queue(
             // Centered so the left/right margins stay balanced regardless of the hint string's width.
             frame.render_widget(
                 Paragraph::new(footer).dim().alignment(Alignment::Center),
-                areas[2],
+                areas[3],
             );
         }
     }
@@ -1090,9 +1205,9 @@ mod tests {
         assert_eq!(
             content_lines(&render_buffer(&m, 80, 6)),
             vec![
+                "Queue     Agents", // the tab bar tops both views (active tab banded)
                 "queue empty",
                 "No agents waiting — you're all caught up.",
-                "",
                 "",
                 "",
                 "j/k move  ·  Enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit",
@@ -1110,6 +1225,7 @@ mod tests {
         assert_eq!(
             content_lines(&render_buffer(&m, 80, 13)),
             vec![
+                "Queue     Agents",
                 "3 agents waiting",
                 "",
                 "CHECKIN",
@@ -1121,7 +1237,6 @@ mod tests {
                 "DONE",
                 "w3 · pane 1",
                 "done · t · just now",
-                "",
                 "j/k move  ·  Enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit",
             ]
         );
@@ -1133,8 +1248,9 @@ mod tests {
         m.begin_reply();
         m.reply.as_mut().unwrap().input.insert_str("hi");
         assert_eq!(
-            content_lines(&render_buffer(&m, 80, 8)),
+            content_lines(&render_buffer(&m, 80, 9)),
             vec![
+                "Queue     Agents".to_string(),
                 "1 agent waiting".to_string(),
                 "".to_string(),
                 "CHECKIN".to_string(),
@@ -1149,18 +1265,18 @@ mod tests {
 
     #[test]
     fn snapshot_marks_the_selected_entry_with_the_cursor() {
-        // Two blocked entries render as [header][spacer][CHECKIN][E0][D0][E1][D1]... The selection
-        // starts on entry 0, so its destination row (terminal row 3) carries the "> " marker while
-        // the unselected entry's row (row 5) does not.
+        // Rows: [tab bar][count][spacer][CHECKIN][E0][D0][E1][D1]... The selection starts on entry 0,
+        // so its destination row (terminal row 4) carries the "> " marker while the unselected
+        // entry's row (row 6) does not. Both are one row lower than before the tab bar was added.
         let m = model(&["w1:p1", "w2:p1"]);
-        let buffer = render_buffer(&m, 80, 9);
+        let buffer = render_buffer(&m, 80, 10);
         assert_eq!(
-            buffer[(0, 3)].symbol(),
+            buffer[(0, 4)].symbol(),
             ">",
             "selected entry gets the cursor"
         );
         assert_eq!(
-            buffer[(0, 5)].symbol(),
+            buffer[(0, 6)].symbol(),
             " ",
             "the unselected entry has no marker"
         );
@@ -1199,6 +1315,96 @@ mod tests {
         );
     }
 
+    fn agents_model(ids: &[(&str, &str)]) -> PaneModel {
+        let mut m = model(&[]);
+        m.tab = ActiveTab::Agents;
+        m.roster = Some(RosterSnapshot {
+            sampled_at_ms: 1_000,
+            agents: ids
+                .iter()
+                .map(|(pane, ws)| roster_agent(pane, ws, AgentStatus::Working))
+                .collect(),
+        });
+        m
+    }
+
+    #[test]
+    fn agents_move_down_and_up_clamp_at_the_ends() {
+        let mut m = agents_model(&[("w4:p1", "w4"), ("w4:p2", "w4"), ("wN:p1", "wN")]);
+        assert_eq!(m.roster_selected, 0);
+        m.move_up(); // already at top
+        assert_eq!(m.roster_selected, 0);
+        m.move_down();
+        m.move_down();
+        assert_eq!(m.roster_selected, 2);
+        m.move_down(); // already at the last agent
+        assert_eq!(m.roster_selected, 2);
+        m.move_up();
+        assert_eq!(m.roster_selected, 1);
+    }
+
+    #[test]
+    fn agents_selection_follows_workspace_grouping_not_snapshot_order() {
+        // Snapshot interleaves workspaces; the cursor steps through grouped display order
+        // (w4's agents contiguously, then wN), so move_down lands on w4:p2, not the snapshot's next.
+        let mut m = agents_model(&[("w4:p1", "w4"), ("wN:p1", "wN"), ("w4:p2", "w4")]);
+        m.move_down();
+        assert_eq!(
+            m.roster_selected_agent().map(|a| a.pane_id.as_str()),
+            Some("w4:p2"),
+            "grouped order keeps w4 together"
+        );
+    }
+
+    #[test]
+    fn apply_roster_keeps_the_agents_selection_on_the_same_pane() {
+        let mut m = agents_model(&[("w4:p1", "w4"), ("w4:p2", "w4"), ("wN:p1", "wN")]);
+        m.move_down(); // select w4:p2
+        assert_eq!(
+            m.roster_selected_agent().map(|a| a.pane_id.as_str()),
+            Some("w4:p2")
+        );
+        // A fresh sample drops w4:p1; the selection should follow w4:p2 to its new index.
+        m.apply_roster(RosterSnapshot {
+            sampled_at_ms: 2_000,
+            agents: vec![
+                roster_agent("w4:p2", "w4", AgentStatus::Blocked),
+                roster_agent("wN:p1", "wN", AgentStatus::Working),
+            ],
+        });
+        assert_eq!(m.roster_selected, 0);
+        assert_eq!(
+            m.roster_selected_agent().map(|a| a.pane_id.as_str()),
+            Some("w4:p2")
+        );
+    }
+
+    #[test]
+    fn apply_roster_clamps_when_the_selected_agent_vanishes() {
+        let mut m = agents_model(&[("w4:p1", "w4"), ("w4:p2", "w4"), ("wN:p1", "wN")]);
+        m.move_down();
+        m.move_down(); // select wN:p1 (index 2)
+        m.apply_roster(RosterSnapshot {
+            sampled_at_ms: 2_000,
+            agents: vec![roster_agent("w4:p1", "w4", AgentStatus::Working)],
+        });
+        assert_eq!(m.roster_selected, 0, "clamped into the shrunken roster");
+        assert_eq!(
+            m.roster_selected_agent().map(|a| a.pane_id.as_str()),
+            Some("w4:p1")
+        );
+    }
+
+    #[test]
+    fn begin_reply_in_the_agents_view_targets_the_selected_roster_agent() {
+        let mut m = agents_model(&[("w4:p1", "w4"), ("wN:p2", "wN")]);
+        m.move_down(); // select wN:p2
+        m.begin_reply();
+        let draft = m.reply.as_ref().expect("reply armed from the agents view");
+        assert_eq!(draft.target, "wN:p2");
+        assert_eq!(draft.label, "Claude", "the roster agent name, capitalized");
+    }
+
     #[test]
     fn snapshot_agents_view_groups_rows_by_workspace() {
         let mut m = model(&[]);
@@ -1212,12 +1418,13 @@ mod tests {
             ],
         });
         assert_eq!(
-            content_lines(&render_buffer(&m, 80, 12)),
+            content_lines(&render_buffer(&m, 80, 13)),
             vec![
+                "Queue     Agents", // the tab bar, Agents active
                 "3 agents",
                 "",
-                "w4", // workspace group header
-                "t1 · pane 1",
+                "w4",            // workspace group header
+                "> t1 · pane 1", // the selection cursor sits on the first agent
                 "idle · herdr-checkin",
                 "t1 · pane 2",
                 "blocked · herdr-checkin",
@@ -1225,7 +1432,7 @@ mod tests {
                 "wN",
                 "t1 · pane 1",
                 "working · herdr-checkin",
-                "tab: queue  ·  q quit",
+                "j/k move  ·  Enter jump  ·  space reply  ·  q quit",
             ]
         );
     }
@@ -1238,11 +1445,11 @@ mod tests {
         assert_eq!(
             content_lines(&render_buffer(&m, 80, 5)),
             vec![
+                "Queue     Agents",
                 "no agents",
                 "Sampling agents...",
                 "",
-                "",
-                "tab: queue  ·  q quit",
+                "j/k move  ·  Enter jump  ·  space reply  ·  q quit",
             ]
         );
     }
@@ -1260,11 +1467,11 @@ mod tests {
         assert_eq!(
             content_lines(&render_buffer(&m, 80, 5)),
             vec![
+                "Queue     Agents",
                 "no agents",
                 "No agents running.",
                 "",
-                "",
-                "tab: queue  ·  q quit",
+                "j/k move  ·  Enter jump  ·  space reply  ·  q quit",
             ]
         );
     }
@@ -1278,15 +1485,18 @@ mod tests {
             sampled_at_ms: 1_000,
             agents: vec![roster_agent("w9:p1", "w9", AgentStatus::Done)],
         });
-        let queue = content_lines(&render_buffer(&m, 80, 6));
+        // Row 0 is the shared tab bar on both views; the count header is row 1.
+        let queue = content_lines(&render_buffer(&m, 80, 7));
+        assert_eq!(queue[0], "Queue     Agents");
         assert_eq!(
-            queue[0], "1 agent waiting",
+            queue[1], "1 agent waiting",
             "Queue tab shows the queue header"
         );
 
         m.toggle_tab();
-        let agents = content_lines(&render_buffer(&m, 80, 6));
-        assert_eq!(agents[0], "1 agent", "Agents tab shows the roster header");
+        let agents = content_lines(&render_buffer(&m, 80, 7));
+        assert_eq!(agents[0], "Queue     Agents");
+        assert_eq!(agents[1], "1 agent", "Agents tab shows the roster header");
         assert!(
             agents.iter().any(|line| line == "w9"),
             "and the roster's workspace group, not the queue"
@@ -1320,6 +1530,30 @@ mod tests {
         assert!(
             load(&dir).is_empty(),
             "the jumped entry is evicted on success"
+        );
+    }
+
+    #[test]
+    fn on_enter_in_the_agents_view_focuses_the_selected_agent_and_closes() {
+        // A blocked agent is both queued and in the roster. Jumping from the Agents view focuses it
+        // (via the shared on_enter dispatch) and evicts it from the durable queue, same as the Queue.
+        let dir = temp_state_dir("agents-enter-ok");
+        feed_status(&dir, 1_000, "wN:p2", "wN", "blocked", "needs input");
+        let mut model = PaneModel::new(load(&dir));
+        model.tab = ActiveTab::Agents;
+        model.roster = Some(RosterSnapshot {
+            sampled_at_ms: 1_000,
+            agents: vec![roster_agent("wN:p2", "wN", AgentStatus::Blocked)],
+        });
+        let herdr = FakeHerdr::new(&[("wN:p2", "blocked")]);
+
+        let close = on_enter(&mut model, &runtime(dir.clone(), 2_000), &herdr);
+
+        assert!(close, "a successful jump signals the popup to close");
+        assert_eq!(herdr.focused.into_inner(), vec!["wN:p2".to_string()]);
+        assert!(
+            load(&dir).is_empty(),
+            "the jumped agent is evicted from the queue on success"
         );
     }
 

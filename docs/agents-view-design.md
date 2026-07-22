@@ -135,26 +135,33 @@ this doc is the durable design, the issues are the per-slice work tracker.
   met: fixture unit tests (incl. an `unknown` status and a live agent with no `agent_session`) + a
   live printout verified inside herdr (groups by workspace, marks focus, dashes missing fields). CI
   green (94 lib + 5 CLI).
-- **Slice 2 (code-complete + CI-green; pending the maintainer's live eyeball)** — Tab/Ctrl+S toggle
-  + read-only Agents view fed by the sampler thread (1s `agent list` cadence, mpsc, tick never
-  blocks). Rows: destination (`{tab} · pane {n}`, workspace is the group header) + `{status} ·
-  {title}`, grouped by workspace. **This is the tracer bullet — it proves the popup can host a live
-  view without janking the durable one.** Built: `ActiveTab` in `pane/mod.rs`; a `RosterSampler`
-  worker thread (samples once immediately, then every 1s over an mpsc; interruptible `recv_timeout`
-  shutdown; joined on `Drop` so every exit path tears it down); the 250ms tick drains non-blocking
-  (`try_recv`, newest-wins) so a slow/failed sample never blanks a row; new `pane/agents_view.rs`
-  render sibling; `TestBackend` snapshots for the grouped roster, the pre-first-sample placeholder,
-  the empty-roster wording, and the toggle. `RuntimeEnv` gained `herdr_bin_path` so the worker builds
-  its own `CliHerdr` (the borrowed `&dyn Herdr` isn't `Send`). **Two design calls:** the Queue view
-  is left byte-identical (honors "Queue tab unaffected" + issue #1's pixel item), so the toggle is a
-  keybind taught only in the Agents-view footer — not a persistent tab bar; and the view is read-only
-  (no selection/scroll) per this slice, with actions in Slice 3. CI green (103 lib + 5 CLI). *Gate
-  (HITL, outstanding):* open the popup, `Tab` to Agents, confirm a live status flip shows within ~1s,
-  the Queue tab is unaffected, and no jank. **Popup geometry:** left at 50%×50% pending that eyeball —
-  bump `open-pane.sh` + the `[[panes]]` manifest toward ~85–90% (two numbers, kept in sync) only if
-  the roster reads cramped. It's a visual call an agent can't make (the popup can't be pane-read).
-- **Slice 3** — Action parity: `Enter` jump (shared close path), `space` reply via the shared compose
-  target, `j`/`k`/click selection across group headers. *Gate:* live jump + reply to a real agent.
+- **Slices 2 + 3 (built together; CI-green, pending the maintainer's live eyeball)** — Tab/Ctrl+S
+  toggle + a **fully interactive** Agents view fed by the sampler thread. Slice 3 was folded forward
+  after the first live eyeball: a read-only roster felt dead and its indicators couldn't be truthful,
+  so selection + reply + jump landed in the same pass. **This is the tracer bullet — it proves the
+  popup can host a live view without janking the durable one.** Built:
+  - **Sampler:** `RosterSampler` worker thread (samples once immediately, then every 1s over an mpsc;
+    interruptible `recv_timeout` shutdown; joined on `Drop` so every exit path tears it down); the
+    250ms tick drains non-blocking (`try_recv`, newest-wins) so a slow/failed sample never blanks a
+    row. `RuntimeEnv` gained `herdr_bin_path` so the worker builds its own `CliHerdr` (the borrowed
+    `&dyn Herdr` isn't `Send`).
+  - **Interaction parity:** `j`/`k`/click selection over the display-order agent list (anchored by
+    pane id across the 1s refresh so the cursor never jumps); `space` reply through the shared
+    compose target (`arm_reply(pane_id, label)`, the design's "not a faked QueueEntry" seam); `Enter`
+    jump via the one shared `on_enter` dispatch — focus then act-then-evict-on-success (idempotent, a
+    no-op when the agent wasn't queued). Rows: destination (`{tab} · pane {n}`, workspace is the group
+    header) + `{status} · {title}`, grouped by workspace, with the same selection band + `> ` cursor +
+    overflow scrollbar as the Queue (scrollbar helpers reused from `queue_view`).
+  - **Consistent affordances (reversing the earlier call):** a **persistent tab bar** now tops both
+    views (active tab carries the selection band), so `Tab` is discoverable and identical on each;
+    both footers show `space reply`. This deliberately drops the "Queue byte-identical" stance —
+    superseded by the maintainer's request for a clear, consistent indicator.
+  - `pane/agents_view.rs` render sibling; `TestBackend` snapshots for the grouped roster (with cursor),
+    the placeholder, the empty-roster wording, the toggle, plus model tests for agents selection/clamp,
+    snapshot re-anchoring, agents-view reply target, and the agents-view jump. CI green (113 lib + 5 CLI).
+  - *Gate (HITL, outstanding):* open the popup, `Tab` to Agents, drive `j`/`k`/`space`/`Enter`, and
+    confirm a live status flip shows within ~1s with no jank; Queue tab still fully works. **Popup
+    geometry:** the maintainer confirmed 50%×50% reads fine — left as-is.
 - **Slice 4** — Last-line status column: 2s visible-rows `agent read` sweep, budgeted round-robin,
   invalidate-on-status-change, never-blank cache. *Gate:* smooth with 5+ agents; lines track output.
 - **Slice 5** — `roster.json` + `RosterStore`; `status-changed` stamps `status_since_ms`; startup

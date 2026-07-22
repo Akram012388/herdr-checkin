@@ -3,8 +3,10 @@
 //! (`herdr.rs`) parses the CLI JSON into [`RosterAgent`]s; this module only groups, orders, and
 //! renders them, so it stays trivially unit-testable with no herdr in the loop.
 //!
-//! Slice 1 of the Agents view (design doc §5): the types, grouping-by-workspace, and a plain-text
-//! dump for the hidden `roster` debug subcommand. The live view, sampler, and pins come later.
+//! The Agents view's pure core (design doc §5): the types, grouping-by-workspace, the display-order
+//! flattening the live view's selection indexes into, and the per-row text formatters. The `Herdr`
+//! seam samples `agent list` on a worker thread; this module only shapes what it delivers. Pins come
+//! later (Slice 6). A plain-text `render_roster_text` also backs the hidden `roster` debug subcommand.
 
 /// An agent pane's live status, from `herdr agent list`'s `agent_status`. The vocabulary is
 /// closed (live-verified, herdr 0.7.5): `idle`/`working`/`blocked`/`done`, with **`Unknown` as the
@@ -97,6 +99,45 @@ pub(crate) fn group_by_workspace(agents: &[RosterAgent]) -> Vec<WorkspaceGroup> 
         }
     }
     groups
+}
+
+/// The agents in on-screen order — grouped by workspace, first-seen workspace order, encounter order
+/// within — the exact order [`group_by_workspace`] paints. Returns borrows (no clone) so the view's
+/// selection cursor and its click hit-testing index into the same sequence the rows are laid out
+/// from, and the two can never drift.
+pub(crate) fn agents_in_display_order(agents: &[RosterAgent]) -> Vec<&RosterAgent> {
+    let mut order: Vec<&RosterAgent> = Vec::with_capacity(agents.len());
+    let mut seen: Vec<&str> = Vec::new();
+    // Emit each workspace's agents contiguously the first time that workspace is encountered, so the
+    // flat order matches the grouped render exactly (workspaces never interleave in the output).
+    for agent in agents {
+        if seen.contains(&agent.workspace_id.as_str()) {
+            continue;
+        }
+        seen.push(agent.workspace_id.as_str());
+        order.extend(
+            agents
+                .iter()
+                .filter(|a| a.workspace_id == agent.workspace_id),
+        );
+    }
+    order
+}
+
+/// The display name for the reply footer when answering a roster agent (`Reply to Claude`): the
+/// agent name with its first letter capitalized (`claude` -> `Claude`, matching herdr's own display
+/// agent), falling back to the raw name, then the pane id. The Queue's analogue is `actions::agent_label`.
+pub(crate) fn roster_reply_label(agent: &RosterAgent) -> String {
+    let name = agent
+        .agent
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&agent.pane_id);
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => name.to_string(),
+    }
 }
 
 /// The primary (destination) line for an Agents-view row: `{tab} · pane {n}` within the workspace
@@ -277,6 +318,51 @@ mod tests {
         assert!(text.contains("\nw4\n"), "the w4 group is listed");
         assert!(text.contains("\nwT\n"), "the wT group is listed");
         assert!(text.contains("w4:p1"), "the agent row shows its pane id");
+    }
+
+    #[test]
+    fn agents_in_display_order_matches_the_grouped_render_order() {
+        // Interleaved workspaces: the flat order groups w4's agents contiguously (first-seen), then
+        // wT's — identical to what group_by_workspace lays out, so selection can't drift from the rows.
+        let agents = vec![
+            agent("w4:p1", "w4", AgentStatus::Idle),
+            agent("wT:p1", "wT", AgentStatus::Working),
+            agent("w4:p2", "w4", AgentStatus::Blocked),
+        ];
+        let order: Vec<&str> = agents_in_display_order(&agents)
+            .iter()
+            .map(|a| a.pane_id.as_str())
+            .collect();
+        assert_eq!(order, vec!["w4:p1", "w4:p2", "wT:p1"]);
+        // And it flattens the same groups group_by_workspace produces.
+        let groups = group_by_workspace(&agents);
+        let grouped: Vec<&str> = groups
+            .iter()
+            .flat_map(|g| g.agents.iter().map(|a| a.pane_id.as_str()))
+            .collect();
+        assert_eq!(order, grouped);
+    }
+
+    #[test]
+    fn roster_reply_label_capitalizes_the_agent_name() {
+        assert_eq!(
+            roster_reply_label(&agent("w4:p1", "w4", AgentStatus::Idle)),
+            "Claude"
+        );
+        let amp = RosterAgent {
+            agent: Some("amp".to_string()),
+            ..agent("w4:p1", "w4", AgentStatus::Idle)
+        };
+        assert_eq!(roster_reply_label(&amp), "Amp");
+        let nameless = RosterAgent {
+            agent: None,
+            ..agent("w4:p9", "w4", AgentStatus::Idle)
+        };
+        assert_eq!(
+            roster_reply_label(&nameless),
+            "W4:p9",
+            "no agent name falls back to the pane id (capitalized like any label)"
+        );
     }
 
     #[test]

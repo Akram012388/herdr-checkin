@@ -21,7 +21,7 @@ const DONE_HEADER: &str = "DONE";
 /// The selection band: a soft grey fill behind the selected entry (both its lines), instead of a
 /// full reversed-video swap which reads as a harsh white band on a dark theme. Tunable by eye — a
 /// lighter grey such as `Color::Indexed(244)` for a more visible band, darker for a subtler one.
-const SELECTION_BG: Color = Color::DarkGray;
+pub(super) const SELECTION_BG: Color = Color::DarkGray;
 
 /// One rendered line of the grouped agents-view: a blank spacer, a non-selectable section header,
 /// an entry's **primary** line (the go-to destination, carrying its index into `entries` — the
@@ -210,7 +210,7 @@ pub(super) fn header_text(count: usize) -> String {
 
 /// Geometry of a vertical scrollbar thumb: its top offset within the track and its length, both in
 /// cells. Produced by [`scrollbar_thumb`], consumed by [`render_list_scrollbar`].
-struct Thumb {
+pub(super) struct Thumb {
     top: u16,
     len: u16,
 }
@@ -219,7 +219,7 @@ struct Thumb {
 /// popups (thumb length scaled to the visible fraction, position scaled to the scroll offset),
 /// reduced to integer math and kept colorless. Returns `None` when everything fits (no scrollbar).
 /// `total` display rows, `viewport` visible rows, `offset` index of the first visible row.
-fn scrollbar_thumb(
+pub(super) fn scrollbar_thumb(
     total: usize,
     viewport: usize,
     offset: usize,
@@ -246,7 +246,7 @@ fn scrollbar_thumb(
 
 /// Draw a 1-column vertical scrollbar in `track` when the grouped rows overflow the viewport: a dim
 /// track with a brighter thumb, both colorless to match the pane. A no-op when it all fits.
-fn render_list_scrollbar(
+pub(super) fn render_list_scrollbar(
     frame: &mut Frame,
     track: Rect,
     total: usize,
