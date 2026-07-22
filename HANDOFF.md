@@ -8,14 +8,15 @@ and the model-tier strategy: [CLAUDE.md](CLAUDE.md). The active feature's author
 **Version:** 0.3.0 shipped · **no standalone 0.4.0** — the unshipped `[Unreleased]` pane features
 ship bundled with the triage overlay as the next release (working label 0.5.0; final number at cut
 time) · **License:** MIT · **Repo:** https://github.com/Akram012388/herdr-checkin · **State:** `main`
-is green (fmt + clippy + test, **70 lib + 5 CLI tests**) and pushed, **HEAD `74220d2`**. No open
+is green (fmt + clippy + test, **71 lib + 5 CLI tests**) and pushed, **HEAD `f29f4dc`**. No open
 branches, no worktrees, working tree clean.
 
 **Right now we are mid-build on the triage overlay** (the chosen next interface — a status pane that
 looks and behaves like a Claude Code agents-view TUI, rendered in a herdr overlay). It is
 design-gated (probes passed + a Fable advisor pass) and being built on a 7-slice plan.
-**Slices 1–5 are DONE and committed** (the inline-reply mechanism + the grouped agents-view render).
-**START AT §6 — the next task is slice 6**, the launcher overlay switch + the first live manual E2E.
+**Slices 1–6 are DONE and committed** — the inline-reply mechanism, the grouped agents-view render,
+and the overlay launcher, all **verified live end-to-end** in herdr 0.7.5 (§6). **START AT §6 — the
+only task left is slice 7**, the docs refresh + the bundled release.
 
 ---
 
@@ -248,16 +249,17 @@ operate on an enqueued entry?* If no, reject.
     exactly what was painted.
   - `WaitStatus` re-export in `lib.rs` is no longer test-only (production `draw`/`layout_rows` name
     it). Tests: `layout_rows` grouping/FIFO/empty-section, header-skip on click, updated click/mouse.
+- **Slice 6** (`f29f4dc`): the **overlay launcher** — `scripts/open-pane.sh`'s open now uses
+  `--placement overlay` (the split-only `--direction right` dropped; it has no meaning for a centered
+  overlay). The open/focus/close toggle is unchanged (it keys off the pane `label`, placement-
+  independent), so the decision logic + its tests are untouched. **Verified live in herdr 0.7.5**
+  (first full end-to-end run of the console): grouped AWAITING-YOU/DONE render on an interleaved
+  queue; `j`/`k` stepped A→C→B→D across the section boundary and clamped; `d`/`c`+`y` evicted through
+  the overlay; the overlay persisted on blur and kept rendering; and `space` reply on a **real claude
+  agent** routed the typed text into its session via `herdr agent prompt` (the agent began acting) and
+  evicted the entry on submit success with a `replied to Claude` footer.
 
-### NEXT — slice 6: launcher overlay + the first live manual E2E
-- **Switch `scripts/open-pane.sh`'s open to `--placement overlay`** (the `pane-decision` toggle is
-  placement-independent — it keys off the pane `label`, so no decision-logic change).
-- **Run the full manual E2E in real herdr** — this is the first live end-to-end run of the reply path
-  *and* the grouped render. Verify: grouped AWAITING-YOU/DONE render, `space` reply routes into the
-  agent + evicts, `Enter` jump, overlay summon/blur (persists on blur). See §5 for the recipe (the
-  reply path needs a real agent — `agent prompt` only accepts agent panes). Suggested skill: `/herdr`.
-
-### THEN — slice 7
+### NEXT — slice 7 (the only task left): docs + the bundled release
 - **Slice 7 — docs + the bundled release.** Update `README.md` (the `space` reply keybind + the
   overlay/agents-view note + a fresh demo gif via the `demo-gif` skill), `CHANGELOG.md`, and this
   HANDOFF. Since there is no standalone 0.4.0, this ships the `[Unreleased]` pane features **and** the
