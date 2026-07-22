@@ -97,3 +97,119 @@ pub(crate) fn is_live(live: &HashMap<String, String>, pane_id: &str) -> bool {
         None => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::WaitStatus;
+    use crate::test_support::{feed_status, load, pane_event_json, runtime, temp_state_dir};
+    use std::fs;
+
+    #[test]
+    fn blocked_and_done_enqueue_in_fifo_order() {
+        let dir = temp_state_dir("fifo");
+        feed_status(&dir, 1_000, "w1:p1", "w1", "blocked", "needs input");
+        feed_status(&dir, 2_000, "w2:p1", "w2", "done", "finished");
+
+        let entries = load(&dir);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].pane_id, "w1:p1");
+        assert_eq!(entries[0].status, WaitStatus::Blocked);
+        assert_eq!(entries[0].enqueued_at_ms, 1_000);
+        assert_eq!(entries[1].pane_id, "w2:p1");
+        assert_eq!(entries[1].status, WaitStatus::Done);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn re_enqueue_dedups_and_keeps_position_and_enqueued_at() {
+        let dir = temp_state_dir("dedup");
+        feed_status(&dir, 1_000, "w1:p1", "w1", "blocked", "first");
+        feed_status(&dir, 2_000, "w2:p1", "w2", "blocked", "second");
+        // w1:p1 goes from blocked to done — same waiter, updated in place.
+        feed_status(&dir, 3_000, "w1:p1", "w1", "done", "now done");
+
+        let entries = load(&dir);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].pane_id, "w1:p1");
+        assert_eq!(entries[0].status, WaitStatus::Done);
+        assert_eq!(entries[0].title.as_deref(), Some("now done"));
+        // Position and original wait time are preserved.
+        assert_eq!(entries[0].enqueued_at_ms, 1_000);
+        assert_eq!(entries[1].pane_id, "w2:p1");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn returning_to_working_evicts() {
+        let dir = temp_state_dir("working-evict");
+        feed_status(&dir, 1_000, "w1:p1", "w1", "blocked", "x");
+        feed_status(&dir, 2_000, "w1:p1", "w1", "working", "x");
+        assert!(load(&dir).is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn idle_and_unknown_leave_queue_untouched() {
+        let dir = temp_state_dir("idle-noop");
+        feed_status(&dir, 1_000, "w1:p1", "w1", "done", "x");
+        feed_status(&dir, 2_000, "w1:p1", "w1", "idle", "x");
+        feed_status(&dir, 3_000, "w1:p1", "w1", "unknown", "x");
+        assert_eq!(load(&dir).len(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn focused_event_evicts() {
+        let dir = temp_state_dir("focused-evict");
+        feed_status(&dir, 1_000, "w1:p1", "w1", "blocked", "x");
+        let mut rt = runtime(dir.clone(), 2_000);
+        rt.event_json = Some(pane_event_json("pane_focused", "w1:p1", "w1"));
+        on_focused(&rt).expect("focused should succeed");
+        assert!(load(&dir).is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn closed_event_evicts() {
+        let dir = temp_state_dir("closed-evict");
+        feed_status(&dir, 1_000, "w1:p1", "w1", "blocked", "x");
+        let mut rt = runtime(dir.clone(), 2_000);
+        rt.event_json = Some(pane_event_json("pane_closed", "w1:p1", "w1"));
+        on_closed(&rt).expect("closed should succeed");
+        assert!(load(&dir).is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn re_enqueue_bumps_last_touched_but_keeps_enqueued_at() {
+        let dir = temp_state_dir("last-touched");
+        feed_status(&dir, 1_000, "w1:p1", "w1", "blocked", "x");
+        // A later re-ping refreshes the same waiter.
+        feed_status(&dir, 5_000, "w1:p1", "w1", "done", "x");
+        let entries = load(&dir);
+        assert_eq!(entries[0].enqueued_at_ms, 1_000, "FIFO age is preserved");
+        assert_eq!(
+            entries[0].last_touched_ms, 5_000,
+            "refresh bumps last_touched"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn status_event_parses_the_top_level_shape_without_a_data_wrapper() {
+        let dir = temp_state_dir("toplevel-shape");
+        let mut rt = runtime(dir.clone(), 1_000);
+        rt.event_json = Some(
+            r#"{"pane_id":"w1:p1","workspace_id":"w1","agent_status":"blocked","title":"x"}"#
+                .to_string(),
+        );
+        on_status_changed(&rt).expect("status-changed should parse the flat shape");
+        let entries = load(&dir);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pane_id, "w1:p1");
+        let _ = fs::remove_dir_all(dir);
+    }
+}

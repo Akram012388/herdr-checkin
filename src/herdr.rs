@@ -147,7 +147,7 @@ fn parse_pane_status_map(stdout: &[u8]) -> Result<HashMap<String, String>, Plugi
 /// Parse `herdr pane list` into the fields the queue needs. Preserves the panes' returned order
 /// (a `Vec`, not a map) so a re-seed is deterministic. Panes without a `pane_id` are skipped;
 /// missing `agent_status` falls back to `"unknown"` (which the seed ignores — not a wait status).
-pub(crate) fn parse_pane_infos(stdout: &[u8]) -> Result<Vec<PaneInfo>, PluginError> {
+fn parse_pane_infos(stdout: &[u8]) -> Result<Vec<PaneInfo>, PluginError> {
     let value: Value = serde_json::from_slice(stdout).map_err(|error| {
         PluginError::new(format!(
             "failed to parse HERDR_BIN_PATH pane list JSON: {error}"
@@ -186,7 +186,7 @@ pub(crate) fn parse_pane_infos(stdout: &[u8]) -> Result<Vec<PaneInfo>, PluginErr
     Ok(infos)
 }
 
-pub(crate) fn herdr_error_message(value: &Value) -> Option<String> {
+fn herdr_error_message(value: &Value) -> Option<String> {
     let error = value.get("error")?;
     // A present-but-null `error` is a success shape, not a failure.
     if error.is_null() {
@@ -256,4 +256,30 @@ fn non_empty_string(value: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_pane_infos_extracts_wait_fields_and_skips_idless_panes() {
+        let json = br#"{"result":{"type":"pane_list","panes":[
+            {"pane_id":"wA:p1","workspace_id":"wA","agent_status":"blocked","agent":"claude","display_agent":"Claude","title":"needs input","focused":true},
+            {"pane_id":"","agent_status":"done"},
+            {"agent_status":"done"}
+        ]}}"#;
+        let infos = parse_pane_infos(json).expect("pane list should parse");
+        assert_eq!(infos.len(), 1, "panes without a pane_id are skipped");
+        assert_eq!(infos[0].pane_id, "wA:p1");
+        assert_eq!(infos[0].workspace_id, "wA");
+        assert_eq!(infos[0].agent_status, "blocked");
+        assert_eq!(infos[0].title.as_deref(), Some("needs input"));
+    }
+
+    #[test]
+    fn null_error_field_is_treated_as_success() {
+        let value: Value = serde_json::from_str(r#"{"result":{"panes":[]},"error":null}"#).unwrap();
+        assert_eq!(herdr_error_message(&value), None);
+    }
 }

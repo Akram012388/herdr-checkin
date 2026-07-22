@@ -270,3 +270,37 @@ impl fmt::Display for PluginError {
 }
 
 impl std::error::Error for PluginError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{feed_status, load, temp_state_dir};
+    use std::fs;
+
+    #[test]
+    fn state_file_without_last_touched_loads_and_defaults_to_zero() {
+        // Backward compatibility: a pre-0.2.x state.json has no last_touched_ms field.
+        let dir = temp_state_dir("legacy-state");
+        fs::write(
+            dir.join(STATE_FILE_NAME),
+            r#"{"version":1,"entries":[{"pane_id":"w1:p1","workspace_id":"w1","status":"blocked","enqueued_at_ms":1000}]}"#,
+        )
+        .expect("legacy state should write");
+        let entries = load(&dir);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].enqueued_at_ms, 1_000);
+        assert_eq!(entries[0].last_touched_ms, 0, "missing field defaults to 0");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn malformed_state_is_repaired_to_empty() {
+        let dir = temp_state_dir("malformed");
+        fs::write(dir.join(STATE_FILE_NAME), "not json").expect("write malformed state");
+        feed_status(&dir, 1_000, "w1:p1", "w1", "blocked", "x");
+        let entries = load(&dir);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pane_id, "w1:p1");
+        let _ = fs::remove_dir_all(dir);
+    }
+}
