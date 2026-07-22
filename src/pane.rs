@@ -23,7 +23,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
@@ -684,13 +684,14 @@ fn draw_compose(
     frame.render_widget(reply_rule(&compose.draft.label, rule_area.width), rule_area);
 
     // One column of left padding aligns the input under the rule's label; the cursor rides the
-    // text's end. An empty buffer shows a dim-italic placeholder with the cursor parked at column 0.
+    // text's end. An empty buffer shows a faint neutral placeholder with the cursor parked at column
+    // 0 — a deliberate, placeholder-scoped exception to the otherwise-colorless modal.
     let pad_x = input_area.x + 1;
     if compose.draft.buffer.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(" "),
-                "type your reply".dim().italic(),
+                Span::styled("type your reply", Style::new().fg(Color::DarkGray)),
             ])),
             input_area,
         );
