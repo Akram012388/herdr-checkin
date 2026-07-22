@@ -137,6 +137,12 @@ fn event_loop(
                             KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 on_reply_submit(model, runtime, herdr)
                             }
+                            // ctrl+u clears the line to the left of the cursor (readline). We remap
+                            // it explicitly: tui-textarea 0.7 binds ctrl+u to `undo` and puts
+                            // delete-to-line-start on ctrl+j, not the convention the maintainer expects.
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                model.reply_delete_to_line_start()
+                            }
                             _ => model.reply_input(key),
                         }
                     } else if model.confirm_clear {
@@ -392,6 +398,15 @@ impl PaneModel {
     fn reply_input(&mut self, key: KeyEvent) {
         if let Some(draft) = self.reply.as_mut() {
             draft.input.input(key);
+        }
+    }
+
+    /// `ctrl+u`: delete from the cursor to the start of the line (readline "unix-line-discard").
+    /// tui-textarea 0.7 binds `ctrl+u` to `undo` and puts delete-to-head on `ctrl+j`, so we drive
+    /// the delete ourselves rather than relying on its default bindings. No-op outside reply mode.
+    fn reply_delete_to_line_start(&mut self) {
+        if let Some(draft) = self.reply.as_mut() {
+            draft.input.delete_line_by_head();
         }
     }
 
@@ -1067,6 +1082,21 @@ mod tests {
         assert_eq!(m.reply.as_ref().unwrap().input.lines(), ["hi"]);
         m.reply_input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(m.reply.as_ref().unwrap().input.lines(), ["h"]);
+    }
+
+    #[test]
+    fn reply_delete_to_line_start_clears_left_of_cursor() {
+        let mut m = model(&["w1:p1"]);
+        m.begin_reply();
+        for ch in "hello".chars() {
+            m.reply_input(char_key(ch));
+        }
+        // Park the cursor between "hel" and "lo" (two lefts from the end).
+        m.reply_input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        m.reply_input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        m.reply_delete_to_line_start();
+        // Only the left of the cursor is gone; the right ("lo") survives.
+        assert_eq!(m.reply.as_ref().unwrap().input.lines(), ["lo"]);
     }
 
     #[test]

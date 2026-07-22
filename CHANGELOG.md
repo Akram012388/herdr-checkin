@@ -79,6 +79,12 @@ release.
   orientation page that re-wires the pieces. The queue transitions no longer depend on the herdr seam
   (enforced by the module boundary, not just a comment). No behavior change.
 
+### Fixed
+- **`ctrl+u` in the reply bar now clears the line to the left of the cursor** (readline
+  "unix-line-discard"). tui-textarea 0.7 binds `ctrl+u` to *undo* and puts delete-to-line-start on
+  `ctrl+j`; the reply bar now intercepts `ctrl+u` and drives the delete itself, matching the
+  convention every other cursor key in the bar already follows.
+
 ### Docs
 - README now documents the popup-modal agents-view console, the grouped **CHECKIN** / **DONE**
   sections, and the `space` inline-reply key, with a refreshed animated demo (`docs/pane-demo.gif`)
