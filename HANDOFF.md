@@ -261,20 +261,32 @@ reachability + scroll mechanics) and a Fable design pass on the reply strip. Not
 on `main`. Tagging `v0.4.0` at HEAD (`9ce89c0`) is the maintainer's call — **do NOT tag
 autonomously.**
 
-### One open follow-up (optional, upstream-gated)
-1. **Background-dim upstream PR (herdr-core).** The popup still does not dim the panes *behind* it the
-   way `prefix+s` settings does. **Confirmed not fixable from the plugin** — a Sonnet source study of
-   herdr 0.7.5 (`ogulcancelik/herdr`, at `c234f22`) verified `render_popup_pane` never calls
-   `dim_background` and there is no manifest/config/IPC knob for it; `dim_background` is a private
+### One open follow-up (upstream-gated, IN PROGRESS via herdr's contribution process)
+1. **Background-dim upstream contribution (herdr-core).** The popup still does not dim the panes
+   *behind* it the way `prefix+s` settings does. **Confirmed not fixable from the plugin** — a Sonnet
+   source study of herdr 0.7.5 (`ogulcancelik/herdr`, at `c234f22`) verified `render_popup_pane` never
+   calls `dim_background` and there is no manifest/config/IPC knob for it; `dim_background` is a private
    `fn` in `src/ui.rs:552` that only the five `Mode`-driven native modals call. The dim is drawn by
    herdr's compositor over the surrounding panes, which our TUI process can't reach. **Exact upstream
    fix:** in `src/ui/panes.rs`, function `render_popup_pane` (~lines 401-429), insert
    `super::dim_background(frame, area);` right after the three early-return guards and before the
    `Clear`/`Block`/`rt.render` calls — mirroring `settings.rs:44`. No visibility changes needed
-   (`panes.rs` is a sibling module under `ui`). One line. It only takes effect after merge + a herdr
-   release + the user updating herdr — a slow external track. Draft the PR only if the maintainer asks.
-   (Note: the plugin *does* dim its **own** interior queue while composing a reply — see §3 `dim_area`
-   — but that is inside our pane and unrelated to dimming the background panes behind the popup.)
+   (`panes.rs` is a sibling module under `ui`). One line.
+   - **STATUS: proposed as GitHub Discussion #1733** (Ideas):
+     https://github.com/ogulcancelik/herdr/discussions/1733 — awaiting a maintainer.
+   - **herdr gates first-time external contributors** (`CONTRIBUTING.md` + `AGENTS.md`): a UI/feel
+     change must start as a Discussion, and an agent must NOT open an issue/PR on the contributor's
+     behalf or bypass the gate. Path: Discussion → a maintainer converts it to an issue and comments
+     `/approve @Akram012388` → *then* the PR. **Do NOT open the PR (or an issue) until that approval
+     lands.** Commit style there: lowercase conventional, **no emoji, no AI co-author line**; don't
+     touch root README/CHANGELOG in the PR (their rule). `just ci` = fmt + `cargo nextest run`.
+   - The ready 3-line change was committed on branch `popup-pane-dim-background` in this session's
+     **ephemeral scratchpad** fork clone (`Akram012388/herdr`), not pushed — re-create it from the
+     one-liner above if the scratchpad is gone. NOTE: a local full `cargo check` of herdr is blocked
+     in this environment by its vendored `libghostty-vt` zig build (unrelated to the change); rely on
+     herdr CI for the compile gate.
+   - (The plugin *does* dim its **own** interior queue while composing a reply — see §3 `dim_area` —
+     but that is inside our pane and unrelated to dimming the background panes behind the popup.)
 
 ### Parked / optional
 - **Refresh the demo gif (docs, plugin-side).** `docs/pane-demo.gif` predates the polish pass, so it
