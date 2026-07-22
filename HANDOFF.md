@@ -262,6 +262,10 @@ Claude Code's agent view but powered by herdr primitives. **Fully aligned with t
   `roster.rs` + hidden `roster` debug cmd → 2 tab toggle + read-only live roster (the tracer bullet) →
   3 jump/reply parity → 4 last-line column → 5 `roster.json` + time-in-state → 6 pin-to-top. Full slice
   table in the design doc §8.
+- **Per-slice tracker: GitHub issues [#1–#7](https://github.com/Akram012388/herdr-checkin/issues)**
+  (Slice 0→#1 … Slice 6→#7), dependency-ordered, labeled `ready-for-agent` (AFK: #1/#2/#6) or
+  `ready-for-human` (HITL live-eyeball: #3/#4/#5/#7). This doc + the design doc are the durable
+  in-repo tracker; the issues are the work queue. **Start with #1** (Slice 0, AFK, no blockers).
 
 ### DONE this session (folded into untagged 0.4.0)
 - **`ctrl+u` in the reply bar** now clears to line-start. Root cause: tui-textarea 0.7 binds `ctrl+u`

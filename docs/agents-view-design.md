@@ -109,6 +109,20 @@ Regression risks to guard while building:
 
 ## 8. Build slices (tracer-bullet; each ends green + eyeballed)
 
+Each slice is tracked as a GitHub issue (dependency-ordered). Repo docs + issues are complementary:
+this doc is the durable design, the issues are the per-slice work tracker.
+
+| Slice | Issue | Type |
+| --- | --- | --- |
+| 0 split `pane.rs` + snapshots | [#1](https://github.com/Akram012388/herdr-checkin/issues/1) | AFK |
+| 1 `agent_list` seam + `roster.rs` | [#2](https://github.com/Akram012388/herdr-checkin/issues/2) | AFK |
+| 2 tab toggle + live roster | [#3](https://github.com/Akram012388/herdr-checkin/issues/3) | HITL |
+| 3 jump + reply parity | [#4](https://github.com/Akram012388/herdr-checkin/issues/4) | HITL |
+| 4 last-line status column | [#5](https://github.com/Akram012388/herdr-checkin/issues/5) | HITL |
+| 5 `roster.json` + time-in-state | [#6](https://github.com/Akram012388/herdr-checkin/issues/6) | AFK |
+| 6 pin-to-top | [#7](https://github.com/Akram012388/herdr-checkin/issues/7) | HITL |
+
+
 - **Slice 0** — Split `pane.rs` (1513 lines) into `pane/{mod,queue_view,compose}.rs`. Pure motion.
   **Also introduce ratatui `TestBackend` snapshot coverage** for the existing queue view + compose, so
   both views are born testable and the "eyeball-only QA" pain (see §9) starts retiring here.
