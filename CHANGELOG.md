@@ -17,6 +17,11 @@ All notable changes to this project are documented here. The format is based on
   around the TUI (ratatui's init/restore don't touch it) on every exit path, including a chained
   panic hook so a panic can't leave the shell emitting mouse escapes.
 
+### Docs
+- README now embeds an animated demo of the status pane (`docs/pane-demo.gif`), regenerable offline
+  with no real agents via `scripts/pane-demo.tape` + `scripts/pane-demo-setup.sh` (VHS). The key
+  table and the text fallback also now list the `c` (clear) and left-click bindings.
+
 ## [0.3.0] - 2026-07-22
 
 ### Added

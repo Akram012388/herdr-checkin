@@ -166,10 +166,16 @@ precedence confirm > status > hints via `confirm_prompt(count)` (pluralized), an
 - The confirm guard was hoisted above BOTH the `Event::Key` and `Event::Mouse` branches (the
   cross-feature trap): a click during a pending confirm cancels it rather than reselecting.
 
-**Feature C — README demo (scope only).** Record with `vhs` (charmbracelet): a checked-in
-`scripts/pane-demo.tape` drives seeded state through `j`/`k`/`Enter`/`d`/`c`/`q`; output
-`docs/pane-demo.gif` embedded in README's "status pane" section, keeping the existing ASCII fence as
-a fallback. GitHub renders GIFs inline (asciinema's player JS is stripped). Keep it < 2 MB.
+**Feature C — README demo. DONE (unreleased).** Shipped as scoped: `scripts/pane-demo.tape` (VHS)
+drives seeded state through `herdr-checkin pane` and `j`/`k`/`Enter`/`d`/`c`/`y`/`q`, output
+`docs/pane-demo.gif` (112K, ~15s, well under the 2 MB cap) embedded in README's "status pane"
+section above the ASCII fallback. `scripts/pane-demo-setup.sh` seeds a throwaway `state.json` +
+a fake `herdr` (so `Enter`'s `agent focus` succeeds) — sourced by the tape, runnable standalone; no
+real agents needed. Regenerate: `cargo build --release && vhs scripts/pane-demo.tape` from the repo
+root. (First render can hit a transient `ttyd`/`ERR_CONNECTION_REFUSED` port race — just rerun.)
+Also refreshed the README key table / text fallback to list the `c` (clear) and left-click bindings.
+
+**The `src/pane.rs` ready-to-build lane is now fully done (A, B, C).** No scoped pane work remains.
 
 ### B. Parked (needs upstream herdr, do not schedule)
 

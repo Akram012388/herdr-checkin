@@ -42,18 +42,24 @@ view, so a single press takes you straight to the waiting agent wherever it live
 alternative to the transient `peek` toast. It lists the live queue and lets you jump without
 leaving the keyboard:
 
+![The status pane: navigate the queue, jump to an agent, drop entries, and clear it](docs/pane-demo.gif)
+
+The same thing as text, if the GIF doesn't load:
+
 ```
 Check-in — 2 agents waiting
 > 1. Claude — blocked — needs your input [wA, 3m]
   2. Codex — done — build finished [wB, just now]
-j/k move  ·  Enter jump  ·  d drop  ·  q quit
+j/k move  ·  Enter jump  ·  d drop  ·  c clear  ·  q quit
 ```
 
 | Key | Action |
 | --- | --- |
 | `j` / `k` (or down / up) | Move the selection. |
+| Left click | Select the clicked row (same as `j` / `k`). |
 | `Enter` | Jump to the selected agent (`herdr agent focus`, cross-workspace) and drop it from the queue. If the jump fails, the entry stays and the error shows in the footer. |
 | `d` | Drop the selected entry without jumping. |
+| `c` | Clear the whole queue, after a `y` / `n` confirm in the footer. |
 | `q` / `Esc` | Close the pane. |
 
 The pane refreshes itself — herdr delivers events only to short-lived handlers, not to a
