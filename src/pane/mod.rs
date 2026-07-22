@@ -464,9 +464,10 @@ fn sampler_loop(herdr: &CliHerdr, snapshot_tx: &Sender<RosterSnapshot>, stop_rx:
 
 // --- model (pure) ----------------------------------------------------------
 
-/// Which view the popup is showing. `Tab`/`Ctrl+S` flip between them; the durable [`Queue`] is the
-/// default (a fresh popup opens on the attention inbox), the read-only [`Agents`] roster is the live
-/// view the sampler feeds.
+/// Which view the popup is showing. `Tab`/`Ctrl+S` flip between them: the durable [`Queue`] is the
+/// attention inbox, the read-only [`Agents`] roster is the live view the sampler feeds. A fresh
+/// popup opens on [`Queue`] when there's a waiter to show, else on [`Agents`] — an empty inbox
+/// shouldn't greet the user with "you're all caught up" when there's a live roster to see instead.
 ///
 /// [`Queue`]: ActiveTab::Queue
 /// [`Agents`]: ActiveTab::Agents
@@ -511,13 +512,21 @@ struct PaneModel {
 
 impl PaneModel {
     fn new(entries: Vec<QueueEntry>) -> Self {
+        // One-time decision at construction only: an empty queue opens on Agents instead of Queue
+        // (see the ActiveTab doc comment). This never re-evaluates as the queue empties/fills later
+        // — that would yank the user's tab around — `tab` is otherwise only changed by `toggle_tab`.
+        let tab = if entries.is_empty() {
+            ActiveTab::Agents
+        } else {
+            ActiveTab::Queue
+        };
         Self {
             entries,
             selected: 0,
             status: None,
             confirm_clear: false,
             reply: None,
-            tab: ActiveTab::Queue,
+            tab,
             roster: None,
             roster_selected: 0,
         }
@@ -878,6 +887,20 @@ mod tests {
     }
 
     #[test]
+    fn new_opens_on_agents_when_the_queue_is_empty_else_on_queue() {
+        assert_eq!(
+            model(&[]).tab,
+            ActiveTab::Agents,
+            "an empty queue shouldn't greet the user with an empty inbox"
+        );
+        assert_eq!(
+            model(&["w1:p1"]).tab,
+            ActiveTab::Queue,
+            "a nonempty queue still opens on the attention inbox"
+        );
+    }
+
+    #[test]
     fn move_down_and_up_clamp_at_the_ends() {
         let mut m = model(&["w1:p1", "w2:p1"]);
         assert_eq!(m.selected, 0);
@@ -987,6 +1010,9 @@ mod tests {
     #[test]
     fn begin_reply_is_a_noop_on_an_empty_queue() {
         let mut m = model(&[]);
+        // An empty queue now defaults to the Agents tab; force Queue so this still exercises the
+        // queue-tab's begin_reply no-op, as intended.
+        m.tab = ActiveTab::Queue;
         m.begin_reply();
         assert!(m.reply.is_none(), "nothing selected, nothing to reply to");
     }
@@ -1203,7 +1229,10 @@ mod tests {
 
     #[test]
     fn snapshot_empty_queue_shows_the_caught_up_message() {
-        let m = model(&[]);
+        let mut m = model(&[]);
+        // An empty queue now defaults to the Agents tab; force Queue so this still renders (and
+        // tests) the queue's own empty-state message.
+        m.tab = ActiveTab::Queue;
         assert_eq!(
             content_lines(&render_buffer(&m, 80, 6)),
             vec![
