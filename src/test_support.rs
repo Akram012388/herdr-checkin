@@ -159,6 +159,9 @@ pub(crate) fn runtime(state_dir: PathBuf, now_ms: u64) -> RuntimeEnv {
         state_dir,
         event_json: None,
         now_ms,
+        // Tests never spawn the roster sampler (they exercise the pure model/render, not the loop),
+        // so a placeholder path is fine — no `agent list` is ever run through it.
+        herdr_bin_path: PathBuf::from("herdr"),
     }
 }
 

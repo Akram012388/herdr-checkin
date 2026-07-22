@@ -18,9 +18,12 @@
 //! queue in [`queue_view`], the inline-reply compose strip in [`compose`] — so the coming Agents
 //! view slots in as a third sibling without growing the loop.
 
+mod agents_view;
 mod compose;
 mod queue_view;
 
+use crate::herdr::CliHerdr;
+use crate::roster::RosterSnapshot;
 use crate::{
     agent_label, clear, current_unix_ms, evict, load_entries, Herdr, PluginError, QueueEntry,
     RuntimeEnv, StateStore,
@@ -36,12 +39,19 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::widgets::{ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tui_textarea::TextArea;
 
 /// How long the input poll blocks each tick before we re-read the queue and repaint, so queue
 /// changes and the ticking "waited" column appear promptly without busy-spinning.
 const TICK: Duration = Duration::from_millis(250);
+
+/// How often the roster sampler thread polls `herdr agent list`. The render tick (`TICK`) only
+/// drains the delivered snapshots, so a status flip surfaces within about one cadence plus one tick.
+const ROSTER_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 const FOOTER_HINTS: &str =
     "j/k move  ·  Enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit";
@@ -114,6 +124,13 @@ fn event_loop(
     // fresh `ListState` each frame would throw that away. `list_area` is the list's on-screen
     // `Rect`, recorded by `draw` each frame (None while the queue is empty — nothing to click).
     let mut list_state = ListState::default();
+
+    // The Agents view is fed by a background thread polling `herdr agent list` (never the render
+    // tick — invariant that the durable Queue view can't jank). It ships snapshots over an mpsc the
+    // tick drains without blocking; it is joined on drop, so every exit path (including a `?` below)
+    // tears it down cleanly.
+    let sampler = RosterSampler::spawn(runtime.herdr_bin_path.clone());
+
     loop {
         let now_ms = current_unix_ms();
         let mut list_area = None;
@@ -161,17 +178,29 @@ fn event_loop(
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 return Ok(());
                             }
-                            KeyCode::Char('j') | KeyCode::Down => model.move_down(),
-                            KeyCode::Char('k') | KeyCode::Up => model.move_up(),
-                            KeyCode::Enter => {
-                                // A successful jump closes the popup (run() then fires popup.close).
-                                if on_enter(model, runtime, herdr) {
-                                    return Ok(());
-                                }
+                            // Tab / Ctrl+S toggle Queue <-> Agents in either view. Purely a view
+                            // switch: it never touches the popup lifecycle (invariant #5) — `Enter`
+                            // from either view is the one shared close path.
+                            KeyCode::Tab => model.toggle_tab(),
+                            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                model.toggle_tab()
                             }
-                            KeyCode::Char('d') | KeyCode::Char('x') => on_drop(model, runtime),
-                            KeyCode::Char('c') => model.request_clear(),
-                            KeyCode::Char(' ') => model.begin_reply(),
+                            // The Queue view's row bindings. Gated on the active tab so the Agents
+                            // view stays read-only in Slice 2 (no j/k/Enter/d/c/reply there yet).
+                            _ if model.tab == ActiveTab::Queue => match key.code {
+                                KeyCode::Char('j') | KeyCode::Down => model.move_down(),
+                                KeyCode::Char('k') | KeyCode::Up => model.move_up(),
+                                KeyCode::Enter => {
+                                    // A successful jump closes the popup (run() fires popup.close).
+                                    if on_enter(model, runtime, herdr) {
+                                        return Ok(());
+                                    }
+                                }
+                                KeyCode::Char('d') | KeyCode::Char('x') => on_drop(model, runtime),
+                                KeyCode::Char('c') => model.request_clear(),
+                                KeyCode::Char(' ') => model.begin_reply(),
+                                _ => {}
+                            },
                             _ => {}
                         }
                     }
@@ -184,7 +213,8 @@ fn event_loop(
                         // A click while a clear-all confirm is pending cancels it, like any other
                         // non-`y` input — never a reselect.
                         model.confirm_clear = false;
-                    } else {
+                    } else if model.tab == ActiveTab::Queue {
+                        // Clicks select a queue row; the read-only Agents view ignores them (Slice 2).
                         on_mouse(model, mouse, list_area, list_state.offset());
                     }
                 }
@@ -195,6 +225,13 @@ fn event_loop(
                 }
                 _ => {}
             }
+        }
+
+        // Drain any roster snapshots the sampler delivered since the last tick, keeping the newest.
+        // Non-blocking (`try_recv`): the tick never waits on the CLI, and a tick with no new sample
+        // leaves the cached roster in place so a row never blanks (design §5).
+        if let Some(snapshot) = sampler.drain_latest() {
+            model.roster = Some(snapshot);
         }
 
         // Refresh from the shared file every tick. Parse-and-compare (no mtime guard: mtime has
@@ -318,7 +355,105 @@ fn evict_pane(runtime: &RuntimeEnv, pane_id: &str) -> Result<(), PluginError> {
     })
 }
 
+// --- roster sampler (the Agents view's live feed) --------------------------
+
+/// A background thread that polls `herdr agent list` on a fixed cadence and ships each
+/// [`RosterSnapshot`] to the render tick over an mpsc. It exists so the CLI never runs on the render
+/// tick — the durable Queue view can't be janked by a slow `agent list`, and a dropped sample just
+/// leaves the last roster on screen.
+///
+/// Owned by [`event_loop`]; dropping it stops and joins the thread (see the [`Drop`] impl), so every
+/// pane-exit path tears the worker down deterministically rather than detaching it.
+struct RosterSampler {
+    /// Newest-wins queue of snapshots from the worker; [`drain_latest`](Self::drain_latest) empties
+    /// it each tick without blocking.
+    rx: Receiver<RosterSnapshot>,
+    /// Signals the worker to stop: dropping it disconnects the worker's `recv_timeout`, waking it out
+    /// of its sleep immediately. `Option` so [`Drop`] can drop it *before* the join.
+    stop_tx: Option<Sender<()>>,
+    /// The worker handle, joined on drop. `Option` so [`Drop`] can `take` it out to join by value.
+    handle: Option<JoinHandle<()>>,
+}
+
+impl RosterSampler {
+    /// Spawn the sampler over a fresh [`CliHerdr`] built from `bin_path` (the worker owns its own
+    /// herdr handle — the borrowed `&dyn Herdr` the pane runs on is neither `Send` nor `'static`).
+    /// Samples once immediately so the Agents view has data on its first open, then every
+    /// [`ROSTER_SAMPLE_INTERVAL`].
+    fn spawn(bin_path: PathBuf) -> Self {
+        let (snapshot_tx, rx) = mpsc::channel::<RosterSnapshot>();
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let handle = thread::Builder::new()
+            .name("checkin-roster-sampler".to_string())
+            .spawn(move || sampler_loop(&CliHerdr { bin_path }, &snapshot_tx, &stop_rx))
+            .expect("spawning the roster sampler thread should not fail");
+        Self {
+            rx,
+            stop_tx: Some(stop_tx),
+            handle: Some(handle),
+        }
+    }
+
+    /// Drain every snapshot delivered since the last call and return the most recent, or `None` if
+    /// the worker delivered nothing (keep showing the cached roster). Never blocks.
+    fn drain_latest(&self) -> Option<RosterSnapshot> {
+        let mut latest = None;
+        while let Ok(snapshot) = self.rx.try_recv() {
+            latest = Some(snapshot);
+        }
+        latest
+    }
+}
+
+impl Drop for RosterSampler {
+    fn drop(&mut self) {
+        // Drop the stop sender first so the worker's `recv_timeout` returns `Disconnected` at once,
+        // then join — so shutdown waits on at most an in-flight `agent list`, not the full cadence.
+        drop(self.stop_tx.take());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// The sampler thread body: sample, deliver, then sleep on `stop_rx` for one cadence. Sampling on an
+/// interruptible `recv_timeout` (rather than `thread::sleep`) means a stop wakes it immediately.
+/// Exits when the shell drops the receiver (the pane is closing) or signals stop; an `agent list`
+/// error is skipped so a transient failure never blanks the view — the next sample recovers.
+fn sampler_loop(herdr: &CliHerdr, snapshot_tx: &Sender<RosterSnapshot>, stop_rx: &Receiver<()>) {
+    loop {
+        if let Ok(agents) = herdr.agent_list() {
+            let snapshot = RosterSnapshot {
+                sampled_at_ms: current_unix_ms(),
+                agents,
+            };
+            // The receiver is gone -> the pane is closing; stop.
+            if snapshot_tx.send(snapshot).is_err() {
+                return;
+            }
+        }
+        match stop_rx.recv_timeout(ROSTER_SAMPLE_INTERVAL) {
+            // Told to stop, or the shell dropped its stop sender: exit.
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+            // The cadence elapsed with no stop: take the next sample.
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
 // --- model (pure) ----------------------------------------------------------
+
+/// Which view the popup is showing. `Tab`/`Ctrl+S` flip between them; the durable [`Queue`] is the
+/// default (a fresh popup opens on the attention inbox), the read-only [`Agents`] roster is the live
+/// view the sampler feeds.
+///
+/// [`Queue`]: ActiveTab::Queue
+/// [`Agents`]: ActiveTab::Agents
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveTab {
+    Queue,
+    Agents,
+}
 
 /// An in-progress inline reply. The target `pane_id` and its display `label` are captured when
 /// reply mode is armed — not read from the live selection at submit time — so a concurrent queue
@@ -341,6 +476,13 @@ struct PaneModel {
     /// `Some` while composing an inline reply (armed by `space`). Distinct from `confirm_clear` so
     /// the two modals never overlap — `begin_reply` refuses to arm while a clear-confirm is pending.
     reply: Option<ReplyDraft>,
+    /// Which view is showing. The Queue keeps all its state (selection, reply, confirm) across a
+    /// toggle, so flipping to the Agents view and back is lossless.
+    tab: ActiveTab,
+    /// The latest roster the sampler delivered, or `None` until its first sample lands. Replaced
+    /// wholesale each delivery and never persisted (design §5) — the Agents view renders it, the
+    /// Queue view ignores it.
+    roster: Option<RosterSnapshot>,
 }
 
 impl PaneModel {
@@ -351,7 +493,19 @@ impl PaneModel {
             status: None,
             confirm_clear: false,
             reply: None,
+            tab: ActiveTab::Queue,
+            roster: None,
         }
+    }
+
+    /// `Tab`/`Ctrl+S`: switch between the Queue and Agents views. A pure view flip — it leaves the
+    /// queue's selection, any armed reply, and a pending clear-confirm untouched, and never touches
+    /// the popup lifecycle (invariant #5).
+    fn toggle_tab(&mut self) {
+        self.tab = match self.tab {
+            ActiveTab::Queue => ActiveTab::Agents,
+            ActiveTab::Agents => ActiveTab::Queue,
+        };
     }
 
     /// `c`: arm the clear-all confirm, but only when there's something to clear (a no-op on an
@@ -477,7 +631,27 @@ impl PaneModel {
 
 // --- view ------------------------------------------------------------------
 
+/// Paint the active view. Dispatches on the tab so the Queue render stays exactly as it was (the
+/// durable view is unaffected by the Agents-view work); the Agents view is a sibling render module.
 fn draw(
+    frame: &mut Frame,
+    model: &PaneModel,
+    now_ms: u64,
+    list_state: &mut ListState,
+    list_area: &mut Option<Rect>,
+) {
+    match model.tab {
+        ActiveTab::Queue => draw_queue(frame, model, now_ms, list_state, list_area),
+        ActiveTab::Agents => {
+            // The read-only Agents view has no clickable rows in Slice 2, so it records no list
+            // rect: `on_mouse` is gated off in this tab and never reads a stale Queue rect.
+            *list_area = None;
+            agents_view::draw_agents(frame, model);
+        }
+    }
+}
+
+fn draw_queue(
     frame: &mut Frame,
     model: &PaneModel,
     now_ms: u64,
@@ -989,6 +1163,133 @@ mod tests {
             buffer[(0, 5)].symbol(),
             " ",
             "the unselected entry has no marker"
+        );
+    }
+
+    // --- Agents view: tab toggle + roster render ---------------------------
+
+    use crate::roster::{AgentStatus, RosterAgent, RosterSnapshot};
+
+    fn roster_agent(pane_id: &str, workspace_id: &str, status: AgentStatus) -> RosterAgent {
+        RosterAgent {
+            pane_id: pane_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            tab_id: Some(format!("{workspace_id}:t1")),
+            agent: Some("claude".to_string()),
+            agent_status: status,
+            agent_session: Some("uuid-1".to_string()),
+            cwd: Some("/tmp".to_string()),
+            focused: false,
+            terminal_title: Some("herdr-checkin".to_string()),
+        }
+    }
+
+    #[test]
+    fn toggle_tab_flips_queue_and_agents_and_is_lossless() {
+        let mut m = model(&["w1:p1", "w2:p1"]);
+        m.move_down(); // selection at 1
+        assert_eq!(m.tab, ActiveTab::Queue);
+        m.toggle_tab();
+        assert_eq!(m.tab, ActiveTab::Agents);
+        m.toggle_tab();
+        assert_eq!(m.tab, ActiveTab::Queue);
+        assert_eq!(
+            m.selected, 1,
+            "the queue selection survives a round-trip toggle"
+        );
+    }
+
+    #[test]
+    fn snapshot_agents_view_groups_rows_by_workspace() {
+        let mut m = model(&[]);
+        m.tab = ActiveTab::Agents;
+        m.roster = Some(RosterSnapshot {
+            sampled_at_ms: 1_000,
+            agents: vec![
+                roster_agent("w4:p1", "w4", AgentStatus::Idle),
+                roster_agent("w4:p2", "w4", AgentStatus::Blocked),
+                roster_agent("wN:p1", "wN", AgentStatus::Working),
+            ],
+        });
+        assert_eq!(
+            content_lines(&render_buffer(&m, 80, 12)),
+            vec![
+                "3 agents",
+                "",
+                "w4", // workspace group header
+                "t1 · pane 1",
+                "idle · herdr-checkin",
+                "t1 · pane 2",
+                "blocked · herdr-checkin",
+                "",
+                "wN",
+                "t1 · pane 1",
+                "working · herdr-checkin",
+                "tab: queue  ·  q quit",
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_agents_view_shows_the_sampling_placeholder_before_the_first_sample() {
+        // `roster` is None until the sampler delivers: the view says it is sampling, not "no agents".
+        let mut m = model(&[]);
+        m.tab = ActiveTab::Agents;
+        assert_eq!(
+            content_lines(&render_buffer(&m, 80, 5)),
+            vec![
+                "no agents",
+                "Sampling agents...",
+                "",
+                "",
+                "tab: queue  ·  q quit",
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_agents_view_distinguishes_an_empty_roster_from_no_sample_yet() {
+        // A delivered-but-empty snapshot is a real "herdr reports no agents" reading, worded apart
+        // from the pre-first-sample placeholder above.
+        let mut m = model(&[]);
+        m.tab = ActiveTab::Agents;
+        m.roster = Some(RosterSnapshot {
+            sampled_at_ms: 1_000,
+            agents: Vec::new(),
+        });
+        assert_eq!(
+            content_lines(&render_buffer(&m, 80, 5)),
+            vec![
+                "no agents",
+                "No agents running.",
+                "",
+                "",
+                "tab: queue  ·  q quit",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_toggle_switches_which_view_renders() {
+        // The same model renders the Queue, then the Agents view, purely off `tab` — proving the
+        // toggle picks the surface with no other state change.
+        let mut m = model(&["w1:p1"]);
+        m.roster = Some(RosterSnapshot {
+            sampled_at_ms: 1_000,
+            agents: vec![roster_agent("w9:p1", "w9", AgentStatus::Done)],
+        });
+        let queue = content_lines(&render_buffer(&m, 80, 6));
+        assert_eq!(
+            queue[0], "1 agent waiting",
+            "Queue tab shows the queue header"
+        );
+
+        m.toggle_tab();
+        let agents = content_lines(&render_buffer(&m, 80, 6));
+        assert_eq!(agents[0], "1 agent", "Agents tab shows the roster header");
+        assert!(
+            agents.iter().any(|line| line == "w9"),
+            "and the roster's workspace group, not the queue"
         );
     }
 

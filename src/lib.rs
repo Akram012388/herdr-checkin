@@ -63,6 +63,7 @@ pub fn run_from_env() -> i32 {
         state_dir,
         event_json: env::var("HERDR_PLUGIN_EVENT_JSON").ok(),
         now_ms: current_unix_ms(),
+        herdr_bin_path: herdr_bin_path.clone(),
     };
     let herdr = CliHerdr {
         bin_path: herdr_bin_path,
@@ -164,4 +165,9 @@ struct RuntimeEnv {
     state_dir: PathBuf,
     event_json: Option<String>,
     now_ms: u64,
+    /// The `herdr` binary path (`HERDR_BIN_PATH`), carried so the pane's roster sampler thread can
+    /// build its own [`CliHerdr`] to poll `agent list` off the render tick (the borrowed
+    /// `&dyn Herdr` handed to each subcommand is neither `Send` nor `'static`, so it can't move into
+    /// the worker). Every subcommand's live `Herdr` is still constructed from this same path.
+    herdr_bin_path: PathBuf,
 }

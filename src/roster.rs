@@ -99,6 +99,55 @@ pub(crate) fn group_by_workspace(agents: &[RosterAgent]) -> Vec<WorkspaceGroup> 
     groups
 }
 
+/// The primary (destination) line for an Agents-view row: `{tab} · pane {n}` within the workspace
+/// group. The workspace is the group header (agents are grouped by workspace), so it is not repeated
+/// per row — this is the queue's `entry_destination` idiom minus the leading workspace. `agent list`
+/// carries no workspace/tab labels, so the raw ids are used: a `wS:tN` tab id shows its `tN` segment
+/// and a `wS:pN` pane id its number as `pane N`. Falls back to the whole `pane_id` if neither
+/// segment parses, so a row is never blank.
+pub(crate) fn agent_destination(agent: &RosterAgent) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(2);
+    if let Some(tab) = agent.tab_id.as_deref().and_then(id_segment) {
+        parts.push(tab.to_string());
+    }
+    match id_segment(&agent.pane_id).and_then(pane_number) {
+        Some(number) => parts.push(format!("pane {number}")),
+        // No `pN` pane segment: show the raw pane id so the row still identifies the pane.
+        None => parts.push(agent.pane_id.clone()),
+    }
+    parts.join(" · ")
+}
+
+/// The detail (second) line for an Agents-view row: the live status then the terminal title, if any
+/// (`{status} · {title}`, or just `{status}` when the pane has no title). Time-in-state (`blocked 4m`)
+/// arrives in Slice 5; Slice 2 shows the instantaneous status only.
+pub(crate) fn agent_detail(agent: &RosterAgent) -> String {
+    let status = agent.agent_status.as_str();
+    match agent
+        .terminal_title
+        .as_deref()
+        .filter(|title| !title.is_empty())
+    {
+        Some(title) => format!("{status} · {title}"),
+        None => status.to_string(),
+    }
+}
+
+/// The last `:`-separated segment of an id (`wS:tN` -> `tN`), or `None` if empty. Mirrors the queue's
+/// `actions::id_segment` — kept local so `roster.rs` stays self-contained and Herdr-free (design §5).
+fn id_segment(id: &str) -> Option<&str> {
+    id.rsplit_once(':')
+        .map(|(_, segment)| segment)
+        .filter(|segment| !segment.is_empty())
+}
+
+/// The numeric part of a `pN` pane segment (`p1` -> `1`), or `None` if it isn't `p`+digits. Mirrors
+/// the queue's `actions::pane_number`.
+fn pane_number(segment: &str) -> Option<&str> {
+    let number = segment.strip_prefix('p')?;
+    (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())).then_some(number)
+}
+
 /// Render a snapshot as a plain-text dump for the hidden `roster` debug subcommand: a header line
 /// (sample time + counts) then, per workspace, one line per agent showing **every** parsed field
 /// (pane/tab ids, agent, status, session uuid, cwd, focus, terminal title). Dev-only visibility into
@@ -228,6 +277,43 @@ mod tests {
         assert!(text.contains("\nw4\n"), "the w4 group is listed");
         assert!(text.contains("\nwT\n"), "the wT group is listed");
         assert!(text.contains("w4:p1"), "the agent row shows its pane id");
+    }
+
+    #[test]
+    fn agent_destination_shows_tab_and_pane_number_within_the_group() {
+        // The workspace is the group header, so the row destination is `{tab} · pane {n}`.
+        let a = agent("w4:p2", "w4", AgentStatus::Idle); // tab_id defaults to "w4:t1"
+        assert_eq!(agent_destination(&a), "t1 · pane 2");
+    }
+
+    #[test]
+    fn agent_destination_falls_back_when_ids_do_not_parse() {
+        // No tab id and a non-`pN` pane id: the raw pane id keeps the row identifiable, never blank.
+        let a = RosterAgent {
+            tab_id: None,
+            ..agent("weird-pane", "wX", AgentStatus::Working)
+        };
+        assert_eq!(agent_destination(&a), "weird-pane");
+    }
+
+    #[test]
+    fn agent_detail_joins_status_and_title_and_degrades_without_a_title() {
+        let with_title = agent("w4:p1", "w4", AgentStatus::Blocked); // title defaults to "title"
+        assert_eq!(agent_detail(&with_title), "blocked · title");
+        let no_title = RosterAgent {
+            terminal_title: None,
+            ..agent("w4:p1", "w4", AgentStatus::Working)
+        };
+        assert_eq!(agent_detail(&no_title), "working");
+        let empty_title = RosterAgent {
+            terminal_title: Some(String::new()),
+            ..agent("w4:p1", "w4", AgentStatus::Done)
+        };
+        assert_eq!(
+            agent_detail(&empty_title),
+            "done",
+            "an empty title is dropped, not shown as a trailing separator"
+        );
     }
 
     #[test]
