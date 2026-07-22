@@ -99,9 +99,12 @@ fn on_enter(model: &mut PaneModel, runtime: &RuntimeEnv, herdr: &dyn Herdr) {
     };
     match herdr.focus_agent(&pane_id) {
         Ok(()) => {
-            evict_pane(runtime, &pane_id);
+            // The jump worked; if the drop can't be persisted, say so rather than imply success.
+            model.status = match evict_pane(runtime, &pane_id) {
+                Ok(()) => None,
+                Err(error) => Some(format!("jumped, but drop failed: {error}")),
+            };
             model.sync(load_entries(&runtime.state_dir));
-            model.status = None;
         }
         Err(error) => {
             model.status = Some(format!("focus failed: {error}"));
@@ -114,17 +117,19 @@ fn on_drop(model: &mut PaneModel, runtime: &RuntimeEnv) {
     let Some(pane_id) = model.selected_pane_id().map(str::to_owned) else {
         return;
     };
-    evict_pane(runtime, &pane_id);
+    model.status = match evict_pane(runtime, &pane_id) {
+        Ok(()) => None,
+        Err(error) => Some(format!("drop failed: {error}")),
+    };
     model.sync(load_entries(&runtime.state_dir));
-    model.status = None;
 }
 
 /// Remove a pane from the queue as a delta under the lock (never a full model write-back).
-fn evict_pane(runtime: &RuntimeEnv, pane_id: &str) {
-    let _ = StateStore::new(&runtime.state_dir).update(|mut entries| {
+fn evict_pane(runtime: &RuntimeEnv, pane_id: &str) -> Result<(), PluginError> {
+    StateStore::new(&runtime.state_dir).update(|mut entries| {
         evict(&mut entries, pane_id);
         (entries, ())
-    });
+    })
 }
 
 // --- launch decision (idempotent open / focus / close toggle) --------------
@@ -179,6 +184,10 @@ impl PaneInfo {
 /// Scoping to the current tab keeps a focus from yanking the user into another workspace, and
 /// matches herdr's own plugin-pane conventions. All targeted ids are checked flag-safe so a
 /// crafted id can never be read as a CLI option by the launcher.
+///
+/// This relies on herdr reporting exactly one globally-focused pane in `pane list` (verified
+/// against herdr 0.7.5: one `focused: true` across all workspaces), so `find` returns the pane
+/// the user is actually on.
 fn decide(panes: &[PaneInfo]) -> Decision {
     let focused = panes.iter().find(|pane| pane.focused);
 

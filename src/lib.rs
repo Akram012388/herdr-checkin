@@ -140,44 +140,63 @@ fn evict_event_pane(runtime: &RuntimeEnv) -> Result<(), PluginError> {
 
 // --- actions ---------------------------------------------------------------
 
-/// Jump to the oldest still-waiting pane and pop it from the queue. Stale
-/// entries (pane gone, or resumed to `working`) are skipped and dropped. An
-/// empty queue is a clean no-op — no error toast.
+/// Jump to the oldest still-waiting pane, then pop it from the queue. An empty queue is a clean
+/// no-op — no error toast.
+///
+/// Two safety rules keep this from losing the ping it exists to protect:
+/// - **Focus first, evict on success only.** The target is kept in the queue while we focus it;
+///   only a successful `agent focus` removes it. A focus failure leaves the entry in place.
+/// - **Never drop an entry the liveness snapshot couldn't see.** The `pane list` snapshot is
+///   taken before the lock, so an entry enqueued after it would look stale. We prune an entry as
+///   stale only if it predates the snapshot; newer ones are kept (this window is exactly when you
+///   press `next` as an agent blocks).
 fn next(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
+    let snapshot_ms = current_unix_ms();
     let live = herdr.pane_status_map()?;
 
     let target = StateStore::new(&runtime.state_dir).update(|entries| {
-        let mut remaining = entries.into_iter();
-        let mut target = None;
         let mut kept: Vec<QueueEntry> = Vec::new();
+        let mut target = None;
+        let mut remaining = entries.into_iter();
         for entry in remaining.by_ref() {
             if is_live(&live, &entry.pane_id) {
                 target = Some(entry.pane_id.clone());
+                kept.push(entry); // keep the target until the focus is confirmed
                 break;
             }
-            // else: stale, drop it silently.
+            if entry.enqueued_at_ms >= snapshot_ms {
+                kept.push(entry); // too new for the snapshot to judge — keep it
+            }
+            // else: stale and older than the snapshot — drop it.
         }
-        // Whatever we did not consume stays in the queue, in order.
-        kept.extend(remaining);
+        kept.extend(remaining); // everything past the target stays in order
         (kept, target)
     })?;
 
     if let Some(pane_id) = target {
+        // Focus first; a failure here returns Err with the entry still queued.
         herdr.focus_agent(&pane_id)?;
+        // The jump succeeded — now evict the entry as a delta under the lock.
+        StateStore::new(&runtime.state_dir).update(|mut entries| {
+            evict(&mut entries, &pane_id);
+            (entries, ())
+        })?;
     }
 
     Ok(())
 }
 
-/// Show the current queue as a herdr toast. Read-oriented, but prunes stale
-/// entries so the count and list stay honest.
+/// Show the current queue as a herdr toast. Read-oriented, but prunes stale entries so the count
+/// and list stay honest — keeping any entry the pre-lock snapshot was too early to judge (see
+/// [`next`] for why).
 fn peek(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
+    let snapshot_ms = current_unix_ms();
     let live = herdr.pane_status_map()?;
 
     let entries = StateStore::new(&runtime.state_dir).update(|entries| {
         let kept: Vec<QueueEntry> = entries
             .into_iter()
-            .filter(|entry| is_live(&live, &entry.pane_id))
+            .filter(|entry| is_live(&live, &entry.pane_id) || entry.enqueued_at_ms >= snapshot_ms)
             .collect();
         (kept.clone(), kept)
     })?;
@@ -267,12 +286,16 @@ fn describe_entry(entry: &QueueEntry, now_ms: u64) -> String {
         .unwrap_or(&entry.pane_id);
     let waited = format_waited(now_ms.saturating_sub(entry.enqueued_at_ms));
     let status = entry.status.as_str();
+    // The bracketed suffix carries the workspace and wait time; omit the workspace when it is
+    // missing so it never renders as an empty "[, 3m]".
+    let meta = if entry.workspace_id.is_empty() {
+        waited
+    } else {
+        format!("{}, {waited}", entry.workspace_id)
+    };
     match entry.title.as_deref().filter(|value| !value.is_empty()) {
-        Some(title) => format!(
-            "{who} — {status} — {title} [{}, {waited}]",
-            entry.workspace_id
-        ),
-        None => format!("{who} — {status} [{}, {waited}]", entry.workspace_id),
+        Some(title) => format!("{who} — {status} — {title} [{meta}]"),
+        None => format!("{who} — {status} [{meta}]"),
     }
 }
 
@@ -501,6 +524,10 @@ fn parse_pane_status_map(stdout: &[u8]) -> Result<HashMap<String, String>, Plugi
 
 fn herdr_error_message(value: &Value) -> Option<String> {
     let error = value.get("error")?;
+    // A present-but-null `error` is a success shape, not a failure.
+    if error.is_null() {
+        return None;
+    }
     let code = error.get("code").and_then(Value::as_str);
     let message = error.get("message").and_then(Value::as_str);
 
@@ -706,7 +733,10 @@ fn read_state(path: &Path) -> Result<LoadedState, PluginError> {
 
     match serde_json::from_str::<PersistedState>(&contents) {
         Ok(state) => Ok(LoadedState {
-            needs_repair: state.version != STATE_VERSION,
+            // Rewrite (to stamp the current version) only when the file is from an older schema.
+            // A forward-version file — written by a newer plugin — is left as-is here rather than
+            // silently rewritten down to our version, so we don't strip fields we can't model.
+            needs_repair: state.version < STATE_VERSION,
             entries: state.entries,
         }),
         Err(_) => Ok(LoadedState {
@@ -749,19 +779,23 @@ fn write_state(path: &Path, entries: &[QueueEntry]) -> Result<(), PluginError> {
         version: STATE_VERSION,
         entries: entries.to_vec(),
     };
+    // Any failure after the temp file exists must not leave it behind as litter in the state dir.
     serde_json::to_writer_pretty(&mut temp_file, &state).map_err(|error| {
+        let _ = fs::remove_file(&temp_path);
         PluginError::new(format!(
             "failed to serialize plugin state {}: {error}",
             temp_path.display()
         ))
     })?;
     temp_file.write_all(b"\n").map_err(|error| {
+        let _ = fs::remove_file(&temp_path);
         PluginError::new(format!(
             "failed to write plugin state {}: {error}",
             temp_path.display()
         ))
     })?;
     temp_file.sync_all().map_err(|error| {
+        let _ = fs::remove_file(&temp_path);
         PluginError::new(format!(
             "failed to sync plugin state {}: {error}",
             temp_path.display()
@@ -820,6 +854,7 @@ mod tests {
 
     struct FakeHerdr {
         live: HashMap<String, String>,
+        focus_fails: bool,
         focused: RefCell<Vec<String>>,
         notifications: RefCell<Vec<(String, Option<String>, String)>>,
     }
@@ -831,9 +866,15 @@ mod tests {
                     .iter()
                     .map(|(pane_id, status)| (pane_id.to_string(), status.to_string()))
                     .collect(),
+                focus_fails: false,
                 focused: RefCell::new(Vec::new()),
                 notifications: RefCell::new(Vec::new()),
             }
+        }
+
+        fn with_failing_focus(mut self) -> Self {
+            self.focus_fails = true;
+            self
         }
     }
 
@@ -843,6 +884,9 @@ mod tests {
         }
 
         fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError> {
+            if self.focus_fails {
+                return Err(PluginError::new(format!("focus refused for {pane_id}")));
+            }
             self.focused.borrow_mut().push(pane_id.to_string());
             Ok(())
         }
@@ -1024,6 +1068,92 @@ mod tests {
         next(&rt, &herdr).expect("next should be a no-op");
         assert!(herdr.focused.into_inner().is_empty());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn next_keeps_the_entry_when_the_focus_fails() {
+        let dir = temp_state_dir("next-focus-fail");
+        feed_status(&dir, 1_000, "w1:p1", "w1", "blocked", "x");
+        let herdr = FakeHerdr::new(&[("w1:p1", "blocked")]).with_failing_focus();
+        let rt = runtime(dir.clone(), 2_000);
+
+        // A failed jump must not lose the ping.
+        assert!(next(&rt, &herdr).is_err());
+        let entries = load(&dir);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pane_id, "w1:p1");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn next_does_not_drop_an_entry_enqueued_after_the_liveness_snapshot() {
+        let dir = temp_state_dir("next-fresh");
+        // Enqueued far in the future so it postdates next()'s snapshot; its pane is absent from
+        // the snapshot, so the old code would have judged it stale and dropped it.
+        feed_status(&dir, u64::MAX, "wZ:p9", "wZ", "blocked", "fresh");
+        let herdr = FakeHerdr::new(&[]);
+        let rt = runtime(dir.clone(), 1_000);
+
+        next(&rt, &herdr).expect("next should succeed");
+        assert!(herdr.focused.into_inner().is_empty());
+        assert_eq!(load(&dir).len(), 1, "the fresh entry must survive");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn peek_does_not_drop_an_entry_enqueued_after_the_liveness_snapshot() {
+        let dir = temp_state_dir("peek-fresh");
+        feed_status(&dir, u64::MAX, "wZ:p9", "wZ", "blocked", "fresh");
+        let herdr = FakeHerdr::new(&[]);
+        let rt = runtime(dir.clone(), 1_000);
+
+        peek(&rt, &herdr).expect("peek should succeed");
+        assert_eq!(load(&dir).len(), 1, "the fresh entry must survive");
+        assert_eq!(
+            herdr.notifications.into_inner()[0].0,
+            "Check-in: 1 agent waiting"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn status_event_parses_the_top_level_shape_without_a_data_wrapper() {
+        let dir = temp_state_dir("toplevel-shape");
+        let mut rt = runtime(dir.clone(), 1_000);
+        rt.event_json = Some(
+            r#"{"pane_id":"w1:p1","workspace_id":"w1","agent_status":"blocked","title":"x"}"#
+                .to_string(),
+        );
+        on_status_changed(&rt).expect("status-changed should parse the flat shape");
+        let entries = load(&dir);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pane_id, "w1:p1");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn describe_entry_omits_a_missing_workspace() {
+        let entry = QueueEntry {
+            pane_id: "p".to_string(),
+            workspace_id: String::new(),
+            agent: None,
+            display_agent: None,
+            title: None,
+            status: WaitStatus::Done,
+            enqueued_at_ms: 0,
+        };
+        let line = describe_entry(&entry, 0);
+        assert!(!line.contains("[,"), "line was: {line}");
+        assert!(line.ends_with("[just now]"), "line was: {line}");
+    }
+
+    #[test]
+    fn null_error_field_is_treated_as_success() {
+        let value: Value = serde_json::from_str(r#"{"result":{"panes":[]},"error":null}"#).unwrap();
+        assert_eq!(herdr_error_message(&value), None);
     }
 
     #[test]

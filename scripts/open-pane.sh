@@ -26,19 +26,28 @@ if [ -x "$viewer_bin" ]; then
   fi
 fi
 
+open_pane() {
+  exec "$herdr_bin" plugin pane open \
+    --plugin Akram012388.checkin \
+    --entrypoint queue \
+    --placement split \
+    --direction right \
+    --focus
+}
+
+# The decision is computed from a snapshot; the target pane can vanish before we act on it. If a
+# FOCUS/CLOSE fails (e.g. the pane was closed in the race window), fall back to opening one rather
+# than failing the action.
 case "$decision" in
   "FOCUS "*)
-    exec "$herdr_bin" plugin pane focus "${decision#FOCUS }"
+    "$herdr_bin" plugin pane focus "${decision#FOCUS }" && exit 0
+    open_pane
     ;;
   "CLOSE "*)
-    exec "$herdr_bin" plugin pane close "${decision#CLOSE }"
+    "$herdr_bin" plugin pane close "${decision#CLOSE }" && exit 0
+    exit 0
     ;;
   *)
-    exec "$herdr_bin" plugin pane open \
-      --plugin Akram012388.checkin \
-      --entrypoint queue \
-      --placement split \
-      --direction right \
-      --focus
+    open_pane
     ;;
 esac
