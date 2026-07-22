@@ -156,9 +156,16 @@ this doc is the durable design, the issues are the per-slice work tracker.
     views (active tab carries the selection band), so `Tab` is discoverable and identical on each;
     both footers show `space reply`. This deliberately drops the "Queue byte-identical" stance —
     superseded by the maintainer's request for a clear, consistent indicator.
+  - **Human names, not ids:** the roster is enriched (`herdr::enrich_roster_labels`, best-effort) from
+    `workspace list`/`tab list`/`pane list`, so a row reads `home / ~ · pane 1` like herdr's own
+    sidebar rather than `w4 / t1 · pane 1`. `RosterAgent` gained `workspace_label`/`tab_label`/
+    `pane_label`; `agent_destination` + `workspace_display_label` prefer them with id fallback (the
+    Queue's `entry_destination` idiom). A missed lookup degrades to ids — never fails the roster.
+  - **Tab-bar tooltip:** a dim `tab · switch` hint sits beside the two tabs on both views.
   - `pane/agents_view.rs` render sibling; `TestBackend` snapshots for the grouped roster (with cursor),
     the placeholder, the empty-roster wording, the toggle, plus model tests for agents selection/clamp,
-    snapshot re-anchoring, agents-view reply target, and the agents-view jump. CI green (113 lib + 5 CLI).
+    snapshot re-anchoring, agents-view reply target, the agents-view jump, and roster label enrichment.
+    CI green (117 lib + 5 CLI).
   - *Gate (HITL, outstanding):* open the popup, `Tab` to Agents, drive `j`/`k`/`space`/`Enter`, and
     confirm a live status flip shows within ~1s with no jank; Queue tab still fully works. **Popup
     geometry:** the maintainer confirmed 50%×50% reads fine — left as-is.

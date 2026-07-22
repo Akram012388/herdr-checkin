@@ -13,7 +13,7 @@
 use super::compose::{dim_area, draw_compose};
 use super::queue_view::{render_list_scrollbar, SELECTION_BG};
 use super::{draw_tab_bar, ActiveTab, PaneModel, ReplyDraft};
-use crate::roster::{agent_destination, agent_detail, RosterAgent};
+use crate::roster::{agent_destination, agent_detail, workspace_display_label, RosterAgent};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
@@ -42,9 +42,10 @@ pub(super) fn layout_rows(agents: &[&RosterAgent]) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut current: Option<&str> = None;
     for (index, agent) in agents.iter().enumerate() {
+        // Group by the stable workspace id, but title each section with herdr's human name.
         if current != Some(agent.workspace_id.as_str()) {
             rows.push(Row::Spacer);
-            rows.push(Row::Header(agent.workspace_id.clone()));
+            rows.push(Row::Header(workspace_display_label(agent).to_string()));
             current = Some(agent.workspace_id.as_str());
         }
         rows.push(Row::Entry(index));
@@ -252,6 +253,9 @@ mod tests {
             cwd: None,
             focused: false,
             terminal_title: Some("title".to_string()),
+            workspace_label: None,
+            tab_label: None,
+            pane_label: None,
         }
     }
 

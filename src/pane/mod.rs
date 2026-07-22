@@ -742,9 +742,10 @@ fn draw(
     }
 }
 
-/// The tab bar shown as the top row of both views: the two tabs side by side, the active one carrying
-/// the same soft grey band the selected row uses (bold, undimmed), the inactive one dim. It is the
-/// consistent, always-visible affordance for the `Tab`/`Ctrl+S` toggle — identical on both surfaces.
+/// The tab bar shown as the top row of both views: the two tabs side by side (the active one carrying
+/// the same soft grey band the selected row uses, bold and undimmed; the inactive one dim), followed
+/// by a dim `tab · switch` tooltip. It is the consistent, always-visible affordance for the
+/// `Tab`/`Ctrl+S` toggle — identical on both surfaces.
 fn draw_tab_bar(frame: &mut Frame, area: Rect, active: ActiveTab) {
     use ratatui::text::{Line, Span};
 
@@ -758,6 +759,7 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, active: ActiveTab) {
         Span::styled(" Queue ", queue_style),
         Span::raw("   "),
         Span::styled(" Agents ", agents_style),
+        Span::styled("     tab · switch", idle),
     ]);
     frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
@@ -1205,7 +1207,7 @@ mod tests {
         assert_eq!(
             content_lines(&render_buffer(&m, 80, 6)),
             vec![
-                "Queue     Agents", // the tab bar tops both views (active tab banded)
+                "Queue     Agents      tab · switch", // the tab bar tops both views (active tab banded)
                 "queue empty",
                 "No agents waiting — you're all caught up.",
                 "",
@@ -1225,7 +1227,7 @@ mod tests {
         assert_eq!(
             content_lines(&render_buffer(&m, 80, 13)),
             vec![
-                "Queue     Agents",
+                "Queue     Agents      tab · switch",
                 "3 agents waiting",
                 "",
                 "CHECKIN",
@@ -1250,7 +1252,7 @@ mod tests {
         assert_eq!(
             content_lines(&render_buffer(&m, 80, 9)),
             vec![
-                "Queue     Agents".to_string(),
+                "Queue     Agents      tab · switch".to_string(),
                 "1 agent waiting".to_string(),
                 "".to_string(),
                 "CHECKIN".to_string(),
@@ -1297,6 +1299,9 @@ mod tests {
             cwd: Some("/tmp".to_string()),
             focused: false,
             terminal_title: Some("herdr-checkin".to_string()),
+            workspace_label: None,
+            tab_label: None,
+            pane_label: None,
         }
     }
 
@@ -1420,7 +1425,7 @@ mod tests {
         assert_eq!(
             content_lines(&render_buffer(&m, 80, 13)),
             vec![
-                "Queue     Agents", // the tab bar, Agents active
+                "Queue     Agents      tab · switch", // the tab bar, Agents active
                 "3 agents",
                 "",
                 "w4",            // workspace group header
@@ -1445,7 +1450,7 @@ mod tests {
         assert_eq!(
             content_lines(&render_buffer(&m, 80, 5)),
             vec![
-                "Queue     Agents",
+                "Queue     Agents      tab · switch",
                 "no agents",
                 "Sampling agents...",
                 "",
@@ -1467,7 +1472,7 @@ mod tests {
         assert_eq!(
             content_lines(&render_buffer(&m, 80, 5)),
             vec![
-                "Queue     Agents",
+                "Queue     Agents      tab · switch",
                 "no agents",
                 "No agents running.",
                 "",
@@ -1487,7 +1492,7 @@ mod tests {
         });
         // Row 0 is the shared tab bar on both views; the count header is row 1.
         let queue = content_lines(&render_buffer(&m, 80, 7));
-        assert_eq!(queue[0], "Queue     Agents");
+        assert_eq!(queue[0], "Queue     Agents      tab · switch");
         assert_eq!(
             queue[1], "1 agent waiting",
             "Queue tab shows the queue header"
@@ -1495,7 +1500,7 @@ mod tests {
 
         m.toggle_tab();
         let agents = content_lines(&render_buffer(&m, 80, 7));
-        assert_eq!(agents[0], "Queue     Agents");
+        assert_eq!(agents[0], "Queue     Agents      tab · switch");
         assert_eq!(agents[1], "1 agent", "Agents tab shows the roster header");
         assert!(
             agents.iter().any(|line| line == "w9"),

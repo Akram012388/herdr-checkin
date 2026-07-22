@@ -62,6 +62,13 @@ pub(crate) struct RosterAgent {
     pub(crate) cwd: Option<String>,
     pub(crate) focused: bool,
     pub(crate) terminal_title: Option<String>,
+    /// Human names herdr shows for this pane's workspace/tab/pane (`w4` -> `home`, `w4:t1` -> `~`).
+    /// `agent list` carries only positional ids, so the herdr seam enriches these from
+    /// `workspace list`/`tab list`/`pane list` — `None` when a lookup missed, and the view then falls
+    /// back to the id (mirroring the Queue's `workspace_label`/`tab_label`/`pane_label`).
+    pub(crate) workspace_label: Option<String>,
+    pub(crate) tab_label: Option<String>,
+    pub(crate) pane_label: Option<String>,
 }
 
 /// A single sampler delivery: the whole roster at one instant. The view replaces this wholesale each
@@ -140,22 +147,48 @@ pub(crate) fn roster_reply_label(agent: &RosterAgent) -> String {
     }
 }
 
-/// The primary (destination) line for an Agents-view row: `{tab} · pane {n}` within the workspace
+/// The workspace label shown as an Agents-view group header — herdr's human name (`home`), falling
+/// back to the raw `workspace_id` (`w4`) when the enrichment missed. The Queue's analogue is the
+/// `workspace_label`-else-`workspace_id` branch of `actions::entry_destination`.
+pub(crate) fn workspace_display_label(agent: &RosterAgent) -> &str {
+    agent
+        .workspace_label
+        .as_deref()
+        .filter(|label| !label.is_empty())
+        .unwrap_or(&agent.workspace_id)
+}
+
+/// The primary (destination) line for an Agents-view row: `{tab} · {pane}` within the workspace
 /// group. The workspace is the group header (agents are grouped by workspace), so it is not repeated
-/// per row — this is the queue's `entry_destination` idiom minus the leading workspace. `agent list`
-/// carries no workspace/tab labels, so the raw ids are used: a `wS:tN` tab id shows its `tN` segment
-/// and a `wS:pN` pane id its number as `pane N`. Falls back to the whole `pane_id` if neither
-/// segment parses, so a row is never blank.
+/// per row — this is the queue's `entry_destination` idiom minus the leading workspace. Each segment
+/// prefers herdr's human name (`~`, a pane label) and falls back to the positional id (`t1`, `pane 1`),
+/// so it reads the same as the Queue and herdr's own sidebar once the roster is enriched.
 pub(crate) fn agent_destination(agent: &RosterAgent) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(2);
-    if let Some(tab) = agent.tab_id.as_deref().and_then(id_segment) {
+
+    // Tab: its label, else the `tN` segment of the tab id.
+    if let Some(tab) = agent
+        .tab_label
+        .as_deref()
+        .filter(|label| !label.is_empty())
+        .or_else(|| agent.tab_id.as_deref().and_then(id_segment))
+    {
         parts.push(tab.to_string());
     }
-    match id_segment(&agent.pane_id).and_then(pane_number) {
-        Some(number) => parts.push(format!("pane {number}")),
-        // No `pN` pane segment: show the raw pane id so the row still identifies the pane.
-        None => parts.push(agent.pane_id.clone()),
+
+    // Pane: its label, else `pane N` from the `pN` segment, else the raw pane id — never blank.
+    if let Some(pane) = agent
+        .pane_label
+        .as_deref()
+        .filter(|label| !label.is_empty())
+    {
+        parts.push(pane.to_string());
+    } else if let Some(number) = id_segment(&agent.pane_id).and_then(pane_number) {
+        parts.push(format!("pane {number}"));
+    } else {
+        parts.push(agent.pane_id.clone());
     }
+
     parts.join(" · ")
 }
 
@@ -236,6 +269,9 @@ mod tests {
             cwd: Some("/tmp".to_string()),
             focused: false,
             terminal_title: Some("title".to_string()),
+            workspace_label: None,
+            tab_label: None,
+            pane_label: None,
         }
     }
 
@@ -370,6 +406,36 @@ mod tests {
         // The workspace is the group header, so the row destination is `{tab} · pane {n}`.
         let a = agent("w4:p2", "w4", AgentStatus::Idle); // tab_id defaults to "w4:t1"
         assert_eq!(agent_destination(&a), "t1 · pane 2");
+    }
+
+    #[test]
+    fn agent_destination_prefers_human_names_over_ids() {
+        // Enriched with herdr's names: the row reads `{tab-label} · {pane-label}`, not `t1 · pane 2`.
+        let a = RosterAgent {
+            tab_label: Some("herdr-config".to_string()),
+            pane_label: Some("editor".to_string()),
+            ..agent("w4:p2", "w4", AgentStatus::Idle)
+        };
+        assert_eq!(agent_destination(&a), "herdr-config · editor");
+        // A pane with only a tab name falls back to `pane N` for the pane segment.
+        let tab_only = RosterAgent {
+            tab_label: Some("~".to_string()),
+            ..agent("w4:p3", "w4", AgentStatus::Idle)
+        };
+        assert_eq!(tab_only.pane_label, None);
+        assert_eq!(agent_destination(&tab_only), "~ · pane 3");
+    }
+
+    #[test]
+    fn workspace_display_label_prefers_the_name_then_the_id() {
+        let named = RosterAgent {
+            workspace_label: Some("home".to_string()),
+            ..agent("w4:p1", "w4", AgentStatus::Idle)
+        };
+        assert_eq!(workspace_display_label(&named), "home");
+        // No label (enrichment missed) falls back to the raw workspace id.
+        let bare = agent("w4:p1", "w4", AgentStatus::Idle);
+        assert_eq!(workspace_display_label(&bare), "w4");
     }
 
     #[test]

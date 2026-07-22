@@ -173,7 +173,9 @@ impl Herdr for CliHerdr {
     }
 
     fn agent_list(&self) -> Result<Vec<RosterAgent>, PluginError> {
-        parse_agent_list(&self.agent_list_stdout()?)
+        let mut roster = parse_agent_list(&self.agent_list_stdout()?)?;
+        enrich_roster_labels(self, &mut roster);
+        Ok(roster)
     }
 
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError> {
@@ -390,9 +392,44 @@ fn parse_agent_list(stdout: &[u8]) -> Result<Vec<RosterAgent>, PluginError> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             terminal_title: non_empty_string(agent, "terminal_title"),
+            // Labels are not in `agent list`; the CliHerdr seam enriches them (see `agent_list`).
+            workspace_label: None,
+            tab_label: None,
+            pane_label: None,
         });
     }
     Ok(roster)
+}
+
+/// Enrich a parsed roster with herdr's human names for each pane's workspace/tab/pane. `agent list`
+/// carries only positional ids (`w4`, `w4:t1`), so we resolve labels from `workspace list`/`tab
+/// list`/`pane list` — the same sources the Queue enriches from — so the Agents view reads like
+/// herdr's own sidebar (`home · ~`) rather than raw ids. **Best-effort:** a lookup that fails leaves
+/// that label `None` and the view falls back to the id; cosmetic enrichment must never fail the
+/// roster (losing a name degrades the display, never a waiter).
+fn enrich_roster_labels(herdr: &dyn Herdr, roster: &mut [RosterAgent]) {
+    let workspaces = herdr.workspace_labels().unwrap_or_default();
+    let tabs = herdr.tab_labels().unwrap_or_default();
+    let panes = herdr.pane_infos().unwrap_or_default();
+    let pane_labels: HashMap<&str, &str> = panes
+        .iter()
+        .filter_map(|pane| {
+            pane.label
+                .as_deref()
+                .map(|label| (pane.pane_id.as_str(), label))
+        })
+        .collect();
+
+    for agent in roster.iter_mut() {
+        agent.workspace_label = workspaces.get(&agent.workspace_id).cloned();
+        agent.tab_label = agent
+            .tab_id
+            .as_deref()
+            .and_then(|tab_id| tabs.get(tab_id).cloned());
+        agent.pane_label = pane_labels
+            .get(agent.pane_id.as_str())
+            .map(|label| label.to_string());
+    }
 }
 
 /// The session uuid from an agent's nested `agent_session.value`, or `None` when the object (or the
@@ -675,6 +712,75 @@ mod tests {
     fn parse_agent_list_surfaces_a_herdr_error() {
         let json = br#"{"error":{"code":"no_session","message":"not attached"}}"#;
         assert!(parse_agent_list(json).is_err(), "a herdr error maps to Err");
+    }
+
+    #[test]
+    fn enrich_roster_labels_fills_names_from_the_label_sources() {
+        use crate::test_support::FakeHerdr;
+
+        // A parsed roster carries only ids; enrichment resolves herdr's human names from the
+        // workspace/tab/pane label maps, so the Agents view reads `home · ~ · editor`, not ids.
+        let mut roster = vec![RosterAgent {
+            pane_id: "w4:p1".to_string(),
+            workspace_id: "w4".to_string(),
+            tab_id: Some("w4:t1".to_string()),
+            agent: Some("codex".to_string()),
+            agent_status: AgentStatus::Idle,
+            agent_session: None,
+            cwd: None,
+            focused: false,
+            terminal_title: None,
+            workspace_label: None,
+            tab_label: None,
+            pane_label: None,
+        }];
+        let herdr = FakeHerdr::new(&[])
+            .with_workspace_labels(&[("w4", "home")])
+            .with_tab_labels(&[("w4:t1", "~")])
+            .with_panes(vec![PaneInfo {
+                pane_id: "w4:p1".to_string(),
+                workspace_id: "w4".to_string(),
+                tab_id: Some("w4:t1".to_string()),
+                label: Some("editor".to_string()),
+                agent_status: "idle".to_string(),
+                agent: Some("codex".to_string()),
+                display_agent: None,
+                title: None,
+            }]);
+
+        enrich_roster_labels(&herdr, &mut roster);
+
+        assert_eq!(roster[0].workspace_label.as_deref(), Some("home"));
+        assert_eq!(roster[0].tab_label.as_deref(), Some("~"));
+        assert_eq!(roster[0].pane_label.as_deref(), Some("editor"));
+    }
+
+    #[test]
+    fn enrich_roster_labels_leaves_ids_when_a_lookup_misses() {
+        use crate::test_support::FakeHerdr;
+
+        // No label maps seeded: enrichment is a no-op (labels stay None) and the view falls back to
+        // ids — cosmetic enrichment must never fail or blank the roster.
+        let mut roster = vec![RosterAgent {
+            pane_id: "wZ:p9".to_string(),
+            workspace_id: "wZ".to_string(),
+            tab_id: Some("wZ:t9".to_string()),
+            agent: None,
+            agent_status: AgentStatus::Working,
+            agent_session: None,
+            cwd: None,
+            focused: false,
+            terminal_title: None,
+            workspace_label: None,
+            tab_label: None,
+            pane_label: None,
+        }];
+
+        enrich_roster_labels(&FakeHerdr::new(&[]), &mut roster);
+
+        assert_eq!(roster[0].workspace_label, None);
+        assert_eq!(roster[0].tab_label, None);
+        assert_eq!(roster[0].pane_label, None);
     }
 
     #[test]
