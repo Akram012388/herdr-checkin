@@ -30,8 +30,7 @@ open_pane() {
   exec "$herdr_bin" plugin pane open \
     --plugin Akram012388.checkin \
     --entrypoint queue \
-    --placement split \
-    --direction right \
+    --placement overlay \
     --focus
 }
 
