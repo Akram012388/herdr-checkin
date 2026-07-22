@@ -134,30 +134,24 @@ visible`, and drive keys with `herdr pane send-keys <pane_id> <key>`. For the `s
 ### A. Deferred pane features — the ready-to-build lane (`src/pane.rs`)
 
 This lane is already scoped in detail. All work is in `src/pane.rs` (+ `README.md` for the demo);
-it is file-disjoint from the queue/manifest code. **A is next** — B is done.
+it is file-disjoint from the queue/manifest code. **A and B are done — Feature C (README demo) is
+what's left in this lane.**
 
 **Feature B — in-pane `c` = clear-all, with a confirm. DONE (unreleased).** Shipped as scoped:
 `confirm_clear` on `PaneModel`, a `request_clear()` that arms only on a non-empty queue, an
-`on_confirm_clear` intercept at the top of the `Event::Key` branch (`y`/`Y` confirms, else cancels)
-that reuses `crate::clear`, footer precedence confirm > status > hints via `confirm_prompt(count)`
-(pluralized), and three unit tests. See the confirm-guard comment in `event_loop` for the Feature A
-hoist point.
+`on_confirm_clear` intercept (`y`/`Y` confirms, else cancels) that reuses `crate::clear`, footer
+precedence confirm > status > hints via `confirm_prompt(count)` (pluralized), and three unit tests.
 
-**Feature A — mouse click-to-select.**
-- Harder than it sounds. `ratatui::try_init()`/`restore()` do NOT touch mouse capture — enable/
-  disable it by hand (`EnableMouseCapture`/`DisableMouseCapture` via `ratatui::crossterm`) on every
-  exit path. Note the panic-path gap: ratatui's panic hook won't disable capture, so a panic leaves
-  the shell emitting mouse escapes until `reset` — add a chained panic hook or at least a comment.
-- Hit-testing needs the list's live scroll offset, which the loop currently throws away (a fresh
-  `ListState::default()` is built inside `draw` each frame). Persist `ListState` + the list `Rect`
-  in `event_loop` and thread them into `draw`; read `list_state.offset()` after each render.
-- New pure fn `row_for_click(area, offset, entry_count, col, row) -> Option<usize>` (unit-testable):
-  bounds-check, map `offset + (row - area.y)`, return `None` if outside or `>= entry_count`.
-- Handle only `MouseEventKind::Down(Left)` (select, like `j`/`k`); ignore the rest. Empty queue is
-  safe by construction (`entry_count == 0` → always `None`).
-- **Cross-feature trap:** B's confirm intercept wraps only the `Event::Key` branch. When A adds an
-  `Event::Mouse` branch, hoist the confirm guard above BOTH branches, or a click during a pending
-  confirm silently reselects instead of cancelling.
+**Feature A — mouse click-to-select. DONE (unreleased).** Shipped as scoped:
+- Mouse capture enabled after `try_init`, disabled before `restore` on both the `Ok` and error
+  returns from `event_loop`, plus a chained panic hook (`install_mouse_panic_hook`) that disables
+  capture then defers to ratatui's restore hook — closing the panic-path gap.
+- `ListState` now persists across frames in `event_loop`; `draw` records the list `Rect` each frame
+  (`None` while the queue is empty) and the mouse handler reads `list_state.offset()` after render.
+- Pure `row_for_click(area, offset, entry_count, col, row) -> Option<usize>` (six unit tests);
+  `on_mouse` handles only `Down(Left)` and is a no-op on an empty queue / out-of-range rows.
+- The confirm guard was hoisted above BOTH the `Event::Key` and `Event::Mouse` branches (the
+  cross-feature trap): a click during a pending confirm cancels it rather than reselecting.
 
 **Feature C — README demo (scope only).** Record with `vhs` (charmbracelet): a checked-in
 `scripts/pane-demo.tape` drives seeded state through `j`/`k`/`Enter`/`d`/`c`/`q`; output

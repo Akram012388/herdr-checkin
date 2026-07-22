@@ -11,6 +11,11 @@ All notable changes to this project are documented here. The format is based on
   queue) arms a `clear all N entries? y/n` prompt in the footer; `y`/`Y` empties the queue, any
   other key cancels. Reuses the existing `clear` path, so the wipe is a delta under the state lock,
   never a full write-back. No-op on an empty queue, like `d`/`Enter`.
+- **Mouse click-to-select** in the status pane. A left click selects the clicked row, exactly like
+  `j`/`k` landing on it (other mouse events are ignored). A click while a clear-all confirm is
+  pending cancels the confirm rather than reselecting. Mouse capture is enabled/disabled by hand
+  around the TUI (ratatui's init/restore don't touch it) on every exit path, including a chained
+  panic hook so a panic can't leave the shell emitting mouse escapes.
 
 ## [0.3.0] - 2026-07-22
 

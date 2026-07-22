@@ -17,8 +17,12 @@ use crate::{
     clear, current_unix_ms, describe_entry, evict, load_entries, Herdr, PluginError, QueueEntry,
     RuntimeEnv, StateStore,
 };
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Alignment, Constraint, Layout};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::crossterm::execute;
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
@@ -39,13 +43,43 @@ const PANE_LABEL: &str = "Check-in";
 
 /// Entry point for the `pane` subcommand: run the TUI until the user closes it. The terminal is
 /// restored on every exit path (including a panic, via the hook `ratatui::try_init` installs).
+///
+/// Mouse capture is handled separately: `ratatui::try_init`/`restore` do **not** touch it, so we
+/// enable it after init, disable it before restore (covering both the `Ok` and the error return
+/// from `event_loop`), and chain a panic hook to disable it on the panic path — ratatui's own
+/// panic hook restores the terminal but leaves capture on, which would otherwise flood the shell
+/// with mouse escape sequences until the user ran `reset`.
 pub fn run(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
     let mut model = PaneModel::new(load_entries(&runtime.state_dir));
     let mut terminal = ratatui::try_init()
         .map_err(|error| PluginError::new(format!("failed to initialize terminal: {error}")))?;
+
+    if let Err(error) = execute!(std::io::stdout(), EnableMouseCapture) {
+        ratatui::restore();
+        return Err(PluginError::new(format!(
+            "failed to enable mouse capture: {error}"
+        )));
+    }
+    install_mouse_panic_hook();
+
     let result = event_loop(&mut terminal, &mut model, runtime, herdr);
+
+    // Disable capture before restore, and on every non-panic exit path (event_loop's `?` errors
+    // land here too). Best-effort: if this fails we're already tearing down.
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
+}
+
+/// Chain a panic hook that disables mouse capture, then defers to the hook `ratatui::try_init`
+/// already installed (which restores the terminal). Must be called *after* `try_init` so the hook
+/// we capture is ratatui's.
+fn install_mouse_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        previous(info);
+    }));
 }
 
 fn event_loop(
@@ -54,10 +88,16 @@ fn event_loop(
     runtime: &RuntimeEnv,
     herdr: &dyn Herdr,
 ) -> Result<(), PluginError> {
+    // Persisted across frames so mouse hit-testing can read the list's live scroll offset:
+    // `render_stateful_widget` maintains `list_state.offset()` as the selection/size change, and a
+    // fresh `ListState` each frame would throw that away. `list_area` is the list's on-screen
+    // `Rect`, recorded by `draw` each frame (None while the queue is empty — nothing to click).
+    let mut list_state = ListState::default();
     loop {
         let now_ms = current_unix_ms();
+        let mut list_area = None;
         terminal
-            .draw(|frame| draw(frame, model, now_ms))
+            .draw(|frame| draw(frame, model, now_ms, &mut list_state, &mut list_area))
             .map_err(|error| PluginError::new(format!("failed to draw: {error}")))?;
 
         if event::poll(TICK)
@@ -65,30 +105,38 @@ fn event_loop(
         {
             let event = event::read()
                 .map_err(|error| PluginError::new(format!("failed to read input: {error}")))?;
-            if let Event::Key(key) = event {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                // A pending clear-all confirm swallows the next key: it either confirms or
-                // cancels, and never falls through to the normal bindings. This guard wraps only
-                // the `Event::Key` branch — when a future `Event::Mouse` branch is added, hoist it
-                // above both, or a click during a pending confirm would silently miss it.
-                if model.confirm_clear {
-                    on_confirm_clear(model, runtime, key.code);
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(());
+            // The clear-all confirm guard is hoisted above BOTH the key and mouse branches: while
+            // a confirm is pending, any input other than `y`/`Y` cancels it and nothing falls
+            // through to the normal bindings (a click, in particular, must not silently reselect).
+            match event {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if model.confirm_clear {
+                        on_confirm_clear(model, runtime, key.code);
+                    } else {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                return Ok(());
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => model.move_down(),
+                            KeyCode::Char('k') | KeyCode::Up => model.move_up(),
+                            KeyCode::Enter => on_enter(model, runtime, herdr),
+                            KeyCode::Char('d') | KeyCode::Char('x') => on_drop(model, runtime),
+                            KeyCode::Char('c') => model.request_clear(),
+                            _ => {}
+                        }
                     }
-                    KeyCode::Char('j') | KeyCode::Down => model.move_down(),
-                    KeyCode::Char('k') | KeyCode::Up => model.move_up(),
-                    KeyCode::Enter => on_enter(model, runtime, herdr),
-                    KeyCode::Char('d') | KeyCode::Char('x') => on_drop(model, runtime),
-                    KeyCode::Char('c') => model.request_clear(),
-                    _ => {}
                 }
+                Event::Mouse(mouse) => {
+                    if model.confirm_clear {
+                        // A click while a clear-all confirm is pending cancels it, like any other
+                        // non-`y` input — never a reselect.
+                        model.confirm_clear = false;
+                    } else {
+                        on_mouse(model, mouse, list_area, list_state.offset());
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -145,6 +193,43 @@ fn on_confirm_clear(model: &mut PaneModel, runtime: &RuntimeEnv, code: KeyCode) 
         };
         model.sync(load_entries(&runtime.state_dir));
     }
+}
+
+/// A left mouse-button press selects the clicked row, exactly like `j`/`k` landing on it. Any
+/// other mouse event (drags, scrolls, other buttons, releases) is ignored. Safe on an empty queue
+/// by construction: `list_area` is `None` then, and even otherwise `row_for_click` returns `None`
+/// for an out-of-range row.
+fn on_mouse(model: &mut PaneModel, mouse: MouseEvent, list_area: Option<Rect>, offset: usize) {
+    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+        return;
+    }
+    if let Some(area) = list_area {
+        if let Some(index) =
+            row_for_click(area, offset, model.entries.len(), mouse.column, mouse.row)
+        {
+            model.selected = index;
+        }
+    }
+}
+
+/// Map a click at terminal cell `(col, row)` to the queue index it lands on, or `None` if the
+/// click is outside the list `area` or falls on a blank row below the last entry. `offset` is the
+/// index of the first visible row (the list's scroll position), so the clicked index is
+/// `offset + (row - area.y)`. Pure and unit-tested.
+fn row_for_click(
+    area: Rect,
+    offset: usize,
+    entry_count: usize,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
+    let inside_x = col >= area.x && col < area.x.saturating_add(area.width);
+    let inside_y = row >= area.y && row < area.y.saturating_add(area.height);
+    if !inside_x || !inside_y {
+        return None;
+    }
+    let index = offset + (row - area.y) as usize;
+    (index < entry_count).then_some(index)
 }
 
 /// Remove a pane from the queue as a delta under the lock (never a full model write-back).
@@ -337,7 +422,13 @@ impl PaneModel {
 
 // --- view ------------------------------------------------------------------
 
-fn draw(frame: &mut Frame, model: &PaneModel, now_ms: u64) {
+fn draw(
+    frame: &mut Frame,
+    model: &PaneModel,
+    now_ms: u64,
+    list_state: &mut ListState,
+    list_area: &mut Option<Rect>,
+) {
     let areas = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -367,9 +458,11 @@ fn draw(frame: &mut Frame, model: &PaneModel, now_ms: u64) {
         let list = List::new(items)
             .highlight_style(Style::new().reversed())
             .highlight_symbol("> ");
-        let mut state = ListState::default();
-        state.select(Some(model.selected));
-        frame.render_stateful_widget(list, areas[1], &mut state);
+        list_state.select(Some(model.selected));
+        // Record the list's rect for this frame so mouse clicks can be hit-tested against exactly
+        // what was painted; `render_stateful_widget` updates `list_state`'s scroll offset in place.
+        *list_area = Some(areas[1]);
+        frame.render_stateful_widget(list, areas[1], list_state);
     }
 
     let footer = if model.confirm_clear {
@@ -490,6 +583,100 @@ mod tests {
     fn confirm_prompt_pluralizes() {
         assert_eq!(confirm_prompt(1), "clear all 1 entry? y/n");
         assert_eq!(confirm_prompt(3), "clear all 3 entries? y/n");
+    }
+
+    // The list rect used across the click tests: starts at row 1 (row 0 is the header), 10 rows
+    // tall, 40 wide.
+    fn list_area() -> Rect {
+        Rect {
+            x: 0,
+            y: 1,
+            width: 40,
+            height: 10,
+        }
+    }
+
+    #[test]
+    fn row_for_click_maps_top_row_to_first_entry() {
+        // No scroll: the first visible row (area.y) is entry 0.
+        assert_eq!(row_for_click(list_area(), 0, 3, 5, 1), Some(0));
+        assert_eq!(row_for_click(list_area(), 0, 3, 0, 3), Some(2));
+    }
+
+    #[test]
+    fn row_for_click_accounts_for_scroll_offset() {
+        // Scrolled down by 2: the first visible row now maps to entry 2.
+        assert_eq!(row_for_click(list_area(), 2, 5, 10, 1), Some(2));
+        assert_eq!(row_for_click(list_area(), 2, 5, 10, 3), Some(4));
+    }
+
+    #[test]
+    fn row_for_click_rejects_blank_rows_below_the_last_entry() {
+        // Only 3 entries but the rect is 10 tall; a click on row 4 (would-be index 3) is blank.
+        assert_eq!(row_for_click(list_area(), 0, 3, 5, 4), None);
+    }
+
+    #[test]
+    fn row_for_click_rejects_clicks_outside_the_area() {
+        assert_eq!(row_for_click(list_area(), 0, 3, 5, 0), None); // header row, above the list
+        assert_eq!(row_for_click(list_area(), 0, 3, 5, 11), None); // below the list
+        assert_eq!(row_for_click(list_area(), 0, 3, 40, 1), None); // one past the right edge
+    }
+
+    #[test]
+    fn row_for_click_is_safe_on_an_empty_queue() {
+        assert_eq!(row_for_click(list_area(), 0, 0, 5, 1), None);
+    }
+
+    fn mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    #[test]
+    fn on_mouse_left_click_selects_the_clicked_row() {
+        let mut m = model(&["w1:p1", "w2:p1", "w3:p1"]);
+        on_mouse(
+            &mut m,
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 3),
+            Some(list_area()),
+            0,
+        );
+        assert_eq!(m.selected, 2);
+    }
+
+    #[test]
+    fn on_mouse_ignores_non_left_events_and_out_of_range_clicks() {
+        let mut m = model(&["w1:p1", "w2:p1"]);
+        m.move_down(); // selection at 1
+                       // A scroll event must not move the selection.
+        on_mouse(
+            &mut m,
+            mouse(MouseEventKind::ScrollDown, 5, 1),
+            Some(list_area()),
+            0,
+        );
+        assert_eq!(m.selected, 1);
+        // A left click on a blank row (index 5, past the 2 entries) is a no-op.
+        on_mouse(
+            &mut m,
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 6),
+            Some(list_area()),
+            0,
+        );
+        assert_eq!(m.selected, 1);
+        // No list area (empty queue was drawn) is a no-op even for a left click.
+        on_mouse(
+            &mut m,
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
+            None,
+            0,
+        );
+        assert_eq!(m.selected, 1);
     }
 
     #[test]
