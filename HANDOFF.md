@@ -38,11 +38,24 @@ Two execution modes share one on-disk queue:
 (`{pane_id, workspace_id, agent, display_agent, title, status, enqueued_at_ms, last_touched_ms}`),
 guarded by `state.lock` (`fs2`). Writes are atomic temp+rename; reads outside a mutation take no lock.
 
-**Files:**
-- `src/lib.rs` (~1.4k lines) — argv dispatch, queue transitions, `StateStore` (lock + atomic write),
-  herdr CLI seam (`Herdr` trait / `CliHerdr`), event/pane-list parsing, toast copy, all unit tests.
-- `src/pane.rs` (~500 lines) — the ratatui TUI (`PaneModel`, event loop, view) and the
-  `pane-decision` toggle logic. Pure model/decision code is unit-tested; the terminal loop is thin.
+**Files** (`lib.rs` was split into cohesive modules; each holds the `#[cfg(test)]` tests for its own
+code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still resolve):
+- `src/lib.rs` (~170 lines) — the orientation page: argv dispatch (`run_from_env`/`run`), subcommand
+  parsing, `RuntimeEnv`, and the `mod`/`pub(crate) use` wiring for everything below.
+- `src/state.rs` — persisted state: `QueueEntry`, `WaitStatus`, `StateStore` (lock + atomic
+  temp+rename write), `StateLock`, `read_state`/`write_state`/`load_entries`, `PluginError`. Owns
+  the "all mutations via `StateStore::update`" invariant.
+- `src/herdr.rs` — the herdr CLI seam (`Herdr` trait / `CliHerdr`, `PaneInfo`) plus JSON parsing for
+  both `pane list` responses and plugin event payloads (`StatusEvent`).
+- `src/queue.rs` — pure queue transitions (`enqueue`/`evict`/`is_live`) and the event handlers
+  (`on_status_changed`/`on_focused`/`on_closed`). Must never depend on the `Herdr` trait (enforced
+  by the module boundary now, not just a comment).
+- `src/actions.rs` — the actions (`next`/`peek`/`clear`/`startup`) and the toast copy they render;
+  the only non-pane callers that also talk to herdr.
+- `src/test_support.rs` — `#[cfg(test)]`-only shared fake `Herdr` + state fixtures.
+- `src/pane.rs` (~760 lines) — the ratatui TUI (`PaneModel`, event loop, view, mouse hit-testing)
+  and the `pane-decision` toggle logic. Pure model/decision code is unit-tested; the terminal loop
+  is thin. Reaches domain/storage/herdr types via `use crate::{...}` (the re-exports above).
 - `src/main.rs` — one-line entry into `lib::run_from_env`.
 - `tests/cli.rs` — end-to-end tests that spawn the built binary against a fake `herdr` on
   `HERDR_BIN_PATH`.
