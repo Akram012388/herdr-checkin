@@ -176,10 +176,8 @@ fn event_loop(
                 }
                 // A terminal-native paste (bracketed paste, enabled in `run`) is only meaningful
                 // while composing a reply; ignored otherwise.
-                Event::Paste(text) => {
-                    if model.reply.is_some() {
-                        model.reply_paste(&text);
-                    }
+                Event::Paste(text) if model.reply.is_some() => {
+                    model.reply_paste(&text);
                 }
                 _ => {}
             }
