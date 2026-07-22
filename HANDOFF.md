@@ -249,6 +249,13 @@ Claude Code's agent view but powered by herdr primitives. **Fully aligned with t
   terminal line via `agent read`; time = **time-in-state stamped by the `status-changed` event binary**
   (the pane isn't running to observe transitions — poll-loop tracking would fabricate zeros).
 - Actions: `Enter` jump, `space` reply. **Peek deferred; reorder is pin-to-top only.**
+- **Surface: the popup modal is KEPT** (re-ruled under the live-roster premise, not the old
+  triage-queue one — Fable, design doc §9). Not a dedicated pane/tab: the Agents view is a
+  *switchboard* (cross-workspace consolidation on demand, rows are jump targets), which is a summon
+  job; herdr toasts + the workspace itself already own ambient awareness. Two refinements fold in:
+  (a) **ratatui `TestBackend` snapshot tests** (Slice 0/2) to retire the eyeball-only QA pain;
+  (b) treat popup **width/height as a tunable** — bump 50%×50% toward ~85–90% at Slice 2 if the roster
+  reads cramped. Surface is a `--placement` flag, so the choice stays cheaply reversible.
 - Live data via a **worker thread** (never CLI on the render tick); `roster.json` is a **separate,
   prunable** store from `state.json` (new **invariant #7**).
 - **Build order (tracer-bullet, each green + eyeballed):** Slice 0 split `pane.rs` → 1 data seam +

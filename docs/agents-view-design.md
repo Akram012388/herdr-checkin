@@ -21,6 +21,7 @@ The Agents view is the Claude-Code agent-view experience, scoped to what herdr c
 
 | Decision | Choice |
 | --- | --- |
+| Surface | **Popup modal — KEPT** (not a dedicated pane/tab). Fable-ruled under the new premise; see §9. |
 | Model | Two views in one popup, `Tab`/`Ctrl+S` toggle. Queue stays durable; Agents is live. |
 | Roster contents | **Every** detected agent pane, all states (`idle`/`working`/`blocked`/`done`/`unknown`). |
 | Row actions | Attach/jump (`Enter`→`focus`, closes popup), inline reply (`space`→`prompt`). |
@@ -109,14 +110,19 @@ Regression risks to guard while building:
 ## 8. Build slices (tracer-bullet; each ends green + eyeballed)
 
 - **Slice 0** — Split `pane.rs` (1513 lines) into `pane/{mod,queue_view,compose}.rs`. Pure motion.
-  *Gate:* CI green, popup pixel-identical.
+  **Also introduce ratatui `TestBackend` snapshot coverage** for the existing queue view + compose, so
+  both views are born testable and the "eyeball-only QA" pain (see §9) starts retiring here.
+  *Gate:* CI green, popup pixel-identical, snapshot tests pass.
 - **Slice 1** — `Herdr::agent_list` + parser + pure `roster.rs` grouping + a hidden `roster` debug
   subcommand that prints the grouped roster. *Gate:* fixture unit tests on captured live JSON + live
   printout eyeball.
 - **Slice 2** — Tab/Ctrl+S toggle + read-only Agents view fed by the sampler thread (1s `agent list`
   cadence, mpsc, tick never blocks). Rows: destination + `{status} · {title}`, grouped by workspace.
   *Gate:* live status flip visible within ~1s; Queue tab unaffected; no jank. **This is the tracer
-  bullet — it proves the popup can host a live view without janking the durable one.**
+  bullet — it proves the popup can host a live view without janking the durable one.** Extend the
+  `TestBackend` snapshots to the Agents view (grouping, rows, tab toggle). **Revisit popup geometry**
+  here: bump `open-pane.sh` + the `[[panes]]` manifest width/height from 50%×50% toward ~85–90% if the
+  roster reads cramped (a two-number edit; keep the two in sync).
 - **Slice 3** — Action parity: `Enter` jump (shared close path), `space` reply via the shared compose
   target, `j`/`k`/click selection across group headers. *Gate:* live jump + reply to a real agent.
 - **Slice 4** — Last-line status column: 2s visible-rows `agent read` sweep, budgeted round-robin,
@@ -128,3 +134,34 @@ Regression risks to guard while building:
   reopen and pane-slot reuse.
 - **Slice 7 (optional, only if re-requested after lived experience)** — peek panel and/or arbitrary
   reorder.
+
+## 9. Surface: popup, not a dedicated pane (ruling)
+
+The plugin was built as a popup modal, deliberately over a dedicated pane, back when it was *only* a
+summon-and-glance triage queue. Becoming a live agents view reopened that call — so it was re-ruled
+under the new premise (Fable advisory, 2026-07-22). **Decision: keep the popup.** Do not relitigate
+without new lived evidence (see the accepted counter below).
+
+- **The "it's a dashboard now" intuition is wrong.** The ambient channel is already occupied twice:
+  herdr's native toasts push the pings, and the workspace itself (your agent panes, on screen in
+  their tabs) *is* the monitor. The Agents view adds neither — it adds **cross-workspace consolidation
+  on demand**: "show me everyone, everywhere, right now, so I can pick where to go." That is a
+  **switchboard, not a monitor**, and a switchboard is a summon job — its rows are jump targets and a
+  jump closes the surface. The roster is *more* summon-shaped than the queue, not less.
+- **The architecture already voted:** time-in-state is event-stamped (§4) precisely because the popup
+  is not running most of the day. The right durability posture was designed for an intermittent surface.
+- **Not a persistent split pane:** a roster of your neighbors, docked inside the workspace of the
+  neighbors it lists, is redundancy dressed as awareness — and it is invisible exactly when you are
+  working elsewhere, which is when you reach for the global keybind anyway.
+- **Not a takeover tab:** Claude Code goes full-screen only because it has no windowing system; herdr
+  has a better summon primitive (session-singleton float + global keybind, reachable from any
+  workspace). "Full attention when summoned" is a **geometry parameter** — open the popup larger — not
+  a surface change (folded into Slice 2).
+- **Testability is solved one layer down, not by the surface:** ratatui `TestBackend` snapshot tests
+  (Slice 0/2) cover rendering in CI with no herdr; the data path is already scriptable. The surface is
+  a launch flag (`--placement`), so this whole decision stays **cheaply reversible**.
+- **Accepted counter-argument:** a popup closed ~99% of the time gives zero signal for an agent
+  silently wedged at `working 45m` that never pings. That is a **detection gap, not a surface gap** — a
+  future "stalled" heuristic could toast it. If lived experience proves the roster wants ambient
+  presence, the placement-flag escape hatch makes a later pane/hybrid a small change. **Earn it with
+  evidence; never default to it.**
