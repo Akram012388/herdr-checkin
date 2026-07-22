@@ -108,6 +108,11 @@ impl Herdr for FakeHerdr {
         ));
         Ok(())
     }
+
+    fn popup_close(&self) -> Result<(), PluginError> {
+        // No socket in tests; the pane's popup dismissal is exercised by the manual E2E, not here.
+        Ok(())
+    }
 }
 
 pub(crate) fn runtime(state_dir: PathBuf, now_ms: u64) -> RuntimeEnv {

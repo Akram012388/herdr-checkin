@@ -41,6 +41,12 @@ pub(crate) trait Herdr {
         body: Option<&str>,
         sound: &str,
     ) -> Result<(), PluginError>;
+    /// Close herdr's session-modal popup (the `popup.close` socket method). The status pane, when
+    /// launched via `--placement popup`, calls this on exit so herdr does not keep painting a dead
+    /// popup frame until the next keypress. There is no `herdr popup close` CLI verb, so this talks
+    /// the newline-delimited-JSON socket at `HERDR_SOCKET_PATH` directly. Best-effort at the call
+    /// sites — a failure just falls back to herdr's own child-exit cleanup.
+    fn popup_close(&self) -> Result<(), PluginError>;
 }
 
 pub(crate) struct CliHerdr {
@@ -147,6 +153,38 @@ impl Herdr for CliHerdr {
             Err(command_failure("HERDR_BIN_PATH notification show", &output))
         }
     }
+
+    fn popup_close(&self) -> Result<(), PluginError> {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let socket_path = std::env::var("HERDR_SOCKET_PATH").map_err(|_| {
+            PluginError::new("HERDR_SOCKET_PATH is not set (not running inside herdr)".to_string())
+        })?;
+        let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
+            PluginError::new(format!(
+                "failed to connect to herdr socket ({socket_path}): {error}"
+            ))
+        })?;
+        // Newline-delimited JSON, one request per line (herdr's socket protocol).
+        let mut line = popup_close_request_line();
+        line.push('\n');
+        stream
+            .write_all(line.as_bytes())
+            .and_then(|()| stream.flush())
+            .map_err(|error| PluginError::new(format!("failed to send popup.close: {error}")))
+    }
+}
+
+/// The `popup.close` request as a single JSON line (no trailing newline). The wire shape is
+/// verified against herdr 0.7.5: a flattened `{ "id", "method": "popup.close", "params": {} }`.
+fn popup_close_request_line() -> String {
+    serde_json::json!({
+        "id": "herdr-checkin-popup-close",
+        "method": "popup.close",
+        "params": {},
+    })
+    .to_string()
 }
 
 fn command_failure(command: &str, output: &Output) -> PluginError {
@@ -368,6 +406,16 @@ mod tests {
             "error was: {error}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn popup_close_request_line_matches_the_herdr_wire_shape() {
+        // Must round-trip to herdr's `popup.close` request (schema.rs: flattened id/method/params).
+        let value: Value = serde_json::from_str(&popup_close_request_line())
+            .expect("the popup.close line must be valid JSON");
+        assert_eq!(value["method"], "popup.close");
+        assert_eq!(value["params"], serde_json::json!({}));
+        assert!(value["id"].is_string(), "the request carries a string id");
     }
 
     // The shared fake records prompt calls in order — the contract the reply-mode slices assert on.

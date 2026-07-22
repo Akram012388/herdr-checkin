@@ -1,7 +1,7 @@
 id = "Akram012388.checkin"
 name = "Check-in"
 version = "0.4.0"
-min_herdr_version = "0.7.0"
+min_herdr_version = "0.7.5"
 description = "Durable attention queue for agent panes: queue agents that go blocked or done, then jump to the oldest waiter on demand."
 platforms = ["linux", "macos"]
 
@@ -37,9 +37,9 @@ title = "Check-in: clear queue"
 contexts = ["global", "workspace"]
 command = ["./target/release/herdr-checkin", "clear"]
 
-# open-pane summons the status pane (below) as a split. Idempotent and scoped to the current
-# tab via scripts/open-pane.sh: opens if absent, focuses an existing one, closes it if it is the
-# focused pane (toggle). The OPEN/FOCUS/CLOSE decision is computed by `herdr-checkin pane-decision`.
+# open-pane summons the status pane (below) as a centered popup via scripts/open-pane.sh. A popup
+# is a session-level singleton, so no open/focus/close toggle is needed: the pane dismisses itself
+# on q/Esc (it calls the popup.close socket method on exit).
 [[actions]]
 id = "open-pane"
 title = "Check-in: open queue pane"
@@ -48,10 +48,17 @@ command = ["/bin/sh", "scripts/open-pane.sh"]
 
 # The status pane: a persistent TUI listing the live queue with select-and-jump. herdr spawns
 # this long-running binary into the split; it re-reads state.json on a tick to stay current.
+# A centered, session-modal popup (like herdr's own prefix+s settings). `width`/`height` are
+# herdr's PopupSize; a "NN%" string is a percentage of the available area, so the modal scales to
+# roughly half the screen like the settings popup (an integer would be a fixed cell count). The
+# launcher passes the same values plus HERDR_CHECKIN_POPUP=1 so the pane dismisses its own popup
+# on exit.
 [[panes]]
 id = "queue"
 title = "Check-in"
-placement = "split"
+placement = "popup"
+width = "60%"
+height = "55%"
 command = ["./target/release/herdr-checkin", "pane"]
 
 # Events. Enqueue on agent status changes; evict on focus and close.

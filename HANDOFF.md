@@ -5,19 +5,21 @@ User-facing docs: [README.md](README.md). Release log: [CHANGELOG.md](CHANGELOG.
 and the model-tier strategy: [CLAUDE.md](CLAUDE.md). The active feature's authoritative design:
 [docs/triage-overlay-design.md](docs/triage-overlay-design.md).
 
-**Version:** **0.4.0 — the triage-overlay release — is cut** (version bumped in `Cargo.toml` +
+**Version:** **0.4.0 — the triage-popup release — is cut** (version in `Cargo.toml` +
 `herdr-plugin.toml` + `Cargo.lock`, CHANGELOG dated 2026-07-22, README + demo gif refreshed). **NOT
 tagged** — the maintainer tags on request. · **License:** MIT · **Repo:**
 https://github.com/Akram012388/herdr-checkin · **State:** `main` is green (fmt + clippy + test,
-**71 lib + 5 CLI tests**) and pushed, **release commit `1a618ae`**. No open branches, no worktrees,
-working tree clean.
+**67 lib + 5 CLI tests**) and pushed. No open branches, no worktrees, working tree clean.
 
-**The triage overlay is DONE.** All 7 slices shipped: the status pane is now a Claude Code
-agents-view console rendered as a herdr overlay — enqueued waiters grouped into AWAITING YOU
-(`blocked`) / DONE (`done`), navigable/reply-able by keyboard, **verified live end-to-end** in herdr
-0.7.5 (§6). It was design-gated (probes + a Fable advisor pass) and built tracer-bullet on the
-7-slice plan. **START AT §6 — there is no in-flight feature; the release just needs the maintainer's
-tag, and only parked/optional items remain.**
+**The status pane is DONE and shipped as a centered popup modal.** It looks and behaves like herdr's
+own `prefix+s` settings popup: a session-level `--placement popup` that herdr draws with a border +
+"Check-in" title, holding the durable queue grouped into **CHECKIN** (`blocked`) / **DONE** (`done`)
+sections, keyboard-navigable and reply-able, dismissed with `q`/`Esc` (the pane calls the
+`popup.close` socket method on exit). It began as the 7-slice "triage overlay" build, then pivoted to
+`popup` placement once the herdr source revealed it (the CLI `--help` omits `popup` via a stale
+value-parser — the real parser accepts it). **Verified live end-to-end** in herdr 0.7.5. **START AT §6
+— no in-flight feature; the release just needs the maintainer's tag, and only parked/optional items
+remain.**
 
 ---
 
@@ -32,7 +34,8 @@ the oldest waiter on demand.
 - **Manifest id:** `Akram012388.checkin` (GitHub-handle prefix). **Repo/dir name:** `herdr-checkin`
   (the `herdr-` prefix is what ecosystem discovery expects). These deliberately differ — do NOT
   rename the dir to the id.
-- **Target:** herdr >= 0.7.0; developed and verified against **herdr 0.7.5, protocol 17**.
+- **Target:** herdr >= 0.7.5 (the `popup` placement landed in 0.7.5); verified against **herdr 0.7.5,
+  protocol 17**.
 
 ## 2. Architecture
 
@@ -41,10 +44,11 @@ Two execution modes share one on-disk queue:
 1. **Short-lived per-event / per-action binaries.** herdr spawns one process per event/action.
    Subcommands: `status-changed`, `focused`, `closed` (events); `next`, `peek`, `clear` (actions);
    `startup` (the [[startup]] hook). They mutate `state.json` and exit.
-2. **A long-running TUI pane** (`pane` subcommand, ratatui + crossterm). herdr spawns it into a
-   split via a `[[panes]]` manifest entry. It has no push channel for events, so it **polls**
-   `state.json` on a 250 ms tick. A `pane-decision` subcommand (reads `pane list` on stdin, prints
-   `OPEN`/`FOCUS <id>`/`CLOSE <id>`) backs the idempotent open/focus/close launcher.
+2. **A long-running TUI pane** (`pane` subcommand, ratatui + crossterm). herdr spawns it as a
+   centered popup (`--placement popup`) via a `[[panes]]` manifest entry. It has no push channel for
+   events, so it **polls** `state.json` on a 250 ms tick. A popup is a session-level singleton, so
+   there's no open/focus/close decision to make — `scripts/open-pane.sh` just opens it, and the pane
+   dismisses its own popup (`popup.close`) on exit.
 
 **State:** `state.json` under `HERDR_PLUGIN_STATE_DIR`, an ordered `Vec<QueueEntry>`
 (`{pane_id, workspace_id, agent, display_agent, title, status, enqueued_at_ms, last_touched_ms}`),
@@ -70,15 +74,15 @@ code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still re
 - `src/test_support.rs` (~165) — `#[cfg(test)]`-only shared fake `Herdr` + state fixtures. The
   `FakeHerdr` records `focused`, **`prompts`** (`(pane_id, text)`), and `notifications`, with
   `with_failing_focus`/**`with_failing_prompt`** toggles.
-- `src/pane.rs` (~1030) — the ratatui TUI (`PaneModel`, event loop, view, mouse hit-testing), the
-  **inline reply mode** (slices 2–4), and the `pane-decision` toggle logic. Pure model/decision code
-  is unit-tested; the terminal loop is thin. Reaches domain/storage/herdr types via `use crate::{…}`.
+- `src/pane.rs` (~1030) — the ratatui TUI (`PaneModel`, event loop, view, mouse hit-testing) and the
+  **inline reply mode** (slices 2–4). Pure model/decision code is unit-tested; the terminal loop is
+  thin. Reaches domain/storage/herdr types via `use crate::{…}`.
 - `src/main.rs` — one-line entry into `lib::run_from_env`.
 - `tests/cli.rs` — end-to-end tests that spawn the built binary against a fake `herdr` on
   `HERDR_BIN_PATH`.
 - `herdr-plugin.toml` — manifest: `[[actions]]`, `[[events]]`, one `[[panes]]`, `[[build]]`,
   `[[startup]]`.
-- `scripts/open-pane.sh` — idempotent launcher for `open-pane`.
+- `scripts/open-pane.sh` — launcher for `open-pane` (opens the pane as a popup; no toggle logic).
 
 ## 3. Behavior + load-bearing invariants
 
@@ -89,9 +93,10 @@ code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still re
 - **`next`** focuses the oldest still-live waiter (`herdr agent focus <pane_id>`, cross-workspace)
   and evicts it **only after** the focus succeeds. **`peek`** shows the queue as a toast.
   **`clear`** empties it. **`startup`** re-seeds the queue from `pane list` after a herdr restart.
-- **Status pane** keys: `j`/`k`/arrows or **left-click** move/select, `Enter` jump+evict-on-success,
-  **`space` reply inline** (slices 2–4), `d` drop, `c` clear-all (with a `y`/`n` confirm), `q`/`Esc`
-  close. `open-pane` is a current-tab-scoped toggle (open / focus / close).
+- **Status pane** keys: `j`/`k`/arrows or **left-click** move/select, `Enter` jump+evict-on-success
+  (and closes the popup), **`space` reply inline** (slices 2–4), `d` drop, `c` clear-all (with a
+  `y`/`n` confirm), `q`/`Esc` close (dismissing the popup). `open-pane` just opens it — a popup is a
+  session-level singleton, so there is no open/focus/close toggle.
 - **Inline reply** (slices 2–4): `space` opens a reply line for the selected waiter; you type an
   answer and `Enter` routes it into that agent's session via `herdr agent prompt <pane_id> <text>`,
   then evicts the entry **only on submit success** (a failed submit keeps it). `Esc`/click cancels;
@@ -114,9 +119,9 @@ code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still re
    upsert events use (a delta under the lock) — never a wholesale `state.json` rewrite, and it never
    evicts. Stale entries are pruned by `next`/`peek`'s liveness pass. The hook is spawned async and
    races the live event loop, so this merge-not-rewrite discipline is what keeps it safe.
-5. **`decide` assumes one globally-focused pane** (verified: herdr reports a single `focused:true`
-   across all workspaces). The status pane is identified in `pane list` only by its `label`
-   ("Check-in" — the `[[panes]]` title; keep `PANE_LABEL` in sync).
+5. **The popup dismisses itself only when it opened one.** `run()` calls `popup.close` on exit only
+   when `HERDR_CHECKIN_POPUP` is set (the launcher sets it) — so a non-popup launch (e.g. manual
+   `herdr-checkin pane` invocation) never closes an unrelated session popup.
 
 ## 4. herdr API facts (0.7.5, protocol 17)
 
@@ -148,14 +153,19 @@ code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still re
   takeover). One-shot run-and-exit. Receives the normal plugin env plus `HERDR_PLUGIN_EVENT=startup`;
   **no pane payload** — the hook calls `pane list` itself. Spawned **async and not awaited**, so it
   races the live event loop (see invariant #4).
-- **Plugin pane:** declared via `[[panes]]`; opened/focused/closed with
-  `herdr plugin pane open --plugin <id> --entrypoint <pane-id> --placement <PLACEMENT> --focus` /
-  `plugin pane focus <PANE_ID>` / `plugin pane close <PANE_ID>`. No push events to a running pane →
-  poll. **`--placement` values: `overlay`, `split`, `tab`, `zoomed`** (it's a **CLI flag**, so the
-  launcher can override the manifest's `placement = "split"` per-open — no manifest rewrite needed).
-  **Probed live:** `--placement overlay` runs a persistent, keyboard-interactive TUI that survives
-  blur (it's tab-scoped, not a global `prefix+s`-style summon — that flavor is unverified and off the
-  critical path).
+- **Plugin pane:** declared via `[[panes]]`; opened with
+  `herdr plugin pane open --plugin <id> --entrypoint <pane-id> --placement <PLACEMENT> --focus`. No
+  push events to a running pane → poll. **`--placement` values: `overlay`, `split`, `tab`, `zoomed`,
+  `popup`** (it's a **CLI flag**, so the launcher can override the manifest's default per-open — no
+  manifest rewrite needed). **We use `popup`:** a centered, session-modal floating popup (like
+  herdr's own `prefix+s` settings), sized via `--width`/`--height` `"NN%"` percentages of the
+  available area (herdr's `PopupSize`); herdr draws the border and the `[[panes]]` `title` on it. A
+  popup is a session-level singleton with no separate focus/close-by-id CLI to manage — the pane
+  dismisses it from the inside by calling the `popup.close` socket method on exit (gated on the
+  launcher-set `HERDR_CHECKIN_POPUP` env var so a non-popup launch never closes an unrelated popup).
+  **Probed live:** `--placement overlay` (the pre-popup choice) runs a persistent, keyboard-
+  interactive TUI that survives blur but is tab-scoped, not a global `prefix+s`-style summon —
+  superseded by `popup` for this plugin.
 - **Env a pane/handler receives:** `HERDR_PLUGIN_STATE_DIR`, `HERDR_BIN_PATH`,
   `HERDR_PLUGIN_CONTEXT_JSON`, `HERDR_PANE_ID`, `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_ID`.
   **Gotcha:** the id is percent-encoded in the state-dir path (`%41kram012388.checkin`). Always use
@@ -207,7 +217,7 @@ all in place; tagging `v0.4.0` at the current HEAD is the only remaining act. Ot
 
 **Data-model guardrail (maintainer + advisor confirmed — do not drift):** the agents-view is a
 **look**, not a pivot. The console stays an **inbox** — only *enqueued waiters* appear, grouped by
-status (AWAITING YOU = `blocked`, DONE = `done`), FIFO within each. It is **not** a live roster of all
+status (CHECKIN = `blocked`, DONE = `done`), FIFO within each. It is **not** a live roster of all
 agents (that is herdr's native view, and cloning it loses). Litmus test for any feature: *does it
 operate on an enqueued entry?* If no, reject.
 

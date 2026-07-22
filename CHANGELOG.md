@@ -6,19 +6,23 @@ All notable changes to this project are documented here. The format is based on
 
 ## [0.4.0] - 2026-07-22
 
-The triage-overlay release: the status pane becomes an agents-view console you can **reply into**,
-rendered as an overlay. Bundles the previously-unreleased pane features (clear-all, mouse-select,
-module split) with the overlay, inline reply, and grouped render as one interface release.
+The triage-popup release: the status pane becomes an agents-view console you can **reply into**,
+rendered as a centered popup modal. Bundles the previously-unreleased pane features (clear-all,
+mouse-select, module split) with the popup, inline reply, and grouped render as one interface
+release.
 
 ### Added
-- **Triage overlay — the status pane is now an agents-view console.** `open-pane` opens the pane as
-  an **overlay** (previously a split), styled after the Claude Code agents view: enqueued waiters are
-  grouped into **AWAITING YOU** (`blocked`) and **DONE** (`done`) sections, oldest-first within each.
-  It stays an inbox of what pinged you — only enqueued waiters ever appear, never a live roster of all
-  agents. Section headers are non-selectable; `j`/`k` and click move in on-screen order across the
-  sections, and selection stays anchored to its entry as the queue changes. Launcher-only switch
-  (`--placement overlay`); the open/focus/close toggle is unchanged (it keys off the pane label). The
-  overlay persists on blur and stays keyboard-interactive.
+- **Triage popup — the status pane is now an agents-view console.** `open-pane` opens the pane as a
+  centered, session-modal popup (herdr `--placement popup`) — the same class of floating modal as
+  herdr's own `prefix+s` settings — sized via `width`/`height` percentages and drawn by herdr with a
+  border and a "Check-in" title. Enqueued waiters are grouped into **CHECKIN** (`blocked`) and
+  **DONE** (`done`) sections, oldest-first within each, each preceded by a blank spacer line so the
+  groups read as distinct blocks. It stays an inbox of what pinged you — only enqueued waiters ever
+  appear, never a live roster of all agents. Section headers are non-selectable; `j`/`k` and click
+  move in on-screen order across the sections, and selection stays anchored to its entry as the
+  queue changes. A popup is a session-level singleton, so the old open/focus/close toggle is gone:
+  `q`/`Esc` dismisses it, and a successful `Enter` jump closes it too (the pane calls the
+  `popup.close` socket method on exit).
 - **Inline reply (`space`).** Reply to the selected waiter without leaving the pane: `space` opens a
   reply line, you type an answer, and `Enter` routes it into that agent's session via
   `herdr agent prompt <pane_id>`, then drops the entry. Fire-and-forget — the entry leaves the queue
@@ -45,7 +49,7 @@ module split) with the overlay, inline reply, and grouped render as one interfac
   (enforced by the module boundary, not just a comment). No behavior change.
 
 ### Docs
-- README now documents the overlay/agents-view console, the grouped **AWAITING YOU** / **DONE**
+- README now documents the popup-modal agents-view console, the grouped **CHECKIN** / **DONE**
   sections, and the `space` inline-reply key, with a refreshed animated demo (`docs/pane-demo.gif`)
   — still regenerable offline with no real agents via `scripts/pane-demo.tape` +
   `scripts/pane-demo-setup.sh` (VHS).

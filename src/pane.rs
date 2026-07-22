@@ -26,8 +26,6 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
-use serde_json::Value;
-use std::io::Read;
 use std::time::Duration;
 
 /// How long the input poll blocks each tick before we re-read the queue and repaint, so queue
@@ -36,11 +34,6 @@ const TICK: Duration = Duration::from_millis(250);
 
 const FOOTER_HINTS: &str =
     "j/k move  ·  Enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit";
-
-/// The label herdr shows for our status pane in `pane list`, used to recognize our own pane for
-/// the idempotent open/focus/close toggle. Must stay in sync with the `[[panes]]` `title` in
-/// `herdr-plugin.toml` — that title is the only field identifying the pane in `pane list`.
-const PANE_LABEL: &str = "Check-in";
 
 /// Entry point for the `pane` subcommand: run the TUI until the user closes it. The terminal is
 /// restored on every exit path (including a panic, via the hook `ratatui::try_init` installs).
@@ -69,6 +62,14 @@ pub fn run(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
     // land here too). Best-effort: if this fails we're already tearing down.
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
+
+    // When launched as a herdr popup (`--placement popup`), dismiss the popup on exit so herdr
+    // doesn't keep painting a dead frame until the next keypress. Env-gated (the launcher sets
+    // HERDR_CHECKIN_POPUP=1) so a split/overlay launch never closes an unrelated session popup.
+    // Best-effort: on failure herdr's own child-exit cleanup still removes it.
+    if std::env::var_os("HERDR_CHECKIN_POPUP").is_some() {
+        let _ = herdr.popup_close();
+    }
     result
 }
 
@@ -141,7 +142,12 @@ fn event_loop(
                             }
                             KeyCode::Char('j') | KeyCode::Down => model.move_down(),
                             KeyCode::Char('k') | KeyCode::Up => model.move_up(),
-                            KeyCode::Enter => on_enter(model, runtime, herdr),
+                            KeyCode::Enter => {
+                                // A successful jump closes the popup (run() then fires popup.close).
+                                if on_enter(model, runtime, herdr) {
+                                    return Ok(());
+                                }
+                            }
                             KeyCode::Char('d') | KeyCode::Char('x') => on_drop(model, runtime),
                             KeyCode::Char('c') => model.request_clear(),
                             KeyCode::Char(' ') => model.begin_reply(),
@@ -174,10 +180,14 @@ fn event_loop(
     }
 }
 
-/// `Enter`: focus the selected agent, then — only on success — evict it from the queue.
-fn on_enter(model: &mut PaneModel, runtime: &RuntimeEnv, herdr: &dyn Herdr) {
+/// `Enter`: focus the selected agent, then — only on success — evict it from the queue. Returns
+/// `true` when the jump succeeded, signaling the pane should close: as a popup it floats over the
+/// whole session, so once we've navigated to the agent it must get out of the way. Returns `false`
+/// when nothing is selected or the focus failed (the entry stays and the error shows in the
+/// footer), keeping the pane open.
+fn on_enter(model: &mut PaneModel, runtime: &RuntimeEnv, herdr: &dyn Herdr) -> bool {
     let Some(pane_id) = model.selected_pane_id().map(str::to_owned) else {
-        return;
+        return false;
     };
     match herdr.focus_agent(&pane_id) {
         Ok(()) => {
@@ -187,9 +197,11 @@ fn on_enter(model: &mut PaneModel, runtime: &RuntimeEnv, herdr: &dyn Herdr) {
                 Err(error) => Some(format!("jumped, but drop failed: {error}")),
             };
             model.sync(load_entries(&runtime.state_dir));
+            true
         }
         Err(error) => {
             model.status = Some(format!("focus failed: {error}"));
+            false
         }
     }
 }
@@ -297,120 +309,6 @@ fn evict_pane(runtime: &RuntimeEnv, pane_id: &str) -> Result<(), PluginError> {
     })
 }
 
-// --- launch decision (idempotent open / focus / close toggle) --------------
-
-/// The `pane-decision` subcommand: read `pane list` JSON on stdin, decide whether the launcher
-/// should open, focus, or close the status pane, and print that decision. Never fails — on any
-/// read/parse trouble it prints `OPEN`, preserving an always-open fallback for the launcher.
-pub fn decide_from_stdin() -> i32 {
-    let mut input = String::new();
-    let _ = std::io::stdin().read_to_string(&mut input);
-    println!("{}", decide(&parse_panes(&input)).into_line());
-    0
-}
-
-/// What the launcher should do. `Focus`/`Close` carry the target pane id.
-#[derive(Debug, PartialEq, Eq)]
-enum Decision {
-    Open,
-    Focus(String),
-    Close(String),
-}
-
-impl Decision {
-    fn into_line(self) -> String {
-        match self {
-            Decision::Open => "OPEN".to_string(),
-            Decision::Focus(pane_id) => format!("FOCUS {pane_id}"),
-            Decision::Close(pane_id) => format!("CLOSE {pane_id}"),
-        }
-    }
-}
-
-/// The subset of a `pane list` entry the decision needs.
-struct PaneInfo {
-    pane_id: String,
-    tab_id: Option<String>,
-    focused: bool,
-    label: Option<String>,
-}
-
-impl PaneInfo {
-    fn is_status_pane(&self) -> bool {
-        self.label.as_deref() == Some(PANE_LABEL)
-    }
-}
-
-/// Idempotent, current-tab-scoped toggle:
-/// - the focused pane is our status pane  -> CLOSE it (a repeat press hides it);
-/// - a status pane exists in the current tab but isn't focused -> FOCUS it;
-/// - otherwise -> OPEN a new one.
-///
-/// Scoping to the current tab keeps a focus from yanking the user into another workspace, and
-/// matches herdr's own plugin-pane conventions. All targeted ids are checked flag-safe so a
-/// crafted id can never be read as a CLI option by the launcher.
-///
-/// This relies on herdr reporting exactly one globally-focused pane in `pane list` (verified
-/// against herdr 0.7.5: one `focused: true` across all workspaces), so `find` returns the pane
-/// the user is actually on.
-fn decide(panes: &[PaneInfo]) -> Decision {
-    let focused = panes.iter().find(|pane| pane.focused);
-
-    if let Some(focused) = focused {
-        if focused.is_status_pane() && is_flag_safe(&focused.pane_id) {
-            return Decision::Close(focused.pane_id.clone());
-        }
-    }
-
-    if let Some(current_tab) = focused.and_then(|pane| pane.tab_id.as_deref()) {
-        if let Some(pane) = panes.iter().find(|pane| {
-            pane.is_status_pane()
-                && pane.tab_id.as_deref() == Some(current_tab)
-                && is_flag_safe(&pane.pane_id)
-        }) {
-            return Decision::Focus(pane.pane_id.clone());
-        }
-    }
-
-    Decision::Open
-}
-
-/// A pane id is safe to pass as a positional CLI argument only if it can't be mistaken for an
-/// option. herdr ids never start with `-`, so anything that does is rejected (degrades to OPEN).
-fn is_flag_safe(pane_id: &str) -> bool {
-    !pane_id.is_empty() && !pane_id.starts_with('-')
-}
-
-fn parse_panes(json: &str) -> Vec<PaneInfo> {
-    let Ok(value) = serde_json::from_str::<Value>(json) else {
-        return Vec::new();
-    };
-    let Some(panes) = value
-        .get("result")
-        .and_then(|result| result.get("panes"))
-        .and_then(Value::as_array)
-    else {
-        return Vec::new();
-    };
-    panes
-        .iter()
-        .filter_map(|pane| {
-            Some(PaneInfo {
-                pane_id: pane.get("pane_id").and_then(Value::as_str)?.to_string(),
-                tab_id: pane
-                    .get("tab_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                focused: pane
-                    .get("focused")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                label: pane.get("label").and_then(Value::as_str).map(str::to_owned),
-            })
-        })
-        .collect()
-}
-
 // --- model (pure) ----------------------------------------------------------
 
 /// An in-progress inline reply. The target `pane_id` and its display `label` are captured when
@@ -499,7 +397,7 @@ impl PaneModel {
             .into_iter()
             .filter_map(|row| match row {
                 Row::Entry(index) => Some(index),
-                Row::Header(_) => None,
+                Row::Header(_) | Row::Spacer => None,
             })
             .collect()
     }
@@ -551,28 +449,31 @@ impl PaneModel {
 // --- view ------------------------------------------------------------------
 
 /// The section header text for each `WaitStatus`, in the order sections are shown: agents that need
-/// input first, then finished ones. These are the CC-agents-view group labels.
-const AWAITING_HEADER: &str = "AWAITING YOU";
+/// input first (on-brand `CHECKIN`), then finished ones (`DONE`).
+const CHECKIN_HEADER: &str = "CHECKIN";
 const DONE_HEADER: &str = "DONE";
 
-/// One rendered line of the grouped agents-view: either a non-selectable section header or an
-/// entry carrying its index into `entries` (the selection source of truth). Built per-frame by
-/// [`layout_rows`].
+/// One rendered line of the grouped agents-view: a blank spacer, a non-selectable section header,
+/// or an entry carrying its index into `entries` (the selection source of truth). Built per-frame
+/// by [`layout_rows`]. Only `Entry` rows are selectable.
 enum Row {
+    Spacer,
     Header(&'static str),
     Entry(usize),
 }
 
-/// Group the queue into status sections for display — `AWAITING YOU` (`blocked`) then `DONE`
-/// (`done`), FIFO within each — as a pure view transform. It never reorders `entries`: each
-/// `Row::Entry` keeps the entry's original index, and a section header is emitted only when that
-/// section has at least one entry (so an all-`done` queue shows no "AWAITING YOU" heading). This is
-/// the only place the on-screen row order diverges from `entries`; `draw` and `row_for_click` both
-/// go through it, so the paint and the click hit-testing always agree.
+/// Group the queue into status sections for display — `CHECKIN` (`blocked`) then `DONE` (`done`),
+/// FIFO within each — as a pure view transform. Each non-empty section is preceded by a blank
+/// spacer row so the groups read as visually distinct blocks (and the first spacer separates them
+/// from the count line above). It never reorders `entries`: each `Row::Entry` keeps the entry's
+/// original index, and a section (spacer + header) is emitted only when that section has at least
+/// one entry (so an all-`done` queue shows no `CHECKIN` heading). This is the only place the
+/// on-screen row order diverges from `entries`; `draw` and `row_for_click` both go through it, so
+/// the paint and the click hit-testing always agree.
 fn layout_rows(entries: &[QueueEntry]) -> Vec<Row> {
     let mut rows = Vec::new();
     for (header, status) in [
-        (AWAITING_HEADER, WaitStatus::Blocked),
+        (CHECKIN_HEADER, WaitStatus::Blocked),
         (DONE_HEADER, WaitStatus::Done),
     ] {
         let mut section: Vec<Row> = entries
@@ -582,6 +483,7 @@ fn layout_rows(entries: &[QueueEntry]) -> Vec<Row> {
             .map(|(index, _)| Row::Entry(index))
             .collect();
         if !section.is_empty() {
+            rows.push(Row::Spacer);
             rows.push(Row::Header(header));
             rows.append(&mut section);
         }
@@ -623,6 +525,7 @@ fn draw(
         let items: Vec<ListItem> = rows
             .iter()
             .map(|row| match row {
+                Row::Spacer => ListItem::new(""),
                 Row::Header(title) => ListItem::new(*title).bold(),
                 Row::Entry(index) => ListItem::new(describe_entry(&model.entries[*index], now_ms)),
             })
@@ -666,11 +569,13 @@ fn confirm_prompt(count: usize) -> String {
     }
 }
 
+/// The one-line count shown at the top of the pane. herdr draws the pane name ("Check-in") on the
+/// popup's border title, so this line carries only the live count — no redundant "Check-in —" prefix.
 fn header_text(count: usize) -> String {
     match count {
-        0 => "Check-in — queue empty".to_string(),
-        1 => "Check-in — 1 agent waiting".to_string(),
-        n => format!("Check-in — {n} agents waiting"),
+        0 => "queue empty".to_string(),
+        1 => "1 agent waiting".to_string(),
+        n => format!("{n} agents waiting"),
     }
 }
 
@@ -717,7 +622,7 @@ mod tests {
     #[test]
     fn move_down_and_up_follow_display_order_across_sections() {
         // FIFO entries interleave blocked/done: [blocked0, done1, blocked2, done3]. The grouped
-        // display order is AWAITING YOU (0, 2) then DONE (1, 3), so j/k must visit 0 -> 2 -> 1 -> 3
+        // display order is CHECKIN (0, 2) then DONE (1, 3), so j/k must visit 0 -> 2 -> 1 -> 3
         // — crossing the section boundary monotonically down-screen, not stepping through `entries`.
         let mut m = PaneModel::new(vec![
             entry_with_status("w0:p1", WaitStatus::Blocked),
@@ -725,7 +630,7 @@ mod tests {
             entry_with_status("w2:p1", WaitStatus::Blocked),
             entry_with_status("w3:p1", WaitStatus::Done),
         ]);
-        assert_eq!(m.selected, 0); // blocked0, the first AWAITING YOU row
+        assert_eq!(m.selected, 0); // blocked0, the first CHECKIN row
         m.move_down();
         assert_eq!(
             m.selected, 2,
@@ -890,8 +795,8 @@ mod tests {
         }
     }
 
-    // All-blocked entries render as [Header("AWAITING YOU"), Entry(0), Entry(1), ...] — the section
-    // header occupies the first display row, so entry N sits one row lower than in a flat list.
+    // All-blocked entries render as [Spacer, Header("CHECKIN"), Entry(0), Entry(1), ...] — a spacer
+    // then the section header occupy the first two display rows, so entry N sits at display index N+2.
     fn blocked_rows(count: usize) -> Vec<Row> {
         let entries: Vec<QueueEntry> = (0..count).map(|i| entry(&format!("w{i}:p1"))).collect();
         layout_rows(&entries)
@@ -899,33 +804,35 @@ mod tests {
 
     #[test]
     fn row_for_click_maps_rows_to_entries_past_the_header() {
-        // No scroll: display row 0 (area.y) is the "AWAITING YOU" header, so row 1 is entry 0.
+        // No scroll: display row 0 (area.y, row 1) is the spacer, row 2 the CHECKIN header, so
+        // row 3 (display index 2) is entry 0 and row 5 (display index 4) is entry 2.
         let rows = blocked_rows(3);
-        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 2), Some(0));
-        assert_eq!(row_for_click(list_area(), 0, &rows, 0, 4), Some(2));
+        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 3), Some(0));
+        assert_eq!(row_for_click(list_area(), 0, &rows, 0, 5), Some(2));
     }
 
     #[test]
-    fn row_for_click_skips_section_headers() {
-        // The header display row selects nothing, like a blank row.
+    fn row_for_click_skips_the_spacer_and_section_header() {
+        // The leading spacer (row 1) and the CHECKIN header (row 2) select nothing, like a blank row.
         let rows = blocked_rows(3);
-        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 1), None);
+        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 1), None); // spacer
+        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 2), None); // header
     }
 
     #[test]
     fn row_for_click_accounts_for_scroll_offset() {
-        // Scrolled down by 2: display row at area.y is display index 2 — which is Entry(1) here
-        // ([Header, Entry(0), Entry(1), ...]).
+        // Scrolled down by 2: display row at area.y is display index 2 — Entry(0) here
+        // ([Spacer, Header, Entry(0), Entry(1), ...]).
         let rows = blocked_rows(5);
-        assert_eq!(row_for_click(list_area(), 2, &rows, 10, 1), Some(1));
-        assert_eq!(row_for_click(list_area(), 2, &rows, 10, 3), Some(3));
+        assert_eq!(row_for_click(list_area(), 2, &rows, 10, 1), Some(0));
+        assert_eq!(row_for_click(list_area(), 2, &rows, 10, 3), Some(2));
     }
 
     #[test]
     fn row_for_click_rejects_blank_rows_below_the_last_entry() {
-        // Header + 3 entries = 4 display rows; a click on display row 4 (row 5) is blank.
+        // Spacer + header + 3 entries = 5 display rows; a click on display row 5 (row 6) is blank.
         let rows = blocked_rows(3);
-        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 5), None);
+        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 6), None);
     }
 
     #[test]
@@ -933,7 +840,7 @@ mod tests {
         let rows = blocked_rows(3);
         assert_eq!(row_for_click(list_area(), 0, &rows, 5, 0), None); // above the list
         assert_eq!(row_for_click(list_area(), 0, &rows, 5, 11), None); // below the list
-        assert_eq!(row_for_click(list_area(), 0, &rows, 40, 2), None); // one past the right edge
+        assert_eq!(row_for_click(list_area(), 0, &rows, 40, 3), None); // one past the right edge (entry 0 row)
     }
 
     #[test]
@@ -944,8 +851,8 @@ mod tests {
 
     #[test]
     fn layout_rows_groups_by_status_fifo_without_reordering_entries() {
-        // A queue interleaving blocked and done: the layout emits AWAITING YOU (blocked, FIFO) then
-        // DONE (done, FIFO), each Entry keeping its original index into `entries`.
+        // A queue interleaving blocked and done: the layout emits a spacer + CHECKIN (blocked, FIFO)
+        // then a spacer + DONE (done, FIFO), each Entry keeping its original index into `entries`.
         let entries = vec![
             entry_with_status("w0:p1", WaitStatus::Blocked),
             entry_with_status("w1:p1", WaitStatus::Done),
@@ -956,30 +863,32 @@ mod tests {
         let shape: Vec<String> = rows
             .iter()
             .map(|row| match row {
+                Row::Spacer => "~".to_string(),
                 Row::Header(title) => format!("#{title}"),
                 Row::Entry(index) => format!("{index}"),
             })
             .collect();
         assert_eq!(
             shape,
-            vec!["#AWAITING YOU", "0", "2", "#DONE", "1", "3"],
-            "sections group by status, FIFO within, indices unchanged"
+            vec!["~", "#CHECKIN", "0", "2", "~", "#DONE", "1", "3"],
+            "each section is spacer + header + its entries, FIFO within, indices unchanged"
         );
     }
 
     #[test]
-    fn layout_rows_omits_an_empty_section_header() {
-        // All done: no AWAITING YOU heading, only DONE.
+    fn layout_rows_omits_an_empty_section() {
+        // All done: no CHECKIN spacer/heading — the DONE section (spacer + header) leads.
         let entries = vec![
             entry_with_status("w0:p1", WaitStatus::Done),
             entry_with_status("w1:p1", WaitStatus::Done),
         ];
         let rows = layout_rows(&entries);
+        assert!(matches!(rows.first(), Some(Row::Spacer)));
         assert!(
-            matches!(rows.first(), Some(Row::Header(DONE_HEADER))),
-            "an all-done queue leads with the DONE header, not AWAITING YOU"
+            matches!(rows.get(1), Some(Row::Header(DONE_HEADER))),
+            "an all-done queue leads with the DONE section, not CHECKIN"
         );
-        assert_eq!(rows.len(), 3, "one header + two entries");
+        assert_eq!(rows.len(), 4, "spacer + header + two entries");
     }
 
     fn mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
@@ -993,12 +902,12 @@ mod tests {
 
     #[test]
     fn on_mouse_left_click_selects_the_clicked_row() {
-        // All blocked -> [Header, Entry(0), Entry(1), Entry(2)] at terminal rows 1..=4. A click on
-        // row 4 lands on the third entry (index 2), past the section header on row 1.
+        // All blocked -> [Spacer, Header, Entry(0), Entry(1), Entry(2)] at terminal rows 1..=5. A
+        // click on row 5 lands on the third entry (index 2), past the spacer + header.
         let mut m = model(&["w1:p1", "w2:p1", "w3:p1"]);
         on_mouse(
             &mut m,
-            mouse(MouseEventKind::Down(MouseButton::Left), 5, 4),
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 5),
             Some(list_area()),
             0,
         );
@@ -1007,12 +916,12 @@ mod tests {
 
     #[test]
     fn on_mouse_left_click_on_a_header_row_selects_nothing() {
-        // The "AWAITING YOU" header sits at terminal row 1; clicking it leaves the selection put.
+        // The CHECKIN header sits at terminal row 2 (row 1 is the spacer); clicking it is a no-op.
         let mut m = model(&["w1:p1", "w2:p1"]);
         m.move_down(); // selection at 1
         on_mouse(
             &mut m,
-            mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 2),
             Some(list_area()),
             0,
         );
@@ -1026,12 +935,12 @@ mod tests {
                        // A scroll event must not move the selection.
         on_mouse(
             &mut m,
-            mouse(MouseEventKind::ScrollDown, 5, 2),
+            mouse(MouseEventKind::ScrollDown, 5, 3),
             Some(list_area()),
             0,
         );
         assert_eq!(m.selected, 1);
-        // A left click on a blank row (past the header + 2 entries) is a no-op.
+        // A left click on a blank row (past the spacer + header + 2 entries) is a no-op.
         on_mouse(
             &mut m,
             mouse(MouseEventKind::Down(MouseButton::Left), 5, 6),
@@ -1051,78 +960,9 @@ mod tests {
 
     #[test]
     fn header_text_pluralizes() {
-        assert_eq!(header_text(0), "Check-in — queue empty");
-        assert_eq!(header_text(1), "Check-in — 1 agent waiting");
-        assert_eq!(header_text(3), "Check-in — 3 agents waiting");
-    }
-
-    fn pane_info(pane_id: &str, tab: &str, focused: bool, label: Option<&str>) -> PaneInfo {
-        PaneInfo {
-            pane_id: pane_id.to_string(),
-            tab_id: Some(tab.to_string()),
-            focused,
-            label: label.map(str::to_owned),
-        }
-    }
-
-    #[test]
-    fn decide_opens_when_no_status_pane_exists() {
-        let panes = [pane_info("wA:p1", "wA:t1", true, Some("editor"))];
-        assert_eq!(decide(&panes), Decision::Open);
-    }
-
-    #[test]
-    fn decide_focuses_status_pane_in_current_tab() {
-        let panes = [
-            pane_info("wA:p1", "wA:t1", true, None),
-            pane_info("wA:p2", "wA:t1", false, Some(PANE_LABEL)),
-        ];
-        assert_eq!(decide(&panes), Decision::Focus("wA:p2".to_string()));
-    }
-
-    #[test]
-    fn decide_closes_when_focused_pane_is_the_status_pane() {
-        let panes = [
-            pane_info("wA:p1", "wA:t1", false, None),
-            pane_info("wA:p2", "wA:t1", true, Some(PANE_LABEL)),
-        ];
-        assert_eq!(decide(&panes), Decision::Close("wA:p2".to_string()));
-    }
-
-    #[test]
-    fn decide_opens_when_status_pane_is_in_another_tab() {
-        // A status pane exists, but in a different tab — focusing it would jump workspaces, so we
-        // open a fresh one in the current tab instead.
-        let panes = [
-            pane_info("wA:p1", "wA:t1", true, None),
-            pane_info("wB:p1", "wB:t1", false, Some(PANE_LABEL)),
-        ];
-        assert_eq!(decide(&panes), Decision::Open);
-    }
-
-    #[test]
-    fn decide_rejects_option_like_pane_ids() {
-        // A crafted id that looks like a flag must never be forwarded to the launcher.
-        let panes = [pane_info("-rf", "wA:t1", true, Some(PANE_LABEL))];
-        assert_eq!(decide(&panes), Decision::Open);
-    }
-
-    #[test]
-    fn parse_panes_reads_ids_and_labels() {
-        let json = r#"{"result":{"panes":[
-            {"pane_id":"wA:p1","tab_id":"wA:t1","focused":true,"label":"Check-in"},
-            {"pane_id":"wA:p2","tab_id":"wA:t1","focused":false}
-        ]}}"#;
-        let panes = parse_panes(json);
-        assert_eq!(panes.len(), 2);
-        assert!(panes[0].is_status_pane());
-        assert!(!panes[1].is_status_pane());
-    }
-
-    #[test]
-    fn parse_panes_degrades_on_garbage() {
-        assert!(parse_panes("not json").is_empty());
-        assert!(parse_panes("{}").is_empty());
+        assert_eq!(header_text(0), "queue empty");
+        assert_eq!(header_text(1), "1 agent waiting");
+        assert_eq!(header_text(3), "3 agents waiting");
     }
 
     // --- reply submit (impure: reads/writes state.json, talks to a fake herdr) ---------------
@@ -1138,6 +978,44 @@ mod tests {
             model.reply_push(ch);
         }
         model
+    }
+
+    #[test]
+    fn on_enter_closes_on_a_successful_jump_and_evicts() {
+        let dir = temp_state_dir("enter-ok");
+        feed_status(&dir, 1_000, "w1:p1", "w1", "blocked", "needs input");
+        let mut model = PaneModel::new(load(&dir));
+        let herdr = FakeHerdr::new(&[("w1:p1", "blocked")]);
+
+        let close = on_enter(&mut model, &runtime(dir.clone(), 2_000), &herdr);
+
+        assert!(close, "a successful jump signals the popup to close");
+        assert_eq!(herdr.focused.into_inner(), vec!["w1:p1".to_string()]);
+        assert!(
+            load(&dir).is_empty(),
+            "the jumped entry is evicted on success"
+        );
+    }
+
+    #[test]
+    fn on_enter_keeps_the_pane_open_when_the_focus_fails() {
+        let dir = temp_state_dir("enter-fail");
+        feed_status(&dir, 1_000, "w1:p1", "w1", "blocked", "needs input");
+        let mut model = PaneModel::new(load(&dir));
+        let herdr = FakeHerdr::new(&[("w1:p1", "blocked")]).with_failing_focus();
+
+        let close = on_enter(&mut model, &runtime(dir.clone(), 2_000), &herdr);
+
+        assert!(!close, "a failed jump keeps the pane open");
+        assert_eq!(
+            load(&dir).len(),
+            1,
+            "a failed jump keeps the entry (invariant #2)"
+        );
+        assert!(model
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("focus failed")));
     }
 
     #[test]

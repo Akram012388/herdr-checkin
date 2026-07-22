@@ -22,7 +22,7 @@ Type "clear" Enter
 Show
 Sleep 500ms
 
-# --- Open the pane: waiters grouped into AWAITING YOU / DONE sections ----
+# --- Open the pane: waiters grouped into CHECKIN / DONE sections ----
 Type "herdr-checkin pane" Enter
 Sleep 2.5s
 
