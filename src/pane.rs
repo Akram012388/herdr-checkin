@@ -14,7 +14,7 @@
 //!   whether or not that event also fires.
 
 use crate::{
-    current_unix_ms, describe_entry, evict, load_entries, Herdr, PluginError, QueueEntry,
+    clear, current_unix_ms, describe_entry, evict, load_entries, Herdr, PluginError, QueueEntry,
     RuntimeEnv, StateStore,
 };
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -30,7 +30,7 @@ use std::time::Duration;
 /// changes and the ticking "waited" column appear promptly without busy-spinning.
 const TICK: Duration = Duration::from_millis(250);
 
-const FOOTER_HINTS: &str = "j/k move  ·  Enter jump  ·  d drop  ·  q quit";
+const FOOTER_HINTS: &str = "j/k move  ·  Enter jump  ·  d drop  ·  c clear  ·  q quit";
 
 /// The label herdr shows for our status pane in `pane list`, used to recognize our own pane for
 /// the idempotent open/focus/close toggle. Must stay in sync with the `[[panes]]` `title` in
@@ -69,6 +69,14 @@ fn event_loop(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                // A pending clear-all confirm swallows the next key: it either confirms or
+                // cancels, and never falls through to the normal bindings. This guard wraps only
+                // the `Event::Key` branch — when a future `Event::Mouse` branch is added, hoist it
+                // above both, or a click during a pending confirm would silently miss it.
+                if model.confirm_clear {
+                    on_confirm_clear(model, runtime, key.code);
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -78,6 +86,7 @@ fn event_loop(
                     KeyCode::Char('k') | KeyCode::Up => model.move_up(),
                     KeyCode::Enter => on_enter(model, runtime, herdr),
                     KeyCode::Char('d') | KeyCode::Char('x') => on_drop(model, runtime),
+                    KeyCode::Char('c') => model.request_clear(),
                     _ => {}
                 }
             }
@@ -122,6 +131,20 @@ fn on_drop(model: &mut PaneModel, runtime: &RuntimeEnv) {
         Err(error) => Some(format!("drop failed: {error}")),
     };
     model.sync(load_entries(&runtime.state_dir));
+}
+
+/// Resolve a pending clear-all confirm: `y`/`Y` empties the queue, any other key cancels. Either
+/// way the confirm is dismissed. The clear itself is [`crate::clear`] — already a delta through
+/// [`StateStore::update`], so invariant #1 holds for free.
+fn on_confirm_clear(model: &mut PaneModel, runtime: &RuntimeEnv, code: KeyCode) {
+    model.confirm_clear = false;
+    if matches!(code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+        model.status = match clear(runtime) {
+            Ok(()) => None,
+            Err(error) => Some(format!("clear failed: {error}")),
+        };
+        model.sync(load_entries(&runtime.state_dir));
+    }
 }
 
 /// Remove a pane from the queue as a delta under the lock (never a full model write-back).
@@ -254,6 +277,8 @@ struct PaneModel {
     entries: Vec<QueueEntry>,
     selected: usize,
     status: Option<String>,
+    /// True while a clear-all confirm is pending (armed by `c`, resolved by the next key).
+    confirm_clear: bool,
 }
 
 impl PaneModel {
@@ -262,6 +287,15 @@ impl PaneModel {
             entries,
             selected: 0,
             status: None,
+            confirm_clear: false,
+        }
+    }
+
+    /// `c`: arm the clear-all confirm, but only when there's something to clear (a no-op on an
+    /// empty queue, like `d`/`Enter`).
+    fn request_clear(&mut self) {
+        if !self.entries.is_empty() {
+            self.confirm_clear = true;
         }
     }
 
@@ -338,8 +372,21 @@ fn draw(frame: &mut Frame, model: &PaneModel, now_ms: u64) {
         frame.render_stateful_widget(list, areas[1], &mut state);
     }
 
-    let footer = model.status.as_deref().unwrap_or(FOOTER_HINTS);
+    let footer = if model.confirm_clear {
+        confirm_prompt(model.entries.len())
+    } else {
+        model.status.as_deref().unwrap_or(FOOTER_HINTS).to_string()
+    };
     frame.render_widget(Paragraph::new(footer).dim(), areas[2]);
+}
+
+/// The footer prompt shown while a clear-all confirm is pending. Only armed on a non-empty queue,
+/// so `count >= 1`; pluralized so the singular case doesn't read "1 entries".
+fn confirm_prompt(count: usize) -> String {
+    match count {
+        1 => "clear all 1 entry? y/n".to_string(),
+        n => format!("clear all {n} entries? y/n"),
+    }
 }
 
 fn header_text(count: usize) -> String {
@@ -419,6 +466,30 @@ mod tests {
         m.sync(Vec::new());
         assert_eq!(m.selected, 0);
         assert_eq!(m.selected_pane_id(), None);
+    }
+
+    #[test]
+    fn request_clear_arms_confirm_on_a_nonempty_queue() {
+        let mut m = model(&["w1:p1", "w2:p1"]);
+        assert!(!m.confirm_clear);
+        m.request_clear();
+        assert!(m.confirm_clear);
+    }
+
+    #[test]
+    fn request_clear_is_a_noop_on_an_empty_queue() {
+        let mut m = model(&[]);
+        m.request_clear();
+        assert!(
+            !m.confirm_clear,
+            "confirm must not arm with nothing to clear"
+        );
+    }
+
+    #[test]
+    fn confirm_prompt_pluralizes() {
+        assert_eq!(confirm_prompt(1), "clear all 1 entry? y/n");
+        assert_eq!(confirm_prompt(3), "clear all 3 entries? y/n");
     }
 
     #[test]

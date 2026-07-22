@@ -134,19 +134,14 @@ visible`, and drive keys with `herdr pane send-keys <pane_id> <key>`. For the `s
 ### A. Deferred pane features — the ready-to-build lane (`src/pane.rs`)
 
 This lane is already scoped in detail. All work is in `src/pane.rs` (+ `README.md` for the demo);
-it is file-disjoint from the queue/manifest code. **Implement B before A** (B is small and validates
-the reuse pattern; A restructures the loop's frame state and terminal init).
+it is file-disjoint from the queue/manifest code. **A is next** — B is done.
 
-**Feature B — in-pane `c` = clear-all, with a confirm.**
-- Add `confirm_clear: bool` to `PaneModel` (default false).
-- In `event_loop`, before the normal key `match`, intercept when `confirm_clear`: `y`/`Y` confirms,
-  any other key cancels. Add a plain `Char('c')` arm (after the existing ctrl-`c` arm) that sets
-  `confirm_clear = true` only when the queue is non-empty (no-op on empty, like `d`/`Enter`).
-- Confirm handler calls the existing `crate::clear` (already a delta through `StateStore::update` —
-  invariant #1 satisfied for free; just add it to the `use crate::{...}` list, no `lib.rs` change).
-- Footer shows `clear all N entries? y/n` while pending (precedence: confirm > status > hints);
-  update `FOOTER_HINTS` to mention `c`.
-- Tests: enter-confirm on non-empty, no-confirm on empty, and a pure `confirm_prompt(count)` string.
+**Feature B — in-pane `c` = clear-all, with a confirm. DONE (unreleased).** Shipped as scoped:
+`confirm_clear` on `PaneModel`, a `request_clear()` that arms only on a non-empty queue, an
+`on_confirm_clear` intercept at the top of the `Event::Key` branch (`y`/`Y` confirms, else cancels)
+that reuses `crate::clear`, footer precedence confirm > status > hints via `confirm_prompt(count)`
+(pluralized), and three unit tests. See the confirm-guard comment in `event_loop` for the Feature A
+hoist point.
 
 **Feature A — mouse click-to-select.**
 - Harder than it sounds. `ratatui::try_init()`/`restore()` do NOT touch mouse capture — enable/

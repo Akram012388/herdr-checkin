@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **In-pane `c` = clear-all**, with a confirm. Pressing `c` in the status pane (on a non-empty
+  queue) arms a `clear all N entries? y/n` prompt in the footer; `y`/`Y` empties the queue, any
+  other key cancels. Reuses the existing `clear` path, so the wipe is a delta under the state lock,
+  never a full write-back. No-op on an empty queue, like `d`/`Enter`.
+
 ## [0.3.0] - 2026-07-22
 
 ### Added
