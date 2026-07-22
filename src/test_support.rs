@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 pub(crate) struct FakeHerdr {
     live: HashMap<String, String>,
     panes: Vec<PaneInfo>,
+    workspace_labels: HashMap<String, String>,
     focus_fails: bool,
     prompt_fails: bool,
     pub(crate) focused: RefCell<Vec<String>>,
@@ -37,12 +38,14 @@ impl FakeHerdr {
                 .map(|(pane_id, status)| PaneInfo {
                     pane_id: pane_id.to_string(),
                     workspace_id: pane_id.split(':').next().unwrap_or("").to_string(),
+                    tab_id: None,
                     agent_status: status.to_string(),
                     agent: None,
                     display_agent: None,
                     title: None,
                 })
                 .collect(),
+            workspace_labels: HashMap::new(),
             focus_fails: false,
             prompt_fails: false,
             focused: RefCell::new(Vec::new()),
@@ -66,6 +69,15 @@ impl FakeHerdr {
         self.panes = panes;
         self
     }
+
+    /// Seed the `workspace list` label map (`workspace_id -> label`) for identity-render tests.
+    pub(crate) fn with_workspace_labels(mut self, labels: &[(&str, &str)]) -> Self {
+        self.workspace_labels = labels
+            .iter()
+            .map(|(id, label)| (id.to_string(), label.to_string()))
+            .collect();
+        self
+    }
 }
 
 impl Herdr for FakeHerdr {
@@ -75,6 +87,10 @@ impl Herdr for FakeHerdr {
 
     fn pane_infos(&self) -> Result<Vec<PaneInfo>, PluginError> {
         Ok(self.panes.clone())
+    }
+
+    fn workspace_labels(&self) -> Result<HashMap<String, String>, PluginError> {
+        Ok(self.workspace_labels.clone())
     }
 
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError> {
@@ -166,5 +182,7 @@ pub(crate) fn feed_status(
 ) {
     let mut rt = runtime(state_dir.to_path_buf(), now_ms);
     rt.event_json = Some(status_event_json(pane, ws, status, title));
-    crate::queue::on_status_changed(&rt).expect("status-changed should succeed");
+    // No-op enrichment: this raw-event fixture exercises queue behavior, not identity resolution
+    // (the location fields stay `None`, exactly as an un-enriched event would leave them).
+    crate::queue::on_status_changed(&rt, |_| {}).expect("status-changed should succeed");
 }

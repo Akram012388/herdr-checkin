@@ -8,18 +8,35 @@ use std::collections::HashMap;
 
 /// `pane.agent_status_changed`: enqueue on `blocked`/`done`, evict on `working`.
 /// Other statuses (`idle`, `unknown`) leave the queue untouched.
-pub(crate) fn on_status_changed(runtime: &RuntimeEnv) -> Result<(), PluginError> {
-    let Some(event) = runtime.event_json.as_deref().and_then(parse_status_event) else {
+///
+/// `enrich` fills the location fields the event omits (`tab_id`, `workspace_label`). It is an
+/// injected closure — not a `Herdr` call — so this module stays free of the `Herdr` trait; the
+/// dispatch layer supplies one backed by `herdr::enrich_location`. It runs **before the lock** and
+/// **only when we will actually enqueue**, so an ordinary `working` eviction pays for no lookups.
+pub(crate) fn on_status_changed(
+    runtime: &RuntimeEnv,
+    enrich: impl FnOnce(&mut StatusEvent),
+) -> Result<(), PluginError> {
+    let Some(mut event) = runtime.event_json.as_deref().and_then(parse_status_event) else {
         return Ok(());
     };
 
+    let Some(status) = event.wait_status() else {
+        // Not a wait status: evict on `working`, ignore the rest. No location lookup needed.
+        if event.is_working() {
+            return StateStore::new(&runtime.state_dir).update(|mut entries| {
+                evict(&mut entries, &event.pane_id);
+                (entries, ())
+            });
+        }
+        return Ok(());
+    };
+
+    enrich(&mut event);
+
     let now_ms = runtime.now_ms;
     StateStore::new(&runtime.state_dir).update(|mut entries| {
-        match event.wait_status() {
-            Some(status) => enqueue(&mut entries, &event, status, now_ms),
-            None if event.is_working() => evict(&mut entries, &event.pane_id),
-            None => {}
-        }
+        enqueue(&mut entries, &event, status, now_ms);
         (entries, ())
     })
 }
@@ -65,6 +82,8 @@ pub(crate) fn enqueue(
 ) {
     if let Some(existing) = entries.iter_mut().find(|e| e.pane_id == event.pane_id) {
         existing.workspace_id = event.workspace_id.clone();
+        existing.tab_id = event.tab_id.clone();
+        existing.workspace_label = event.workspace_label.clone();
         existing.agent = event.agent.clone();
         existing.display_agent = event.display_agent.clone();
         existing.title = event.title.clone();
@@ -74,6 +93,8 @@ pub(crate) fn enqueue(
         entries.push(QueueEntry {
             pane_id: event.pane_id.clone(),
             workspace_id: event.workspace_id.clone(),
+            tab_id: event.tab_id.clone(),
+            workspace_label: event.workspace_label.clone(),
             agent: event.agent.clone(),
             display_agent: event.display_agent.clone(),
             title: event.title.clone(),
@@ -206,7 +227,7 @@ mod tests {
             r#"{"pane_id":"w1:p1","workspace_id":"w1","agent_status":"blocked","title":"x"}"#
                 .to_string(),
         );
-        on_status_changed(&rt).expect("status-changed should parse the flat shape");
+        on_status_changed(&rt, |_| {}).expect("status-changed should parse the flat shape");
         let entries = load(&dir);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].pane_id, "w1:p1");

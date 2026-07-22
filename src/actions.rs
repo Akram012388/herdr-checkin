@@ -106,6 +106,9 @@ pub(crate) fn clear(runtime: &RuntimeEnv) -> Result<(), PluginError> {
 ///   seeded like any other (restart focus is not a user action).
 pub(crate) fn startup(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
     let panes = herdr.pane_infos()?;
+    // Human workspace labels for the rows. Best-effort: a `workspace list` failure just leaves the
+    // rows on their raw ids — it must not abort re-seeding the queue after a herdr restart.
+    let labels = herdr.workspace_labels().unwrap_or_default();
     let now_ms = runtime.now_ms;
 
     StateStore::new(&runtime.state_dir).update(|mut entries| {
@@ -113,6 +116,9 @@ pub(crate) fn startup(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), Plu
             let event = StatusEvent {
                 pane_id: pane.pane_id.clone(),
                 workspace_id: pane.workspace_id.clone(),
+                // `pane list` carries the tab directly; the label comes from the workspace map.
+                tab_id: pane.tab_id.clone(),
+                workspace_label: labels.get(&pane.workspace_id).cloned(),
                 agent_status: pane.agent_status.clone(),
                 agent: pane.agent.clone(),
                 display_agent: pane.display_agent.clone(),
@@ -161,17 +167,56 @@ pub(crate) fn describe_entry(entry: &QueueEntry, now_ms: u64) -> String {
     let who = agent_label(entry);
     let waited = format_waited(now_ms.saturating_sub(entry.enqueued_at_ms));
     let status = entry.status.as_str();
-    // The bracketed suffix carries the workspace and wait time; omit the workspace when it is
-    // missing so it never renders as an empty "[, 3m]".
-    let meta = if entry.workspace_id.is_empty() {
-        waited
-    } else {
-        format!("{}, {waited}", entry.workspace_id)
-    };
-    match entry.title.as_deref().filter(|value| !value.is_empty()) {
-        Some(title) => format!("{who} — {status} — {title} [{meta}]"),
-        None => format!("{who} — {status} [{meta}]"),
+    // The metadata tail names *where* the waiter is and *how long* it has waited: the workspace (its
+    // human label, else the raw id), the positional `t{N}/p{N}` locator, then the wait time — joined
+    // by " · ". Each location part is dropped when unknown so a pane with no resolved workspace or
+    // tab never leaves a dangling separator.
+    let mut tail: Vec<String> = Vec::with_capacity(3);
+    if let Some(workspace) = entry_workspace(entry) {
+        tail.push(workspace);
     }
+    if let Some(tab_pane) = entry_tab_pane(entry) {
+        tail.push(tab_pane);
+    }
+    tail.push(waited);
+    let tail = tail.join(" · ");
+    match entry.title.as_deref().filter(|value| !value.is_empty()) {
+        Some(title) => format!("{who} — {status} — {title} · {tail}"),
+        None => format!("{who} — {status} · {tail}"),
+    }
+}
+
+/// The workspace column: the resolved human label if present, else the raw positional id, else
+/// nothing (an entry with neither — only possible for a hand-seeded/legacy row).
+fn entry_workspace(entry: &QueueEntry) -> Option<String> {
+    entry
+        .workspace_label
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or(Some(entry.workspace_id.as_str()).filter(|value| !value.is_empty()))
+        .map(str::to_owned)
+}
+
+/// The positional `t{N}/p{N}` locator built from the tab and pane ids (`wS:t2` -> `t2`,
+/// `wS:p3` -> `p3`). Either segment may be missing — an un-refreshed entry carries no `tab_id` (then
+/// just the pane), and a malformed pane id yields no pane segment (then just the tab) — so this
+/// returns whichever it can, or None when it knows neither.
+fn entry_tab_pane(entry: &QueueEntry) -> Option<String> {
+    let tab = entry.tab_id.as_deref().and_then(id_segment);
+    let pane = id_segment(&entry.pane_id);
+    match (tab, pane) {
+        (Some(tab), Some(pane)) => Some(format!("{tab}/{pane}")),
+        (Some(seg), None) | (None, Some(seg)) => Some(seg.to_string()),
+        (None, None) => None,
+    }
+}
+
+/// The trailing positional segment of a herdr id — the part after its `:` (`wS:t2` -> `t2`). An id
+/// with no `:` (or an empty tail) has no segment we can trust, so this returns None.
+fn id_segment(id: &str) -> Option<&str> {
+    id.rsplit_once(':')
+        .map(|(_, segment)| segment)
+        .filter(|segment| !segment.is_empty())
 }
 
 fn format_waited(ms: u64) -> String {
@@ -305,6 +350,8 @@ mod tests {
                 entries.push(QueueEntry {
                     pane_id: "wR:p1".to_string(),
                     workspace_id: "wR".to_string(),
+                    tab_id: None,
+                    workspace_label: None,
                     agent: None,
                     display_agent: None,
                     title: None,
@@ -340,6 +387,8 @@ mod tests {
                 entries.push(QueueEntry {
                     pane_id: "wR:p1".to_string(),
                     workspace_id: "wR".to_string(),
+                    tab_id: None,
+                    workspace_label: None,
                     agent: None,
                     display_agent: None,
                     title: None,
@@ -364,10 +413,14 @@ mod tests {
     }
 
     #[test]
-    fn describe_entry_omits_a_missing_workspace() {
+    fn describe_entry_omits_a_missing_workspace_and_tab() {
+        // Neither a workspace (label or id) nor a tab/pane segment is known: the tail is just the
+        // wait time, with no leading or dangling " · " separator.
         let entry = QueueEntry {
-            pane_id: "p".to_string(),
+            pane_id: "p".to_string(), // no ':' -> no positional pane segment
             workspace_id: String::new(),
+            tab_id: None,
+            workspace_label: None,
             agent: None,
             display_agent: None,
             title: None,
@@ -376,8 +429,47 @@ mod tests {
             last_touched_ms: 0,
         };
         let line = describe_entry(&entry, 0);
-        assert!(!line.contains("[,"), "line was: {line}");
-        assert!(line.ends_with("[just now]"), "line was: {line}");
+        assert_eq!(line, "p — done · just now");
+    }
+
+    #[test]
+    fn describe_entry_renders_workspace_label_and_positional_tab_pane() {
+        let entry = QueueEntry {
+            pane_id: "wT:p1".to_string(),
+            workspace_id: "wT".to_string(),
+            tab_id: Some("wT:t2".to_string()),
+            workspace_label: Some("herdr-checkin".to_string()),
+            agent: None,
+            display_agent: Some("Claude".to_string()),
+            title: Some("Fix the parser".to_string()),
+            status: WaitStatus::Done,
+            enqueued_at_ms: 0,
+            last_touched_ms: 0,
+        };
+        let line = describe_entry(&entry, 180_000);
+        assert_eq!(
+            line,
+            "Claude — done — Fix the parser · herdr-checkin · t2/p1 · 3m"
+        );
+    }
+
+    #[test]
+    fn describe_entry_falls_back_to_workspace_id_and_pane_only_without_a_tab() {
+        // An un-enriched event row: no resolved label (raw id shown) and no tab_id (pane only).
+        let entry = QueueEntry {
+            pane_id: "wN:p2".to_string(),
+            workspace_id: "wN".to_string(),
+            tab_id: None,
+            workspace_label: None,
+            agent: Some("codex".to_string()),
+            display_agent: None,
+            title: None,
+            status: WaitStatus::Blocked,
+            enqueued_at_ms: 0,
+            last_touched_ms: 0,
+        };
+        let line = describe_entry(&entry, 60_000);
+        assert_eq!(line, "codex — blocked · wN · p2 · 1m");
     }
 
     #[test]
@@ -497,14 +589,17 @@ mod tests {
     #[test]
     fn startup_carries_full_pane_fields() {
         let dir = temp_state_dir("startup-fields");
-        let herdr = FakeHerdr::new(&[]).with_panes(vec![PaneInfo {
-            pane_id: "wA:p1".to_string(),
-            workspace_id: "wA".to_string(),
-            agent_status: "blocked".to_string(),
-            agent: Some("claude".to_string()),
-            display_agent: Some("Claude".to_string()),
-            title: Some("needs input".to_string()),
-        }]);
+        let herdr = FakeHerdr::new(&[])
+            .with_panes(vec![PaneInfo {
+                pane_id: "wA:p1".to_string(),
+                workspace_id: "wA".to_string(),
+                tab_id: Some("wA:t2".to_string()),
+                agent_status: "blocked".to_string(),
+                agent: Some("claude".to_string()),
+                display_agent: Some("Claude".to_string()),
+                title: Some("needs input".to_string()),
+            }])
+            .with_workspace_labels(&[("wA", "home")]);
         let rt = runtime(dir.clone(), 7_000);
 
         startup(&rt, &herdr).expect("startup should succeed");
@@ -513,6 +608,9 @@ mod tests {
         assert_eq!(entries.len(), 1);
         let entry = &entries[0];
         assert_eq!(entry.workspace_id, "wA");
+        // Startup resolves the tab from `pane list` and the label from `workspace list`.
+        assert_eq!(entry.tab_id.as_deref(), Some("wA:t2"));
+        assert_eq!(entry.workspace_label.as_deref(), Some("home"));
         assert_eq!(entry.agent.as_deref(), Some("claude"));
         assert_eq!(entry.display_agent.as_deref(), Some("Claude"));
         assert_eq!(entry.title.as_deref(), Some("needs input"));

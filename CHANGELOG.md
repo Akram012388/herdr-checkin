@@ -49,6 +49,16 @@ release.
   emitting mouse escapes.
 
 ### Changed
+- **Each row now names where the waiter is — workspace, tab, and pane.** A row's location suffix was
+  just the raw `workspace_id` (e.g. `w1`); it now reads `{workspace} · t{N}/p{N} · {waited}`, where
+  `{workspace}` is the workspace's human label (falling back to its id) and `t{N}/p{N}` is the
+  positional tab/pane. The event payload carries neither the tab nor the workspace name, so the
+  enqueue path resolves them from `pane list` + `workspace list` (best-effort — a lookup failure just
+  leaves the row on its ids, never dropping the ping); the `startup` re-seed resolves them the same
+  way. New `QueueEntry` fields (`tab_id`, `workspace_label`) are `serde(default)`, so old `state.json`
+  files load unchanged and simply omit the tab/label until the entry is next refreshed.
+- **Reply placeholder lightened.** The empty-buffer `type your reply` hint is now a faint neutral
+  color and no longer italic, so it recedes further from real input.
 - **`src/lib.rs` split into cohesive modules** (`state`, `herdr`, `queue`, `actions`, `pane`, and a
   test-only `test_support`), each carrying its own tests; `lib.rs` is now the argv-dispatch
   orientation page that re-wires the pieces. The queue transitions no longer depend on the herdr seam

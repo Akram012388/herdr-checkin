@@ -40,6 +40,17 @@ pub(crate) struct QueueEntry {
     pub(crate) display_agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
+    /// The pane's tab id (`wS:t2` form), resolved from `pane list` at enqueue/seed time. The event
+    /// payload does not carry it, so the everyday enqueue path looks it up (see
+    /// `herdr::enrich_location`). `serde(default)` keeps pre-0.4.x state files loadable — they read
+    /// `None`, and the row simply omits the tab segment until the entry is next refreshed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tab_id: Option<String>,
+    /// The workspace's human label (e.g. `herdr-checkin`), resolved from `workspace list`. Only the
+    /// raw `workspace_id` lives on the event, so this is looked up alongside `tab_id`. Falls back to
+    /// `workspace_id` in the row when absent. Migration-safe via `serde(default)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workspace_label: Option<String>,
     pub(crate) status: WaitStatus,
     pub(crate) enqueued_at_ms: u64,
     /// When this entry was last enqueued or refreshed (an upsert bumps it; `enqueued_at_ms` stays

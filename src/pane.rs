@@ -932,6 +932,8 @@ mod tests {
         QueueEntry {
             pane_id: pane_id.to_string(),
             workspace_id: pane_id.split(':').next().unwrap_or("").to_string(),
+            tab_id: None,
+            workspace_label: None,
             agent: Some("claude".to_string()),
             display_agent: Some("Claude".to_string()),
             title: Some("t".to_string()),

@@ -22,7 +22,7 @@ mod state;
 pub(crate) mod test_support;
 
 use actions::{next, peek, startup};
-use herdr::CliHerdr;
+use herdr::{enrich_location, CliHerdr};
 use queue::{on_closed, on_focused, on_status_changed};
 
 pub(crate) use actions::{agent_label, clear, describe_entry};
@@ -78,7 +78,9 @@ pub fn run_from_env() -> i32 {
 
 fn run(subcommand: Subcommand, runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
     match subcommand {
-        Subcommand::StatusChanged => on_status_changed(runtime),
+        Subcommand::StatusChanged => {
+            on_status_changed(runtime, |event| enrich_location(herdr, event))
+        }
         Subcommand::Focused => on_focused(runtime),
         Subcommand::Closed => on_closed(runtime),
         Subcommand::Next => next(runtime, herdr),
