@@ -239,21 +239,31 @@ key. After editing: `herdr config check && herdr server reload-config`.
 
 ## 6. Next up (START HERE)
 
-### Task A (priority) — fix `ctrl+u` in the reply bar
-**Bug:** in the inline-reply input, `ctrl+u` does **not** clear the whole line to the left of the
-cursor (delete-to-line-start). Observed live by the maintainer. The input is now `tui-textarea`
-(`src/pane.rs`, `ReplyDraft.input`), which maps `ctrl+u` to its `delete_line_by_head` binding — so
-either the binding isn't firing as expected, or the plugin pane isn't receiving `ctrl+u` as a clean
-`Char('u')+CONTROL` event. Investigate:
-1. Confirm what key event `ctrl+u` actually arrives as inside the pane (add a temporary debug write to
-   a scratch file from the event loop, or a targeted log — the pane is a live TUI, not `pane list`-able).
-2. Check tui-textarea 0.7's default `ctrl+u` behavior (it should delete from the cursor to the line
-   head). If the binding is right but the event is being swallowed/miscoded (e.g. keyboard-protocol
-   flags on the plugin pane), handle it explicitly: intercept `Char('u')+CONTROL` in the reply branch
-   and call the textarea's delete-to-head yourself, or rebind. Keep it single-line and consistent with
-   the rest of the cursor keys (which DO work).
-3. Add a unit test driving `reply_input` with `ctrl+u` on a mid-line cursor and asserting the left
-   side is cleared. Keep the green gate (`fmt + clippy -D warnings + test`).
+### BIG FEATURE (priority) — the Agents view. See [docs/agents-view-design.md](docs/agents-view-design.md).
+The next evolution: add a live **Agents view** roster beside the durable queue in the popup, mirroring
+Claude Code's agent view but powered by herdr primitives. **Fully aligned with the maintainer**
+(research → interview → Fable advisory, 2026-07-22) and specced end-to-end in
+`docs/agents-view-design.md` — read it first. In brief:
+- Two views in one popup, `Tab`/`Ctrl+S` toggle: **Queue** (durable, unchanged) + **Agents** (live).
+- Agents lists **every** detected agent pane (all states), grouped by workspace; row status = the last
+  terminal line via `agent read`; time = **time-in-state stamped by the `status-changed` event binary**
+  (the pane isn't running to observe transitions — poll-loop tracking would fabricate zeros).
+- Actions: `Enter` jump, `space` reply. **Peek deferred; reorder is pin-to-top only.**
+- Live data via a **worker thread** (never CLI on the render tick); `roster.json` is a **separate,
+  prunable** store from `state.json` (new **invariant #7**).
+- **Build order (tracer-bullet, each green + eyeballed):** Slice 0 split `pane.rs` → 1 data seam +
+  `roster.rs` + hidden `roster` debug cmd → 2 tab toggle + read-only live roster (the tracer bullet) →
+  3 jump/reply parity → 4 last-line column → 5 `roster.json` + time-in-state → 6 pin-to-top. Full slice
+  table in the design doc §8.
+
+### DONE this session (folded into untagged 0.4.0)
+- **`ctrl+u` in the reply bar** now clears to line-start. Root cause: tui-textarea 0.7 binds `ctrl+u`
+  to `undo` (delete-to-head is on `ctrl+j`), so the old binding did nothing expected. Fix: intercept
+  `Char('u')+CONTROL` in the reply branch → `delete_line_by_head` (`pane.rs`), unit-tested. **Watch out:**
+  the live pane runs `target/release/herdr-checkin` — a `cargo test` (debug) does NOT update it; rebuild
+  `--release` before eyeballing.
+- **CI clippy break fixed** — `collapsible_match` in the `Event::Paste` arm (`pane.rs`) had shipped on
+  `6f6f9fc`; `main` is green again.
 
 ### Continue polishing (maintainer's standing intent)
 Small, tasteful, terminal-first QoL — the same bar as this session. Candidates, low-priority, pick by
