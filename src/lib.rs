@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod pane;
+
 const STATE_FILE_NAME: &str = "state.json";
 const LOCK_FILE_NAME: &str = "state.lock";
 const STATE_VERSION: u32 = 1;
@@ -78,6 +80,7 @@ fn run(subcommand: Subcommand, runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Resul
         Subcommand::Next => next(runtime, herdr),
         Subcommand::Peek => peek(runtime, herdr),
         Subcommand::Clear => clear(runtime),
+        Subcommand::Pane => pane::run(runtime, herdr),
     }
 }
 
@@ -292,6 +295,7 @@ enum Subcommand {
     Next,
     Peek,
     Clear,
+    Pane,
 }
 
 enum ParseCommandError {
@@ -317,6 +321,7 @@ where
         "next" => Ok(Subcommand::Next),
         "peek" => Ok(Subcommand::Peek),
         "clear" => Ok(Subcommand::Clear),
+        "pane" => Ok(Subcommand::Pane),
         "help" | "--help" | "-h" => Err(ParseCommandError::Usage(usage())),
         other => Err(ParseCommandError::Usage(format!(
             "unknown subcommand: {other}\n{}",
@@ -326,7 +331,7 @@ where
 }
 
 fn usage() -> String {
-    "usage: herdr-checkin <status-changed|focused|closed|next|peek|clear>".to_string()
+    "usage: herdr-checkin <status-changed|focused|closed|next|peek|clear|pane>".to_string()
 }
 
 fn env_path(name: &str) -> Result<PathBuf, PluginError> {
@@ -759,6 +764,15 @@ fn write_state(path: &Path, entries: &[QueueEntry]) -> Result<(), PluginError> {
             path.display()
         ))
     })
+}
+
+/// Read the current queue for read-only display (the status pane). Reads without the lock —
+/// writes are atomic temp+rename, so a reader always sees a complete file — and degrades to an
+/// empty queue on any error. Mutations must still go through [`StateStore::update`].
+fn load_entries(state_dir: &Path) -> Vec<QueueEntry> {
+    read_state(&state_dir.join(STATE_FILE_NAME))
+        .map(|loaded| loaded.entries)
+        .unwrap_or_default()
 }
 
 fn current_unix_ms() -> u64 {

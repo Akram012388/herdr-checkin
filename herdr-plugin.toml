@@ -1,6 +1,6 @@
 id = "Akram012388.checkin"
 name = "Check-in"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.7.0"
 description = "Durable attention queue for agent panes: queue agents that go blocked or done, then jump to the oldest waiter on demand."
 platforms = ["linux", "macos"]
@@ -28,6 +28,28 @@ id = "clear"
 title = "Check-in: clear queue"
 contexts = ["global", "workspace"]
 command = ["./target/release/herdr-checkin", "clear"]
+
+# open-pane summons the status pane (below) as a split. herdr actions run a command, so this
+# shells `herdr plugin pane open` via the injected $HERDR_BIN_PATH. A repeat press opens another
+# split rather than toggling — panes share state.json safely (mutations are lock-guarded), so a
+# duplicate is only cosmetic; close extras with q. (Idempotent open/focus/toggle is a follow-up.)
+[[actions]]
+id = "open-pane"
+title = "Check-in: open queue pane"
+contexts = ["global", "workspace"]
+command = [
+  "/bin/sh",
+  "-c",
+  "exec \"$HERDR_BIN_PATH\" plugin pane open --plugin Akram012388.checkin --entrypoint queue --placement split --direction right --focus",
+]
+
+# The status pane: a persistent TUI listing the live queue with select-and-jump. herdr spawns
+# this long-running binary into the split; it re-reads state.json on a tick to stay current.
+[[panes]]
+id = "queue"
+title = "Check-in"
+placement = "split"
+command = ["./target/release/herdr-checkin", "pane"]
 
 # Events. Enqueue on agent status changes; evict on focus and close.
 [[events]]
