@@ -20,6 +20,9 @@ pub(crate) struct PaneInfo {
     /// The pane's tab id (`wS:t2`). Present in `pane list` but NOT in the event payload — the reason
     /// the enqueue path must look a pane up here to learn its tab.
     pub(crate) tab_id: Option<String>,
+    /// The pane's manual label (`terminal.manual_label`, e.g. `orchestrator`) — usually null. When
+    /// set, herdr's own go-to picker shows it in place of `pane {N}`, so the row mirrors that.
+    pub(crate) label: Option<String>,
     pub(crate) agent_status: String,
     pub(crate) agent: Option<String>,
     pub(crate) display_agent: Option<String>,
@@ -34,6 +37,9 @@ pub(crate) trait Herdr {
     /// Map of `workspace_id -> human label` from `herdr workspace list` (e.g. `w4 -> "home"`). Used
     /// to render a readable workspace name on each row instead of the raw positional id.
     fn workspace_labels(&self) -> Result<HashMap<String, String>, PluginError>;
+    /// Map of `tab_id -> label` from `herdr tab list` (e.g. `w4:t2 -> "claude"`). The tab label is
+    /// usually the running program, exactly what herdr's go-to picker shows for the tab.
+    fn tab_labels(&self) -> Result<HashMap<String, String>, PluginError>;
     /// Bring the agent in the given pane into focus (jumps workspace/tab/pane).
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError>;
     /// Submit `text` as a reply into the agent in the given pane (routes into its session).
@@ -101,6 +107,26 @@ impl CliHerdr {
 
         Ok(output.stdout)
     }
+
+    /// Run `herdr tab list` and return its raw stdout, or an error if the command failed.
+    fn tab_list_stdout(&self) -> Result<Vec<u8>, PluginError> {
+        let output = Command::new(&self.bin_path)
+            .arg("tab")
+            .arg("list")
+            .output()
+            .map_err(|error| {
+                PluginError::new(format!(
+                    "failed to run HERDR_BIN_PATH tab list ({}): {error}",
+                    self.bin_path.display()
+                ))
+            })?;
+
+        if !output.status.success() {
+            return Err(command_failure("HERDR_BIN_PATH tab list", &output));
+        }
+
+        Ok(output.stdout)
+    }
 }
 
 impl Herdr for CliHerdr {
@@ -114,6 +140,10 @@ impl Herdr for CliHerdr {
 
     fn workspace_labels(&self) -> Result<HashMap<String, String>, PluginError> {
         parse_workspace_labels(&self.workspace_list_stdout()?)
+    }
+
+    fn tab_labels(&self) -> Result<HashMap<String, String>, PluginError> {
+        parse_tab_labels(&self.tab_list_stdout()?)
     }
 
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError> {
@@ -270,6 +300,7 @@ fn parse_pane_infos(stdout: &[u8]) -> Result<Vec<PaneInfo>, PluginError> {
             pane_id,
             workspace_id: non_empty_string(pane, "workspace_id").unwrap_or_default(),
             tab_id: non_empty_string(pane, "tab_id"),
+            label: non_empty_string(pane, "label"),
             agent_status: non_empty_string(pane, "agent_status")
                 .unwrap_or_else(|| "unknown".to_string()),
             agent: non_empty_string(pane, "agent"),
@@ -284,33 +315,50 @@ fn parse_pane_infos(stdout: &[u8]) -> Result<Vec<PaneInfo>, PluginError> {
 /// an empty label are skipped (the row then falls back to the raw id). A herdr error surfaces as
 /// `Err`; callers treat identity resolution as best-effort and keep enqueueing without it.
 fn parse_workspace_labels(stdout: &[u8]) -> Result<HashMap<String, String>, PluginError> {
+    parse_id_label_map(stdout, "workspace list", "workspaces", "workspace_id")
+}
+
+/// Parse `herdr tab list` into a `tab_id -> label` map (same shape as the workspace map).
+fn parse_tab_labels(stdout: &[u8]) -> Result<HashMap<String, String>, PluginError> {
+    parse_id_label_map(stdout, "tab list", "tabs", "tab_id")
+}
+
+/// Shared parser for herdr's `{workspace,tab} list` responses: read `result.<array_key>[]` and
+/// collect `<id_key> -> label`, skipping any element missing the id or with an empty label. `command`
+/// names the source in error messages. A herdr error or an unexpected shape surfaces as `Err`.
+fn parse_id_label_map(
+    stdout: &[u8],
+    command: &str,
+    array_key: &str,
+    id_key: &str,
+) -> Result<HashMap<String, String>, PluginError> {
     let value: Value = serde_json::from_slice(stdout).map_err(|error| {
         PluginError::new(format!(
-            "failed to parse HERDR_BIN_PATH workspace list JSON: {error}"
+            "failed to parse HERDR_BIN_PATH {command} JSON: {error}"
         ))
     })?;
 
     if let Some(error) = herdr_error_message(&value) {
         return Err(PluginError::new(format!(
-            "HERDR_BIN_PATH workspace list returned an error: {error}"
+            "HERDR_BIN_PATH {command} returned an error: {error}"
         )));
     }
 
-    let workspaces = value
+    let items = value
         .get("result")
-        .and_then(|result| result.get("workspaces"))
+        .and_then(|result| result.get(array_key))
         .and_then(Value::as_array)
         .ok_or_else(|| {
-            PluginError::new(
-                "HERDR_BIN_PATH workspace list returned an unexpected response".to_string(),
-            )
+            PluginError::new(format!(
+                "HERDR_BIN_PATH {command} returned an unexpected response"
+            ))
         })?;
 
-    let mut labels = HashMap::with_capacity(workspaces.len());
-    for workspace in workspaces {
+    let mut labels = HashMap::with_capacity(items.len());
+    for item in items {
         if let (Some(id), Some(label)) = (
-            non_empty_string(workspace, "workspace_id"),
-            non_empty_string(workspace, "label"),
+            non_empty_string(item, id_key),
+            non_empty_string(item, "label"),
         ) {
             labels.insert(id, label);
         }
@@ -318,19 +366,26 @@ fn parse_workspace_labels(stdout: &[u8]) -> Result<HashMap<String, String>, Plug
     Ok(labels)
 }
 
-/// Fill in the location fields the event payload omits — the pane's `tab_id` (from `pane list`) and
-/// its workspace's human `label` (from `workspace list`). Best-effort by design: identity is
-/// cosmetic, so a failed lookup leaves the field `None` and the enqueue proceeds unchanged — losing
-/// a ping over a missing label would defeat the plugin's whole purpose. Called only from the
-/// dispatch layer (which owns the `Herdr` handle) so `queue.rs` stays trait-free.
+/// Fill in the location fields the event payload omits — the pane's `tab_id` + manual `label` (from
+/// `pane list`), its workspace's human `label` (from `workspace list`), and its tab's `label` (from
+/// `tab list`, keyed by the tab id we just learned). Best-effort by design: identity is cosmetic, so
+/// a failed lookup leaves the field `None` and the enqueue proceeds unchanged — losing a ping over a
+/// missing label would defeat the plugin's whole purpose. Called only from the dispatch layer (which
+/// owns the `Herdr` handle) so `queue.rs` stays trait-free.
 pub(crate) fn enrich_location(herdr: &dyn Herdr, event: &mut StatusEvent) {
     if let Ok(panes) = herdr.pane_infos() {
         if let Some(info) = panes.iter().find(|pane| pane.pane_id == event.pane_id) {
             event.tab_id = info.tab_id.clone();
+            event.pane_label = info.label.clone();
         }
     }
     if let Ok(labels) = herdr.workspace_labels() {
         event.workspace_label = labels.get(&event.workspace_id).cloned();
+    }
+    if let Some(tab_id) = event.tab_id.as_deref() {
+        if let Ok(labels) = herdr.tab_labels() {
+            event.tab_label = labels.get(tab_id).cloned();
+        }
     }
 }
 
@@ -359,6 +414,10 @@ pub(crate) struct StatusEvent {
     pub(crate) tab_id: Option<String>,
     /// The workspace's human label. Never on the event; resolved the same way as `tab_id`.
     pub(crate) workspace_label: Option<String>,
+    /// The tab's label (program name). Resolved from `tab list`, keyed by `tab_id`.
+    pub(crate) tab_label: Option<String>,
+    /// The pane's manual label. Resolved from `pane list` alongside `tab_id`.
+    pub(crate) pane_label: Option<String>,
     pub(crate) agent_status: String,
     pub(crate) agent: Option<String>,
     pub(crate) display_agent: Option<String>,
@@ -387,10 +446,13 @@ pub(crate) fn parse_status_event(raw: &str) -> Option<StatusEvent> {
     Some(StatusEvent {
         pane_id: non_empty_string(data, "pane_id")?,
         workspace_id: non_empty_string(data, "workspace_id").unwrap_or_default(),
-        // The event omits both; `enrich_location` fills them before enqueue. Parse defensively in
-        // case a future herdr adds them to the payload — then the lookup is a no-op refresh.
+        // The event omits these; `enrich_location` fills them before enqueue. Parse `tab_id`
+        // defensively in case a future herdr adds it to the payload — then the lookup is a no-op
+        // refresh. The labels are never on the wire.
         tab_id: non_empty_string(data, "tab_id"),
         workspace_label: None,
+        tab_label: None,
+        pane_label: None,
         agent_status: non_empty_string(data, "agent_status")?,
         agent: non_empty_string(data, "agent"),
         display_agent: non_empty_string(data, "display_agent"),

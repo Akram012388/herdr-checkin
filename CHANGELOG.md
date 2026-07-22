@@ -31,9 +31,10 @@ release.
   evict on success only — the same discipline as `Enter`/jump); `Esc` cancels; an empty/whitespace
   reply sends nothing and stays in reply mode. The reply target is captured when reply mode is armed,
   so a concurrent queue refresh can't retarget it. Composing darkens the queue as one veil so the
-  strip is the only lit surface: a titled `Reply to <label>` rule, a 1-3 row input that character-
-  wraps by display width (unicode-width aware) and drives the real terminal cursor, and a
-  right-aligned `enter send · esc cancel` hint — colorless, matching herdr's restrained modal look.
+  strip is the only lit surface (and the answered agent keeps a soft grey band so it stays obvious
+  which one you're replying to): a titled `Reply to <label>` rule, a single-line input with full
+  cursor editing (see Changed), and a right-aligned `enter send · esc cancel` hint — colorless,
+  matching herdr's restrained modal look.
 - **Scrollbar when the queue overflows the popup.** When the grouped rows exceed the visible height,
   a 1-column scrollbar (dim track, brighter thumb) appears at the right edge so off-screen waiters
   are discoverable; the list already scrolls to keep the selection in view.
@@ -49,16 +50,30 @@ release.
   emitting mouse escapes.
 
 ### Changed
-- **Each row now names where the waiter is — workspace, tab, and pane.** A row's location suffix was
-  just the raw `workspace_id` (e.g. `w1`); it now reads `{workspace} · t{N}/p{N} · {waited}`, where
-  `{workspace}` is the workspace's human label (falling back to its id) and `t{N}/p{N}` is the
-  positional tab/pane. The event payload carries neither the tab nor the workspace name, so the
-  enqueue path resolves them from `pane list` + `workspace list` (best-effort — a lookup failure just
-  leaves the row on its ids, never dropping the ping); the `startup` re-seed resolves them the same
-  way. New `QueueEntry` fields (`tab_id`, `workspace_label`) are `serde(default)`, so old `state.json`
-  files load unchanged and simply omit the tab/label until the entry is next refreshed.
-- **Reply placeholder lightened.** The empty-buffer `type your reply` hint is now a faint neutral
-  color and no longer italic, so it recedes further from real input.
+- **Rows are now location-first, two lines each — mirroring herdr's own `prefix+g` go-to.** A row's
+  location used to be just the raw `workspace_id` (e.g. `w1`). Each waiter now renders as a bright
+  **destination** line — `{workspace} · {tab} · {pane}` — over a dim **detail** line —
+  `{status} · {title} · {waited}` — so *where* the agent is reads first, the way a navigation list
+  should. Each segment prefers its human name and falls back to the positional id: workspace label
+  (else `workspace_id`), tab label (else `t{N}`), pane manual label (else `pane {N}`). The event
+  payload carries none of the names, so the enqueue path resolves them from `pane list` +
+  `workspace list` + `tab list` (best-effort — a lookup failure just leaves that segment on its id,
+  never dropping the ping); the `startup` re-seed resolves them the same way. New `QueueEntry` fields
+  (`tab_id`, `workspace_label`, `tab_label`, `pane_label`) are `serde(default)`, so old `state.json`
+  loads unchanged and fills the names in on the next refresh.
+- **Reply input rebuilt on `tui-textarea` — real cursor editing.** The compose bar was an
+  append/pop buffer with the cursor pinned at the end; it is now a single-line text field with full
+  terminal editing: `ctrl+a`/`ctrl+e` (line start/end), `←`/`→`/word-jumps (mid-line cursor),
+  `ctrl+w` (delete word), `ctrl+k` (delete to end), correct on wide/combining characters. `Enter`
+  still submits and `Esc` cancels (both intercepted before the widget, so it stays single-line). It
+  scrolls horizontally instead of wrapping across rows. **Bracketed paste** is now enabled and a
+  paste is inserted as one edit with newlines/tabs flattened to spaces — closing a footgun where a
+  pasted newline used to fire a half-written reply into the agent.
+- **Softer, more legible highlights.** The selection is a soft grey band
+  (`Color::DarkGray` background) instead of full reversed video, which read as a harsh white bar on a
+  dark theme; the same band marks the agent being replied to while composing. The footer hint bar is
+  centered so its margins stay balanced. The `type your reply` placeholder is a faint neutral color
+  and no longer italic.
 - **`src/lib.rs` split into cohesive modules** (`state`, `herdr`, `queue`, `actions`, `pane`, and a
   test-only `test_support`), each carrying its own tests; `lib.rs` is now the argv-dispatch
   orientation page that re-wires the pieces. The queue transitions no longer depend on the herdr seam

@@ -51,6 +51,14 @@ pub(crate) struct QueueEntry {
     /// `workspace_id` in the row when absent. Migration-safe via `serde(default)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) workspace_label: Option<String>,
+    /// The tab's label (program name, e.g. `claude`), resolved from `tab list` keyed by `tab_id`.
+    /// Falls back to the positional `t{N}` (from `tab_id`) in the row. Migration-safe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tab_label: Option<String>,
+    /// The pane's manual label (e.g. `orchestrator`), resolved from `pane list`; usually absent, in
+    /// which case the row shows the positional `pane {N}` (from `pane_id`). Migration-safe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pane_label: Option<String>,
     pub(crate) status: WaitStatus,
     pub(crate) enqueued_at_ms: u64,
     /// When this entry was last enqueued or refreshed (an upsert bumps it; `enqueued_at_ms` stays

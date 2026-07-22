@@ -84,6 +84,8 @@ pub(crate) fn enqueue(
         existing.workspace_id = event.workspace_id.clone();
         existing.tab_id = event.tab_id.clone();
         existing.workspace_label = event.workspace_label.clone();
+        existing.tab_label = event.tab_label.clone();
+        existing.pane_label = event.pane_label.clone();
         existing.agent = event.agent.clone();
         existing.display_agent = event.display_agent.clone();
         existing.title = event.title.clone();
@@ -95,6 +97,8 @@ pub(crate) fn enqueue(
             workspace_id: event.workspace_id.clone(),
             tab_id: event.tab_id.clone(),
             workspace_label: event.workspace_label.clone(),
+            tab_label: event.tab_label.clone(),
+            pane_label: event.pane_label.clone(),
             agent: event.agent.clone(),
             display_agent: event.display_agent.clone(),
             title: event.title.clone(),

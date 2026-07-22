@@ -15,6 +15,7 @@ pub(crate) struct FakeHerdr {
     live: HashMap<String, String>,
     panes: Vec<PaneInfo>,
     workspace_labels: HashMap<String, String>,
+    tab_labels: HashMap<String, String>,
     focus_fails: bool,
     prompt_fails: bool,
     pub(crate) focused: RefCell<Vec<String>>,
@@ -39,6 +40,7 @@ impl FakeHerdr {
                     pane_id: pane_id.to_string(),
                     workspace_id: pane_id.split(':').next().unwrap_or("").to_string(),
                     tab_id: None,
+                    label: None,
                     agent_status: status.to_string(),
                     agent: None,
                     display_agent: None,
@@ -46,6 +48,7 @@ impl FakeHerdr {
                 })
                 .collect(),
             workspace_labels: HashMap::new(),
+            tab_labels: HashMap::new(),
             focus_fails: false,
             prompt_fails: false,
             focused: RefCell::new(Vec::new()),
@@ -78,6 +81,15 @@ impl FakeHerdr {
             .collect();
         self
     }
+
+    /// Seed the `tab list` label map (`tab_id -> label`) for identity-render tests.
+    pub(crate) fn with_tab_labels(mut self, labels: &[(&str, &str)]) -> Self {
+        self.tab_labels = labels
+            .iter()
+            .map(|(id, label)| (id.to_string(), label.to_string()))
+            .collect();
+        self
+    }
 }
 
 impl Herdr for FakeHerdr {
@@ -91,6 +103,10 @@ impl Herdr for FakeHerdr {
 
     fn workspace_labels(&self) -> Result<HashMap<String, String>, PluginError> {
         Ok(self.workspace_labels.clone())
+    }
+
+    fn tab_labels(&self) -> Result<HashMap<String, String>, PluginError> {
+        Ok(self.tab_labels.clone())
     }
 
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError> {

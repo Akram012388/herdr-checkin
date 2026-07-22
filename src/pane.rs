@@ -14,12 +14,12 @@
 //!   whether or not that event also fires.
 
 use crate::{
-    agent_label, clear, current_unix_ms, describe_entry, evict, load_entries, Herdr, PluginError,
-    QueueEntry, RuntimeEnv, StateStore, WaitStatus,
+    agent_label, clear, current_unix_ms, entry_destination, entry_detail, evict, load_entries,
+    Herdr, PluginError, QueueEntry, RuntimeEnv, StateStore, WaitStatus,
 };
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEvent, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -28,6 +28,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use std::time::Duration;
+use tui_textarea::TextArea;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// How long the input poll blocks each tick before we re-read the queue and repaint, so queue
@@ -56,12 +57,20 @@ pub fn run(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
             "failed to enable mouse capture: {error}"
         )));
     }
+    if let Err(error) = execute!(std::io::stdout(), EnableBracketedPaste) {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        ratatui::restore();
+        return Err(PluginError::new(format!(
+            "failed to enable bracketed paste: {error}"
+        )));
+    }
     install_mouse_panic_hook();
 
     let result = event_loop(&mut terminal, &mut model, runtime, herdr);
 
-    // Disable capture before restore, and on every non-panic exit path (event_loop's `?` errors
-    // land here too). Best-effort: if this fails we're already tearing down.
+    // Disable capture/paste before restore, and on every non-panic exit path (event_loop's `?`
+    // errors land here too). Best-effort: if this fails we're already tearing down.
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
 
@@ -123,16 +132,12 @@ fn event_loop(
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 return Ok(());
                             }
+                            // Enter (and ctrl+m) submit — never insert a newline (single-line input).
                             KeyCode::Enter => on_reply_submit(model, runtime, herdr),
-                            KeyCode::Backspace => model.reply_backspace(),
-                            KeyCode::Char(ch)
-                                if !key
-                                    .modifiers
-                                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                            {
-                                model.reply_push(ch)
+                            KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                on_reply_submit(model, runtime, herdr)
                             }
-                            _ => {}
+                            _ => model.reply_input(key),
                         }
                     } else if model.confirm_clear {
                         on_confirm_clear(model, runtime, key.code);
@@ -167,6 +172,13 @@ fn event_loop(
                         model.confirm_clear = false;
                     } else {
                         on_mouse(model, mouse, list_area, list_state.offset());
+                    }
+                }
+                // A terminal-native paste (bracketed paste, enabled in `run`) is only meaningful
+                // while composing a reply; ignored otherwise.
+                Event::Paste(text) => {
+                    if model.reply.is_some() {
+                        model.reply_paste(&text);
                     }
                 }
                 _ => {}
@@ -230,13 +242,14 @@ fn on_reply_submit(model: &mut PaneModel, runtime: &RuntimeEnv, herdr: &dyn Herd
     let has_text = model
         .reply
         .as_ref()
-        .is_some_and(|draft| !draft.buffer.trim().is_empty());
+        .is_some_and(|draft| !draft.input.lines().join(" ").trim().is_empty());
     if !has_text {
         return;
     }
     // `take` leaves reply mode now; the target/label were captured when it was armed.
     let draft = model.reply.take().expect("reply draft present");
-    let text = draft.buffer.trim();
+    let joined = draft.input.lines().join(" "); // single line in practice; join guards against any stray newline
+    let text = joined.trim();
 
     match herdr.prompt_agent(&draft.target, text) {
         Ok(()) => {
@@ -298,7 +311,8 @@ fn row_for_click(area: Rect, offset: usize, rows: &[Row], col: u16, row: u16) ->
     }
     let display_index = offset + (row - area.y) as usize;
     match rows.get(display_index) {
-        Some(Row::Entry(index)) => Some(*index),
+        // A click on either the destination line or its dim detail selects that entry.
+        Some(Row::Entry(index) | Row::Detail(index)) => Some(*index),
         _ => None,
     }
 }
@@ -316,11 +330,11 @@ fn evict_pane(runtime: &RuntimeEnv, pane_id: &str) -> Result<(), PluginError> {
 /// An in-progress inline reply. The target `pane_id` and its display `label` are captured when
 /// reply mode is armed — not read from the live selection at submit time — so a concurrent queue
 /// `sync` that reorders or evicts entries while the user is still typing can never retarget the
-/// reply to a different agent. `buffer` is the text composed so far.
+/// reply to a different agent. `input` is the single-line editor holding the text composed so far.
 struct ReplyDraft {
     target: String,
     label: String,
-    buffer: String,
+    input: TextArea<'static>,
 }
 
 /// The pane's view state: the queue plus a selection cursor and a transient footer message.
@@ -363,29 +377,40 @@ impl PaneModel {
             return;
         }
         if let Some(entry) = self.entries.get(self.selected) {
+            let mut input = TextArea::default();
+            input.set_placeholder_text("type your reply");
+            input.set_placeholder_style(Style::new().fg(Color::DarkGray));
+            input.set_cursor_line_style(Style::default()); // no full-line underline; keep the strip clean
             self.reply = Some(ReplyDraft {
                 target: entry.pane_id.clone(),
                 label: agent_label(entry).to_string(),
-                buffer: String::new(),
+                input,
             });
         }
     }
 
-    /// Append a typed character to the reply buffer (no-op outside reply mode).
-    fn reply_push(&mut self, ch: char) {
+    /// Feed a key event to the reply input (no-op outside reply mode). The TextArea's default
+    /// bindings handle cursor movement, word/line deletion, etc.
+    fn reply_input(&mut self, key: KeyEvent) {
         if let Some(draft) = self.reply.as_mut() {
-            draft.buffer.push(ch);
+            draft.input.input(key);
         }
     }
 
-    /// Delete the last character of the reply buffer (no-op outside reply mode or on an empty one).
-    fn reply_backspace(&mut self) {
+    /// Insert pasted text as one edit, flattened to a single line (newlines/tabs/other control
+    /// chars -> a space) so a multi-line paste can't inject a newline the agent's own input would
+    /// read as Enter, nor break the single-line strip. No-op outside reply mode.
+    fn reply_paste(&mut self, text: &str) {
         if let Some(draft) = self.reply.as_mut() {
-            draft.buffer.pop();
+            let flat: String = text
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            draft.input.insert_str(flat);
         }
     }
 
-    /// Leave reply mode, discarding the buffer.
+    /// Leave reply mode, discarding the draft.
     fn cancel_reply(&mut self) {
         self.reply = None;
     }
@@ -399,7 +424,7 @@ impl PaneModel {
             .into_iter()
             .filter_map(|row| match row {
                 Row::Entry(index) => Some(index),
-                Row::Header(_) | Row::Spacer => None,
+                Row::Header(_) | Row::Spacer | Row::Detail(_) => None,
             })
             .collect()
     }
@@ -455,13 +480,22 @@ impl PaneModel {
 const CHECKIN_HEADER: &str = "CHECKIN";
 const DONE_HEADER: &str = "DONE";
 
+/// The selection band: a soft grey fill behind the selected entry (both its lines), instead of a
+/// full reversed-video swap which reads as a harsh white band on a dark theme. Tunable by eye — a
+/// lighter grey such as `Color::Indexed(244)` for a more visible band, darker for a subtler one.
+const SELECTION_BG: Color = Color::DarkGray;
+
 /// One rendered line of the grouped agents-view: a blank spacer, a non-selectable section header,
-/// or an entry carrying its index into `entries` (the selection source of truth). Built per-frame
-/// by [`layout_rows`]. Only `Entry` rows are selectable.
+/// an entry's **primary** line (the go-to destination, carrying its index into `entries` — the
+/// selection source of truth), or that entry's **detail** line (the dim second line beneath it).
+/// Built per-frame by [`layout_rows`]. Keeping one `Row` per painted line preserves the invariant
+/// the click hit-testing and scrollbar math rely on. `Entry` is the selectable/clickable line;
+/// `Detail` clicks map back to the same entry, but the cursor and highlight anchor on `Entry`.
 enum Row {
     Spacer,
     Header(&'static str),
     Entry(usize),
+    Detail(usize),
 }
 
 /// Group the queue into status sections for display — `CHECKIN` (`blocked`) then `DONE` (`done`),
@@ -482,7 +516,8 @@ fn layout_rows(entries: &[QueueEntry]) -> Vec<Row> {
             .iter()
             .enumerate()
             .filter(|(_, entry)| entry.status == status)
-            .map(|(index, _)| Row::Entry(index))
+            // Each entry paints as two lines: its destination (Entry) then its dim detail (Detail).
+            .flat_map(|(index, _)| [Row::Entry(index), Row::Detail(index)])
             .collect();
         if !section.is_empty() {
             rows.push(Row::Spacer);
@@ -491,20 +526,6 @@ fn layout_rows(entries: &[QueueEntry]) -> Vec<Row> {
         }
     }
     rows
-}
-
-/// The most input rows the compose strip shows at once; longer replies scroll, keeping the last
-/// [`MAX_INPUT_ROWS`] lines (the tail, where the cursor is). Replies are short by design and
-/// vertical space in the popup is scarce, so the strip stays small.
-const MAX_INPUT_ROWS: usize = 3;
-
-/// Precomputed layout for the inline-reply compose strip: the live draft, its buffer wrapped into
-/// display-width lines, and the resulting input height (wrapped line count, capped at
-/// [`MAX_INPUT_ROWS`]). Computed up front in [`draw`] because the height drives the vertical split.
-struct ComposeLayout<'a> {
-    draft: &'a ReplyDraft,
-    lines: Vec<String>,
-    height: u16,
 }
 
 fn draw(
@@ -517,25 +538,17 @@ fn draw(
     let interior = frame.area();
 
     // In reply mode the single footer line expands into a compose strip docked below the list: a
-    // titled rule, a 1..=MAX_INPUT_ROWS input, and a hint row. The input height is the wrapped line
-    // count; compute the wrap up front because it drives the vertical split.
-    let compose = model.reply.as_ref().map(|draft| {
-        let lines = wrap_display(&draft.buffer, input_width(interior.width));
-        let height = lines.len().clamp(1, MAX_INPUT_ROWS) as u16;
-        ComposeLayout {
-            draft,
-            lines,
-            height,
-        }
-    });
+    // titled rule, a fixed 1-row input (the TextArea scrolls horizontally; no wrapping/height
+    // calc), and a hint row.
+    let compose = model.reply.as_ref();
 
     let areas = match &compose {
-        Some(c) => Layout::vertical([
-            Constraint::Length(1),        // count header
-            Constraint::Min(0),           // the queue (dimmed while composing)
-            Constraint::Length(1),        // titled rule
-            Constraint::Length(c.height), // input
-            Constraint::Length(1),        // hint
+        Some(_) => Layout::vertical([
+            Constraint::Length(1), // count header
+            Constraint::Min(0),    // the queue (dimmed while composing)
+            Constraint::Length(1), // titled rule
+            Constraint::Length(1), // input
+            Constraint::Length(1), // hint
         ])
         .split(interior),
         None => Layout::vertical([
@@ -560,26 +573,20 @@ fn draw(
         );
     } else {
         draw_list(
-            frame,
-            model,
-            now_ms,
-            list_state,
-            list_area,
-            areas[1],
-            compose.as_ref(),
+            frame, model, now_ms, list_state, list_area, areas[1], compose,
         );
     }
 
-    match &compose {
+    match compose {
         // Composing: darken the header + queue as one veil so the strip is the only lit surface
         // (focus by receding everything else, not by brightening the input), then draw the strip.
-        Some(c) => {
+        Some(draft) => {
             let veil = Rect {
                 height: areas[0].height + areas[1].height,
                 ..areas[0]
             };
             dim_area(frame, veil);
-            draw_compose(frame, c, areas[2], areas[3], areas[4]);
+            draw_compose(frame, draft, areas[2], areas[3], areas[4]);
         }
         // Navigating: the one-line footer carries the clear-confirm, a transient status, or hints.
         None => {
@@ -588,16 +595,19 @@ fn draw(
             } else {
                 model.status.as_deref().unwrap_or(FOOTER_HINTS).to_string()
             };
-            frame.render_widget(Paragraph::new(footer).dim(), areas[2]);
+            // Centered so the left/right margins stay balanced regardless of the hint string's width.
+            frame.render_widget(
+                Paragraph::new(footer).dim().alignment(Alignment::Center),
+                areas[2],
+            );
         }
     }
 }
 
 /// Render the grouped queue into `area`, recording the painted rect into `list_area` for click
-/// hit-testing and drawing a scrollbar when the rows overflow. `compose` decides the highlight:
-/// while navigating, the live selection in reversed video; while composing, only a plain `> ` marker
-/// on the captured reply target (the whole list is dimmed by the caller, and reversed+dim renders
-/// unreliably across terminals).
+/// hit-testing and drawing a scrollbar when the rows overflow. The focused entry gets a soft grey
+/// band ([`SELECTION_BG`]) in both modes: the live selection while navigating, the captured reply
+/// target while composing (so the answered agent stays obvious under the dim veil the caller adds).
 fn draw_list(
     frame: &mut Frame,
     model: &PaneModel,
@@ -605,31 +615,54 @@ fn draw_list(
     list_state: &mut ListState,
     list_area: &mut Option<Rect>,
     area: Rect,
-    compose: Option<&ComposeLayout>,
+    compose: Option<&ReplyDraft>,
 ) {
     // The CC-agents-view look: entries grouped into status sections with non-selectable headers.
     // `layout_rows` is a pure view over the FIFO queue — it never reorders `entries`, so `selected`
     // stays an index into `entries` and we translate it to its on-screen row here.
     let rows = layout_rows(&model.entries);
+
+    // The soft grey band marks the focused entry in BOTH modes: while navigating it's the selection;
+    // while composing it's the reply target (so it's obvious which agent you're answering, on top of
+    // the `> ` marker). In compose mode the whole list is then veiled dim by the caller, but the
+    // band's background survives the DIM (which only mutes the foreground), so the target still reads.
+    let highlight_index = match compose {
+        Some(draft) => model.entries.iter().position(|e| e.pane_id == draft.target),
+        None => Some(model.selected),
+    };
+    let highlight_style = Style::new().bg(SELECTION_BG);
+
+    // Each entry is two lines: the go-to destination (bright, the selectable/anchored line) and its
+    // detail (indented under it). The detail of the focused entry takes the same band — not dim — so
+    // its two lines read as one highlighted block.
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match row {
             Row::Spacer => ListItem::new(""),
             Row::Header(title) => ListItem::new(*title).bold(),
-            Row::Entry(index) => ListItem::new(describe_entry(&model.entries[*index], now_ms)),
+            Row::Entry(index) => match entry_destination(&model.entries[*index]) {
+                Some(destination) => ListItem::new(destination),
+                // No destination resolved yet (un-enriched/legacy row): fall back to the detail so
+                // the row is never blank.
+                None => ListItem::new(entry_detail(&model.entries[*index], now_ms)),
+            },
+            Row::Detail(index) => {
+                let entry = &model.entries[*index];
+                // The primary line already carries the detail when no destination resolved, so this
+                // line stays blank rather than repeat it.
+                if entry_destination(entry).is_none() {
+                    ListItem::new("")
+                } else {
+                    let detail = format!("  {}", entry_detail(entry, now_ms));
+                    if highlight_index == Some(*index) {
+                        ListItem::new(detail).bg(SELECTION_BG)
+                    } else {
+                        ListItem::new(detail).dim()
+                    }
+                }
+            }
         })
         .collect();
-
-    let (highlight_index, highlight_style) = match compose {
-        Some(c) => (
-            model
-                .entries
-                .iter()
-                .position(|e| e.pane_id == c.draft.target),
-            Style::new(),
-        ),
-        None => (Some(model.selected), Style::new().reversed()),
-    };
     // Highlight the display row that carries the highlighted entry (headers are never selected).
     let selected_row = highlight_index.and_then(|target| {
         rows.iter()
@@ -669,45 +702,29 @@ fn draw_list(
     }
 }
 
-/// Draw the inline-reply compose strip: a titled rule, the input, and a hint row. The input renders
-/// the last up-to-[`MAX_INPUT_ROWS`] wrapped lines at normal intensity (everything above is dimmed
-/// by the caller) and drives the real terminal cursor to the end of the text — no fake caret.
+/// Draw the inline-reply compose strip: a titled rule, the input, and a hint row. The input is a
+/// single fixed row rendered by the `TextArea` widget itself — it scrolls horizontally and draws
+/// its own placeholder and block cursor, so there's no manual wrapping or caret math here.
 fn draw_compose(
     frame: &mut Frame,
-    compose: &ComposeLayout,
+    draft: &ReplyDraft,
     rule_area: Rect,
     input_area: Rect,
     hint_area: Rect,
 ) {
     // The titled rule announces the mode switch and names the captured target (pinned at arm time,
     // so it stays correct even if the queue re-orders under the dimmed list).
-    frame.render_widget(reply_rule(&compose.draft.label, rule_area.width), rule_area);
+    frame.render_widget(reply_rule(&draft.label, rule_area.width), rule_area);
 
-    // One column of left padding aligns the input under the rule's label; the cursor rides the
-    // text's end. An empty buffer shows a faint neutral placeholder with the cursor parked at column
-    // 0 — a deliberate, placeholder-scoped exception to the otherwise-colorless modal.
-    let pad_x = input_area.x + 1;
-    if compose.draft.buffer.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::raw(" "),
-                Span::styled("type your reply", Style::new().fg(Color::DarkGray)),
-            ])),
-            input_area,
-        );
-        frame.set_cursor_position((pad_x, input_area.y));
-    } else {
-        let visible = visible_input_lines(&compose.lines);
-        let body: Vec<Line> = visible
-            .iter()
-            .map(|line| Line::from(format!(" {line}")))
-            .collect();
-        frame.render_widget(Paragraph::new(body), input_area);
-        let last = visible.last().copied().unwrap_or("");
-        let cursor_x = pad_x + display_width(last) as u16;
-        let cursor_y = input_area.y + (visible.len() as u16).saturating_sub(1);
-        frame.set_cursor_position((cursor_x, cursor_y));
-    }
+    // 1-col left pad aligns the input under the rule's "Reply" label; the TextArea draws its own
+    // placeholder + block cursor, so no manual caret (ratatui hides the hardware cursor when
+    // `set_cursor_position` is not called).
+    let input_rect = Rect {
+        x: input_area.x + 1,
+        width: input_area.width.saturating_sub(1),
+        ..input_area
+    };
+    frame.render_widget(&draft.input, input_rect);
 
     // The affordances: dim (reference, not the work), right-aligned to keep the typing edge clean.
     frame.render_widget(
@@ -730,18 +747,6 @@ fn dim_area(frame: &mut Frame, area: Rect) {
             cell.set_style(dimmed);
         }
     }
-}
-
-/// The content width of the input after its one-column left pad. At least 1 so wrapping and cursor
-/// math never divide by or index past zero on a pathologically narrow popup.
-fn input_width(interior_width: u16) -> usize {
-    interior_width.saturating_sub(1).max(1) as usize
-}
-
-/// The last up-to-[`MAX_INPUT_ROWS`] wrapped lines — the tail of the reply, where the cursor sits.
-fn visible_input_lines(lines: &[String]) -> Vec<&str> {
-    let start = lines.len().saturating_sub(MAX_INPUT_ROWS);
-    lines[start..].iter().map(String::as_str).collect()
 }
 
 /// The compose strip's titled rule: `─ Reply to <label> ───`, the "Reply to <label>" bold, the
@@ -776,34 +781,6 @@ fn reply_hint(width: u16) -> &'static str {
     } else {
         SHORT
     }
-}
-
-/// Wrap `s` into lines no wider than `width` display columns, breaking between characters (the
-/// terminal line-editor idiom) so the render and the cursor share one deterministic mapping. Always
-/// returns at least one line, and appends a trailing empty line when the text ends exactly on a wrap
-/// boundary so the cursor has a row to sit on past a full line.
-fn wrap_display(s: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0;
-    for ch in s.chars() {
-        let ch_width = char_width(ch);
-        if current_width + ch_width > width {
-            lines.push(std::mem::take(&mut current));
-            current_width = 0;
-        }
-        current.push(ch);
-        current_width += ch_width;
-    }
-    let ends_full = current_width == width && !current.is_empty();
-    lines.push(current);
-    if ends_full {
-        lines.push(String::new());
-    }
-    lines
 }
 
 /// Truncate `s` to at most `max` display columns, marking a cut with a trailing `…` (which itself
@@ -934,6 +911,8 @@ mod tests {
             workspace_id: pane_id.split(':').next().unwrap_or("").to_string(),
             tab_id: None,
             workspace_label: None,
+            tab_label: None,
+            pane_label: None,
             agent: Some("claude".to_string()),
             display_agent: Some("Claude".to_string()),
             title: Some("t".to_string()),
@@ -1057,7 +1036,7 @@ mod tests {
         let draft = m.reply.as_ref().expect("reply should be armed");
         assert_eq!(draft.target, "w2:p1");
         assert_eq!(draft.label, "Claude"); // the entry's display_agent
-        assert_eq!(draft.buffer, "");
+        assert_eq!(draft.input.lines(), [String::new()]); // a fresh TextArea has one empty line
     }
 
     #[test]
@@ -1076,30 +1055,45 @@ mod tests {
         assert!(m.confirm_clear);
     }
 
-    #[test]
-    fn reply_push_and_backspace_edit_the_buffer() {
-        let mut m = model(&["w1:p1"]);
-        m.begin_reply();
-        m.reply_push('h');
-        m.reply_push('i');
-        assert_eq!(m.reply.as_ref().unwrap().buffer, "hi");
-        m.reply_backspace();
-        assert_eq!(m.reply.as_ref().unwrap().buffer, "h");
+    // A plain, unmodified character key, for feeding `reply_input` in tests.
+    fn char_key(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
     }
 
     #[test]
-    fn reply_edits_are_noops_outside_reply_mode() {
+    fn reply_input_edits_the_textarea() {
         let mut m = model(&["w1:p1"]);
-        m.reply_push('x');
-        m.reply_backspace();
+        m.begin_reply();
+        m.reply_input(char_key('h'));
+        m.reply_input(char_key('i'));
+        assert_eq!(m.reply.as_ref().unwrap().input.lines(), ["hi"]);
+        m.reply_input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(m.reply.as_ref().unwrap().input.lines(), ["h"]);
+    }
+
+    #[test]
+    fn reply_input_is_a_noop_outside_reply_mode() {
+        let mut m = model(&["w1:p1"]);
+        m.reply_input(char_key('x'));
         assert!(m.reply.is_none());
     }
 
     #[test]
-    fn cancel_reply_discards_the_buffer() {
+    fn reply_paste_flattens_newlines_and_tabs_into_a_single_line() {
         let mut m = model(&["w1:p1"]);
         m.begin_reply();
-        m.reply_push('x');
+        m.reply_paste("line1\nline2\tx");
+        assert_eq!(
+            m.reply.as_ref().unwrap().input.lines().join("\n"),
+            "line1 line2 x"
+        );
+    }
+
+    #[test]
+    fn cancel_reply_discards_the_draft() {
+        let mut m = model(&["w1:p1"]);
+        m.begin_reply();
+        m.reply_input(char_key('x'));
         m.cancel_reply();
         assert!(m.reply.is_none());
     }
@@ -1120,48 +1114,6 @@ mod tests {
     }
 
     #[test]
-    fn wrap_display_breaks_between_characters_at_the_width() {
-        // "abcdefg" through a width of 3 breaks into 3 + 3 + 1.
-        assert_eq!(wrap_display("abcdefg", 3), vec!["abc", "def", "g"]);
-        // Shorter than the width stays one line.
-        assert_eq!(wrap_display("hi", 5), vec!["hi"]);
-    }
-
-    #[test]
-    fn wrap_display_adds_a_trailing_line_when_the_text_ends_full() {
-        // "abc" exactly fills width 3, so the cursor needs an empty row past the full line.
-        assert_eq!(wrap_display("abc", 3), vec!["abc", ""]);
-        // "abcd" wraps to "abc" + "d" — the tail isn't full, so no extra line.
-        assert_eq!(wrap_display("abcd", 3), vec!["abc", "d"]);
-    }
-
-    #[test]
-    fn wrap_display_always_returns_at_least_one_line() {
-        assert_eq!(wrap_display("", 5), vec![""]);
-        // A zero width can't fit anything; it degrades to a single empty line, never a panic.
-        assert_eq!(wrap_display("abc", 0), vec![""]);
-    }
-
-    #[test]
-    fn wrap_display_counts_wide_characters_as_two_columns() {
-        // Each CJK glyph is 2 columns wide, so only one fits in a width of 3 (2 + 2 > 3).
-        assert_eq!(wrap_display("字字", 3), vec!["字", "字"]);
-        // A trailing narrow char shares the second glyph's line (2 + 1 <= 3 is false: 2+1=3 fits).
-        assert_eq!(wrap_display("字a", 3), vec!["字a", ""]);
-    }
-
-    #[test]
-    fn visible_input_lines_keeps_the_last_rows() {
-        let lines: Vec<String> = ["a", "b", "c", "d", "e"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(visible_input_lines(&lines), vec!["c", "d", "e"]);
-        let short: Vec<String> = ["only"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(visible_input_lines(&short), vec!["only"]);
-    }
-
-    #[test]
     fn truncate_display_keeps_short_labels_and_ellipsizes_long_ones() {
         assert_eq!(truncate_display("Claude", 10), "Claude");
         // Cut to 5 columns: 4 chars + the ellipsis cell.
@@ -1175,13 +1127,6 @@ mod tests {
         assert_eq!(reply_hint(12), "enter · esc");
     }
 
-    #[test]
-    fn input_width_reserves_the_left_pad_and_never_underflows() {
-        assert_eq!(input_width(40), 39);
-        assert_eq!(input_width(1), 1);
-        assert_eq!(input_width(0), 1);
-    }
-
     // The list rect used across the click tests: starts at row 1 (row 0 is the top header line),
     // 10 rows tall, 40 wide.
     fn list_area() -> Rect {
@@ -1193,8 +1138,10 @@ mod tests {
         }
     }
 
-    // All-blocked entries render as [Spacer, Header("CHECKIN"), Entry(0), Entry(1), ...] — a spacer
-    // then the section header occupy the first two display rows, so entry N sits at display index N+2.
+    // All-blocked entries render as [Spacer, Header("CHECKIN"), Entry(0), Detail(0), Entry(1),
+    // Detail(1), ...] — a spacer then the header occupy the first two display rows, then each entry
+    // is two rows (its destination then its dim detail), so entry N's primary sits at display
+    // index 2 + 2N and its detail at 3 + 2N.
     fn blocked_rows(count: usize) -> Vec<Row> {
         let entries: Vec<QueueEntry> = (0..count).map(|i| entry(&format!("w{i}:p1"))).collect();
         layout_rows(&entries)
@@ -1202,11 +1149,12 @@ mod tests {
 
     #[test]
     fn row_for_click_maps_rows_to_entries_past_the_header() {
-        // No scroll: display row 0 (area.y, row 1) is the spacer, row 2 the CHECKIN header, so
-        // row 3 (display index 2) is entry 0 and row 5 (display index 4) is entry 2.
+        // No scroll: row 1 spacer, row 2 CHECKIN header, so row 3 (index 2) is entry 0's primary,
+        // row 4 (index 3) is entry 0's detail (same entry), row 5 (index 4) is entry 1's primary.
         let rows = blocked_rows(3);
-        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 3), Some(0));
-        assert_eq!(row_for_click(list_area(), 0, &rows, 0, 5), Some(2));
+        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 3), Some(0)); // primary
+        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 4), Some(0)); // detail -> same entry
+        assert_eq!(row_for_click(list_area(), 0, &rows, 0, 5), Some(1)); // next entry's primary
     }
 
     #[test]
@@ -1219,18 +1167,19 @@ mod tests {
 
     #[test]
     fn row_for_click_accounts_for_scroll_offset() {
-        // Scrolled down by 2: display row at area.y is display index 2 — Entry(0) here
-        // ([Spacer, Header, Entry(0), Entry(1), ...]).
+        // Scrolled down by 2: display row at area.y is display index 2 — Entry(0)'s primary here
+        // ([Spacer, Header, Entry(0), Detail(0), Entry(1), ...]).
         let rows = blocked_rows(5);
         assert_eq!(row_for_click(list_area(), 2, &rows, 10, 1), Some(0));
-        assert_eq!(row_for_click(list_area(), 2, &rows, 10, 3), Some(2));
+        assert_eq!(row_for_click(list_area(), 2, &rows, 10, 3), Some(1));
     }
 
     #[test]
     fn row_for_click_rejects_blank_rows_below_the_last_entry() {
-        // Spacer + header + 3 entries = 5 display rows; a click on display row 5 (row 6) is blank.
+        // Spacer + header + 3 entries × 2 rows = 8 display rows (indices 0..7); a click on display
+        // row 8 (row 9) is past the last detail line and selects nothing.
         let rows = blocked_rows(3);
-        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 6), None);
+        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 9), None);
     }
 
     #[test]
@@ -1238,7 +1187,7 @@ mod tests {
         let rows = blocked_rows(3);
         assert_eq!(row_for_click(list_area(), 0, &rows, 5, 0), None); // above the list
         assert_eq!(row_for_click(list_area(), 0, &rows, 5, 11), None); // below the list
-        assert_eq!(row_for_click(list_area(), 0, &rows, 40, 3), None); // one past the right edge (entry 0 row)
+        assert_eq!(row_for_click(list_area(), 0, &rows, 40, 3), None); // one past the right edge (entry 0 primary)
     }
 
     #[test]
@@ -1264,12 +1213,13 @@ mod tests {
                 Row::Spacer => "~".to_string(),
                 Row::Header(title) => format!("#{title}"),
                 Row::Entry(index) => format!("{index}"),
+                Row::Detail(index) => format!("d{index}"),
             })
             .collect();
         assert_eq!(
             shape,
-            vec!["~", "#CHECKIN", "0", "2", "~", "#DONE", "1", "3"],
-            "each section is spacer + header + its entries, FIFO within, indices unchanged"
+            vec!["~", "#CHECKIN", "0", "d0", "2", "d2", "~", "#DONE", "1", "d1", "3", "d3"],
+            "each entry is its Entry line then its Detail line; sections FIFO, indices unchanged"
         );
     }
 
@@ -1286,7 +1236,11 @@ mod tests {
             matches!(rows.get(1), Some(Row::Header(DONE_HEADER))),
             "an all-done queue leads with the DONE section, not CHECKIN"
         );
-        assert_eq!(rows.len(), 4, "spacer + header + two entries");
+        assert_eq!(
+            rows.len(),
+            6,
+            "spacer + header + two entries × (Entry + Detail)"
+        );
     }
 
     fn mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
@@ -1300,16 +1254,31 @@ mod tests {
 
     #[test]
     fn on_mouse_left_click_selects_the_clicked_row() {
-        // All blocked -> [Spacer, Header, Entry(0), Entry(1), Entry(2)] at terminal rows 1..=5. A
-        // click on row 5 lands on the third entry (index 2), past the spacer + header.
+        // All blocked -> [Spacer, Header, E0, D0, E1, D1, E2, D2] at terminal rows 1..=8. The third
+        // entry's primary is row 7 and its detail is row 8; a click on either selects index 2.
         let mut m = model(&["w1:p1", "w2:p1", "w3:p1"]);
         on_mouse(
             &mut m,
-            mouse(MouseEventKind::Down(MouseButton::Left), 5, 5),
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 7),
             Some(list_area()),
             0,
         );
-        assert_eq!(m.selected, 2);
+        assert_eq!(
+            m.selected, 2,
+            "clicking the entry's primary line selects it"
+        );
+
+        m.selected = 0;
+        on_mouse(
+            &mut m,
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 8),
+            Some(list_area()),
+            0,
+        );
+        assert_eq!(
+            m.selected, 2,
+            "clicking the entry's detail line selects it too"
+        );
     }
 
     #[test]
@@ -1338,10 +1307,11 @@ mod tests {
             0,
         );
         assert_eq!(m.selected, 1);
-        // A left click on a blank row (past the spacer + header + 2 entries) is a no-op.
+        // A left click on a blank row (past spacer + header + 2 entries × 2 rows = terminal row 6)
+        // is a no-op; row 7 is the first blank line.
         on_mouse(
             &mut m,
-            mouse(MouseEventKind::Down(MouseButton::Left), 5, 6),
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 7),
             Some(list_area()),
             0,
         );
@@ -1414,9 +1384,7 @@ mod tests {
         feed_status(dir, 1_000, "w1:p1", "w1", "blocked", "needs input");
         let mut model = PaneModel::new(load(dir));
         model.begin_reply();
-        for ch in text.chars() {
-            model.reply_push(ch);
-        }
+        model.reply.as_mut().unwrap().input.insert_str(text);
         model
     }
 

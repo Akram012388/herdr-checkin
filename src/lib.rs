@@ -25,7 +25,7 @@ use actions::{next, peek, startup};
 use herdr::{enrich_location, CliHerdr};
 use queue::{on_closed, on_focused, on_status_changed};
 
-pub(crate) use actions::{agent_label, clear, describe_entry};
+pub(crate) use actions::{agent_label, clear, entry_destination, entry_detail};
 pub(crate) use herdr::Herdr;
 pub(crate) use queue::evict;
 pub(crate) use state::{

@@ -106,9 +106,11 @@ pub(crate) fn clear(runtime: &RuntimeEnv) -> Result<(), PluginError> {
 ///   seeded like any other (restart focus is not a user action).
 pub(crate) fn startup(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
     let panes = herdr.pane_infos()?;
-    // Human workspace labels for the rows. Best-effort: a `workspace list` failure just leaves the
-    // rows on their raw ids — it must not abort re-seeding the queue after a herdr restart.
-    let labels = herdr.workspace_labels().unwrap_or_default();
+    // Human workspace + tab labels for the rows. Best-effort: a `workspace list`/`tab list` failure
+    // just leaves those rows on their raw ids — it must not abort re-seeding the queue after a
+    // herdr restart.
+    let workspace_labels = herdr.workspace_labels().unwrap_or_default();
+    let tab_labels = herdr.tab_labels().unwrap_or_default();
     let now_ms = runtime.now_ms;
 
     StateStore::new(&runtime.state_dir).update(|mut entries| {
@@ -116,9 +118,15 @@ pub(crate) fn startup(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), Plu
             let event = StatusEvent {
                 pane_id: pane.pane_id.clone(),
                 workspace_id: pane.workspace_id.clone(),
-                // `pane list` carries the tab directly; the label comes from the workspace map.
+                // `pane list` carries the tab id + pane label directly; the workspace/tab names come
+                // from their respective label maps (tab keyed by the pane's tab id).
                 tab_id: pane.tab_id.clone(),
-                workspace_label: labels.get(&pane.workspace_id).cloned(),
+                workspace_label: workspace_labels.get(&pane.workspace_id).cloned(),
+                tab_label: pane
+                    .tab_id
+                    .as_deref()
+                    .and_then(|tab_id| tab_labels.get(tab_id).cloned()),
+                pane_label: pane.label.clone(),
                 agent_status: pane.agent_status.clone(),
                 agent: pane.agent.clone(),
                 display_agent: pane.display_agent.clone(),
@@ -163,52 +171,64 @@ pub(crate) fn agent_label(entry: &QueueEntry) -> &str {
         .unwrap_or(&entry.pane_id)
 }
 
+/// A queue row as one line — the destination followed by its detail, joined by " · ". Used by the
+/// `peek` toast (plain text, one line per entry). The status pane renders the same two pieces as two
+/// lines instead (destination bright, [`entry_detail`] dim); see `pane::draw_list`.
 pub(crate) fn describe_entry(entry: &QueueEntry, now_ms: u64) -> String {
-    let who = agent_label(entry);
-    let waited = format_waited(now_ms.saturating_sub(entry.enqueued_at_ms));
+    match entry_destination(entry) {
+        Some(destination) => format!("{destination} · {}", entry_detail(entry, now_ms)),
+        None => entry_detail(entry, now_ms),
+    }
+}
+
+/// The row's **destination** — where the waiter is, in herdr's own go-to vocabulary and order:
+/// `{workspace} · {tab} · {pane}`. Each segment prefers its human label and falls back to the
+/// positional id, and is dropped entirely when neither is known so there is never a dangling
+/// separator:
+/// - workspace: `workspace_label` else the raw `workspace_id`
+/// - tab: `tab_label` (program) else `t{N}` (from `tab_id`)
+/// - pane: `pane_label` (manual) else `pane {N}` (from `pane_id`)
+///
+/// Returns `None` only when not even a pane number is known (a malformed/hand-seeded row).
+pub(crate) fn entry_destination(entry: &QueueEntry) -> Option<String> {
+    let mut parts: Vec<String> = Vec::with_capacity(3);
+    if let Some(workspace) =
+        non_empty(entry.workspace_label.as_deref()).or(non_empty(Some(entry.workspace_id.as_str())))
+    {
+        parts.push(workspace.to_string());
+    }
+    if let Some(tab) = non_empty(entry.tab_label.as_deref())
+        .or_else(|| entry.tab_id.as_deref().and_then(id_segment))
+    {
+        parts.push(tab.to_string());
+    }
+    if let Some(pane) = non_empty(entry.pane_label.as_deref()) {
+        parts.push(pane.to_string());
+    } else if let Some(number) = id_segment(&entry.pane_id).and_then(pane_number) {
+        parts.push(format!("pane {number}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+/// The row's **detail** — the agent's status, what it said, and how long it has waited:
+/// `{status} · {title} · {waited}` (the title is dropped when empty). This is the dim second line in
+/// the pane; the go-to destination is what leads.
+pub(crate) fn entry_detail(entry: &QueueEntry, now_ms: u64) -> String {
     let status = entry.status.as_str();
-    // The metadata tail names *where* the waiter is and *how long* it has waited: the workspace (its
-    // human label, else the raw id), the positional `t{N}/p{N}` locator, then the wait time — joined
-    // by " · ". Each location part is dropped when unknown so a pane with no resolved workspace or
-    // tab never leaves a dangling separator.
-    let mut tail: Vec<String> = Vec::with_capacity(3);
-    if let Some(workspace) = entry_workspace(entry) {
-        tail.push(workspace);
-    }
-    if let Some(tab_pane) = entry_tab_pane(entry) {
-        tail.push(tab_pane);
-    }
-    tail.push(waited);
-    let tail = tail.join(" · ");
+    let waited = format_waited(now_ms.saturating_sub(entry.enqueued_at_ms));
     match entry.title.as_deref().filter(|value| !value.is_empty()) {
-        Some(title) => format!("{who} — {status} — {title} · {tail}"),
-        None => format!("{who} — {status} · {tail}"),
+        Some(title) => format!("{status} · {title} · {waited}"),
+        None => format!("{status} · {waited}"),
     }
 }
 
-/// The workspace column: the resolved human label if present, else the raw positional id, else
-/// nothing (an entry with neither — only possible for a hand-seeded/legacy row).
-fn entry_workspace(entry: &QueueEntry) -> Option<String> {
-    entry
-        .workspace_label
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .or(Some(entry.workspace_id.as_str()).filter(|value| !value.is_empty()))
-        .map(str::to_owned)
-}
-
-/// The positional `t{N}/p{N}` locator built from the tab and pane ids (`wS:t2` -> `t2`,
-/// `wS:p3` -> `p3`). Either segment may be missing — an un-refreshed entry carries no `tab_id` (then
-/// just the pane), and a malformed pane id yields no pane segment (then just the tab) — so this
-/// returns whichever it can, or None when it knows neither.
-fn entry_tab_pane(entry: &QueueEntry) -> Option<String> {
-    let tab = entry.tab_id.as_deref().and_then(id_segment);
-    let pane = id_segment(&entry.pane_id);
-    match (tab, pane) {
-        (Some(tab), Some(pane)) => Some(format!("{tab}/{pane}")),
-        (Some(seg), None) | (None, Some(seg)) => Some(seg.to_string()),
-        (None, None) => None,
-    }
+/// `Some(trimmed)` if the option holds a non-empty string, else `None`.
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.filter(|text| !text.is_empty())
 }
 
 /// The trailing positional segment of a herdr id — the part after its `:` (`wS:t2` -> `t2`). An id
@@ -217,6 +237,13 @@ fn id_segment(id: &str) -> Option<&str> {
     id.rsplit_once(':')
         .map(|(_, segment)| segment)
         .filter(|segment| !segment.is_empty())
+}
+
+/// The number in a pane segment (`p3` -> `3`), for the `pane {N}` fallback that mirrors herdr's
+/// go-to picker. None if the segment is not `p<digits>`.
+fn pane_number(segment: &str) -> Option<&str> {
+    let number = segment.strip_prefix('p')?;
+    (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())).then_some(number)
 }
 
 fn format_waited(ms: u64) -> String {
@@ -352,6 +379,8 @@ mod tests {
                     workspace_id: "wR".to_string(),
                     tab_id: None,
                     workspace_label: None,
+                    tab_label: None,
+                    pane_label: None,
                     agent: None,
                     display_agent: None,
                     title: None,
@@ -389,6 +418,8 @@ mod tests {
                     workspace_id: "wR".to_string(),
                     tab_id: None,
                     workspace_label: None,
+                    tab_label: None,
+                    pane_label: None,
                     agent: None,
                     display_agent: None,
                     title: None,
@@ -412,64 +443,142 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn describe_entry_omits_a_missing_workspace_and_tab() {
-        // Neither a workspace (label or id) nor a tab/pane segment is known: the tail is just the
-        // wait time, with no leading or dangling " · " separator.
-        let entry = QueueEntry {
-            pane_id: "p".to_string(), // no ':' -> no positional pane segment
-            workspace_id: String::new(),
-            tab_id: None,
-            workspace_label: None,
+    /// Build a QueueEntry from its identity fields for the render tests. Keeps the many literals out
+    /// of each test so they read as the (fields) -> rendered-string mapping they are.
+    #[allow(clippy::too_many_arguments)] // a test fixture spanning the identity fields
+    fn render_entry(
+        pane_id: &str,
+        workspace_id: &str,
+        workspace_label: Option<&str>,
+        tab_id: Option<&str>,
+        tab_label: Option<&str>,
+        pane_label: Option<&str>,
+        title: Option<&str>,
+        status: WaitStatus,
+    ) -> QueueEntry {
+        QueueEntry {
+            pane_id: pane_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            tab_id: tab_id.map(str::to_string),
+            workspace_label: workspace_label.map(str::to_string),
+            tab_label: tab_label.map(str::to_string),
+            pane_label: pane_label.map(str::to_string),
             agent: None,
             display_agent: None,
-            title: None,
-            status: WaitStatus::Done,
+            title: title.map(str::to_string),
+            status,
             enqueued_at_ms: 0,
             last_touched_ms: 0,
-        };
-        let line = describe_entry(&entry, 0);
-        assert_eq!(line, "p — done · just now");
+        }
     }
 
     #[test]
-    fn describe_entry_renders_workspace_label_and_positional_tab_pane() {
-        let entry = QueueEntry {
-            pane_id: "wT:p1".to_string(),
-            workspace_id: "wT".to_string(),
-            tab_id: Some("wT:t2".to_string()),
-            workspace_label: Some("herdr-checkin".to_string()),
-            agent: None,
-            display_agent: Some("Claude".to_string()),
-            title: Some("Fix the parser".to_string()),
-            status: WaitStatus::Done,
-            enqueued_at_ms: 0,
-            last_touched_ms: 0,
-        };
-        let line = describe_entry(&entry, 180_000);
+    fn entry_destination_uses_human_names_in_go_to_order() {
+        // Full identity resolved: workspace label, tab label, and a manual pane label.
+        let entry = render_entry(
+            "wM:p1",
+            "wM",
+            Some("claude-feedback"),
+            Some("wM:t1"),
+            Some("claude"),
+            Some("orchestrator"),
+            None,
+            WaitStatus::Blocked,
+        );
         assert_eq!(
-            line,
-            "Claude — done — Fix the parser · herdr-checkin · t2/p1 · 3m"
+            entry_destination(&entry).as_deref(),
+            Some("claude-feedback · claude · orchestrator")
         );
     }
 
     #[test]
-    fn describe_entry_falls_back_to_workspace_id_and_pane_only_without_a_tab() {
-        // An un-enriched event row: no resolved label (raw id shown) and no tab_id (pane only).
-        let entry = QueueEntry {
-            pane_id: "wN:p2".to_string(),
-            workspace_id: "wN".to_string(),
-            tab_id: None,
-            workspace_label: None,
-            agent: Some("codex".to_string()),
-            display_agent: None,
-            title: None,
-            status: WaitStatus::Blocked,
-            enqueued_at_ms: 0,
-            last_touched_ms: 0,
-        };
-        let line = describe_entry(&entry, 60_000);
-        assert_eq!(line, "codex — blocked · wN · p2 · 1m");
+    fn entry_destination_falls_back_to_ids_and_pane_number() {
+        // An un-enriched event row: no labels at all -> raw workspace id, no tab, `pane {N}`.
+        let entry = render_entry(
+            "wN:p2",
+            "wN",
+            None,
+            None,
+            None,
+            None,
+            None,
+            WaitStatus::Done,
+        );
+        assert_eq!(entry_destination(&entry).as_deref(), Some("wN · pane 2"));
+    }
+
+    #[test]
+    fn entry_destination_uses_positional_tab_when_only_the_tab_id_is_known() {
+        // tab_id present but no tab label yet -> positional `t{N}`; workspace label present.
+        let entry = render_entry(
+            "wT:p1",
+            "wT",
+            Some("herdr-checkin"),
+            Some("wT:t2"),
+            None,
+            None,
+            None,
+            WaitStatus::Blocked,
+        );
+        assert_eq!(
+            entry_destination(&entry).as_deref(),
+            Some("herdr-checkin · t2 · pane 1")
+        );
+    }
+
+    #[test]
+    fn entry_destination_is_none_without_a_workspace_or_pane_number() {
+        // pane_id has no positional segment and there is no workspace at all.
+        let entry = render_entry("p", "", None, None, None, None, None, WaitStatus::Done);
+        assert_eq!(entry_destination(&entry), None);
+    }
+
+    #[test]
+    fn entry_detail_reads_status_title_then_waited() {
+        let entry = render_entry(
+            "wN:p2",
+            "wN",
+            None,
+            None,
+            None,
+            None,
+            Some("ran the suite"),
+            WaitStatus::Done,
+        );
+        assert_eq!(entry_detail(&entry, 180_000), "done · ran the suite · 3m");
+    }
+
+    #[test]
+    fn entry_detail_omits_an_empty_title() {
+        let entry = render_entry(
+            "wN:p2",
+            "wN",
+            None,
+            None,
+            None,
+            None,
+            None,
+            WaitStatus::Blocked,
+        );
+        assert_eq!(entry_detail(&entry, 60_000), "blocked · 1m");
+    }
+
+    #[test]
+    fn describe_entry_joins_destination_and_detail_for_the_toast() {
+        let entry = render_entry(
+            "wM:p1",
+            "wM",
+            Some("claude-feedback"),
+            Some("wM:t1"),
+            Some("claude"),
+            Some("orchestrator"),
+            Some("approve the migration?"),
+            WaitStatus::Blocked,
+        );
+        assert_eq!(
+            describe_entry(&entry, 300_000),
+            "claude-feedback · claude · orchestrator · blocked · approve the migration? · 5m"
+        );
     }
 
     #[test]
@@ -594,12 +703,14 @@ mod tests {
                 pane_id: "wA:p1".to_string(),
                 workspace_id: "wA".to_string(),
                 tab_id: Some("wA:t2".to_string()),
+                label: Some("orchestrator".to_string()),
                 agent_status: "blocked".to_string(),
                 agent: Some("claude".to_string()),
                 display_agent: Some("Claude".to_string()),
                 title: Some("needs input".to_string()),
             }])
-            .with_workspace_labels(&[("wA", "home")]);
+            .with_workspace_labels(&[("wA", "home")])
+            .with_tab_labels(&[("wA:t2", "claude")]);
         let rt = runtime(dir.clone(), 7_000);
 
         startup(&rt, &herdr).expect("startup should succeed");
@@ -608,9 +719,12 @@ mod tests {
         assert_eq!(entries.len(), 1);
         let entry = &entries[0];
         assert_eq!(entry.workspace_id, "wA");
-        // Startup resolves the tab from `pane list` and the label from `workspace list`.
+        // Startup resolves the tab id + pane label from `pane list`, the workspace name from
+        // `workspace list`, and the tab name from `tab list` (keyed by the tab id).
         assert_eq!(entry.tab_id.as_deref(), Some("wA:t2"));
         assert_eq!(entry.workspace_label.as_deref(), Some("home"));
+        assert_eq!(entry.tab_label.as_deref(), Some("claude"));
+        assert_eq!(entry.pane_label.as_deref(), Some("orchestrator"));
         assert_eq!(entry.agent.as_deref(), Some("claude"));
         assert_eq!(entry.display_agent.as_deref(), Some("Claude"));
         assert_eq!(entry.title.as_deref(), Some("needs input"));
