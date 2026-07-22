@@ -30,6 +30,14 @@ pub(crate) trait Herdr {
     fn pane_infos(&self) -> Result<Vec<PaneInfo>, PluginError>;
     /// Bring the agent in the given pane into focus (jumps workspace/tab/pane).
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError>;
+    /// Submit `text` as a reply into the agent in the given pane (routes into its session).
+    /// The target is the stored `pane_id` (verified: the `agent_session` uuid is not accepted).
+    /// Fire-and-forget: no `--wait` (its settled-state gate is unreliable from a non-working start).
+    // Seam only in this slice: exercised by tests, no production caller yet — the pane's reply action
+    // calls it next, at which point this attribute comes off. Scoped to `not(test)` so it never
+    // masks a real dead-code regression in the test build (where the unit tests do call it).
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn prompt_agent(&self, pane_id: &str, text: &str) -> Result<(), PluginError>;
     /// Show a herdr toast.
     fn show_notification(
         &self,
@@ -93,6 +101,27 @@ impl Herdr for CliHerdr {
             Ok(())
         } else {
             Err(command_failure("HERDR_BIN_PATH agent focus", &output))
+        }
+    }
+
+    fn prompt_agent(&self, pane_id: &str, text: &str) -> Result<(), PluginError> {
+        let output = Command::new(&self.bin_path)
+            .arg("agent")
+            .arg("prompt")
+            .arg(pane_id)
+            .arg(text)
+            .output()
+            .map_err(|error| {
+                PluginError::new(format!(
+                    "failed to run HERDR_BIN_PATH agent prompt {pane_id} ({}): {error}",
+                    self.bin_path.display()
+                ))
+            })?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(command_failure("HERDR_BIN_PATH agent prompt", &output))
         }
     }
 
@@ -281,5 +310,80 @@ mod tests {
     fn null_error_field_is_treated_as_success() {
         let value: Value = serde_json::from_str(r#"{"result":{"panes":[]},"error":null}"#).unwrap();
         assert_eq!(herdr_error_message(&value), None);
+    }
+
+    // A throwaway `herdr` that logs each argv entry on its own line (so a multi-word arg proves it
+    // was passed as ONE argument, not shell-split) and exits with `exit_code`.
+    #[cfg(unix)]
+    fn fake_agent_prompt_herdr(
+        dir: &std::path::Path,
+        log: &std::path::Path,
+        exit_code: i32,
+    ) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(format!("fake-herdr-{exit_code}.sh"));
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{log}\"\nprintf 'prompt refused\\n' >&2\nexit {exit_code}\n",
+            log = log.display()
+        );
+        std::fs::write(&path, script).expect("fake herdr should write");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("fake herdr metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("fake herdr should be executable");
+        path
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cli_prompt_agent_shapes_the_command() {
+        let dir = crate::test_support::temp_state_dir("prompt-ok");
+        let log = dir.join("argv.log");
+        let herdr = CliHerdr {
+            bin_path: fake_agent_prompt_herdr(&dir, &log, 0),
+        };
+
+        herdr
+            .prompt_agent("wA:p1", "use option B")
+            .expect("prompt should succeed");
+
+        let argv = std::fs::read_to_string(&log).expect("argv log should exist");
+        let lines: Vec<&str> = argv.lines().collect();
+        // The reply text arrives as a single argv entry — not split on its spaces.
+        assert_eq!(lines, ["agent", "prompt", "wA:p1", "use option B"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cli_prompt_agent_maps_a_nonzero_exit_to_err() {
+        let dir = crate::test_support::temp_state_dir("prompt-err");
+        let log = dir.join("argv.log");
+        let herdr = CliHerdr {
+            bin_path: fake_agent_prompt_herdr(&dir, &log, 1),
+        };
+
+        let error = herdr
+            .prompt_agent("wA:p1", "hi")
+            .expect_err("a nonzero exit should map to an error");
+        assert!(
+            error.to_string().contains("agent prompt"),
+            "error was: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The shared fake records prompt calls in order — the contract the reply-mode slices assert on.
+    #[test]
+    fn fake_herdr_records_prompt_calls() {
+        let herdr = crate::test_support::FakeHerdr::new(&[("wA:p1", "blocked")]);
+        herdr
+            .prompt_agent("wA:p1", "yes")
+            .expect("fake prompt should succeed");
+        assert_eq!(
+            herdr.prompts.into_inner(),
+            vec![("wA:p1".to_string(), "yes".to_string())]
+        );
     }
 }

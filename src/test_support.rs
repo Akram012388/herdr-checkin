@@ -16,6 +16,8 @@ pub(crate) struct FakeHerdr {
     panes: Vec<PaneInfo>,
     focus_fails: bool,
     pub(crate) focused: RefCell<Vec<String>>,
+    /// Every `prompt_agent` call, as `(pane_id, text)`, in order.
+    pub(crate) prompts: RefCell<Vec<(String, String)>>,
     pub(crate) notifications: RefCell<Vec<(String, Option<String>, String)>>,
 }
 
@@ -42,6 +44,7 @@ impl FakeHerdr {
                 .collect(),
             focus_fails: false,
             focused: RefCell::new(Vec::new()),
+            prompts: RefCell::new(Vec::new()),
             notifications: RefCell::new(Vec::new()),
         }
     }
@@ -72,6 +75,13 @@ impl Herdr for FakeHerdr {
             return Err(PluginError::new(format!("focus refused for {pane_id}")));
         }
         self.focused.borrow_mut().push(pane_id.to_string());
+        Ok(())
+    }
+
+    fn prompt_agent(&self, pane_id: &str, text: &str) -> Result<(), PluginError> {
+        self.prompts
+            .borrow_mut()
+            .push((pane_id.to_string(), text.to_string()));
         Ok(())
     }
 

@@ -233,7 +233,12 @@ existing `pane.rs` test style. No new e2e needed for the model; a `tests/cli.rs`
 
 ## 5. Build sequencing (tracer-bullet slices)
 
-1. **`Herdr::prompt_agent`** + fake + a `tests/cli.rs` command-shaping test. Pure seam, no UI. (green)
+1. **DONE** — `Herdr::prompt_agent` (`herdr agent prompt <pane_id> <text>`, fire-and-forget) + the
+   `FakeHerdr` recording double. Command-shaping tests live **in `src/herdr.rs`** (not `tests/cli.rs`:
+   `CliHerdr` is `pub(crate)` and no subcommand calls it yet) — a real `CliHerdr` against a throwaway
+   fake `herdr` asserts the argv (`agent prompt wA:p1 "use option B"`, the reply text as one arg) and
+   Ok/Err on exit status. The trait method carries `#[cfg_attr(not(test), allow(dead_code))]` until
+   slice 3's caller lands. Pure seam, no UI.
 2. **Reply-mode state machine** on `PaneModel` (field + arm/append/backspace/cancel), unit-tested,
    no herdr call yet - footer renders the buffer. (green)
 3. **Submit wiring**: `on_reply_submit` -> `prompt_agent` -> evict-on-success / keep-on-failure,
