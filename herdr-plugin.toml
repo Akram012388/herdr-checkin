@@ -57,8 +57,8 @@ command = ["/bin/sh", "scripts/open-pane.sh"]
 id = "queue"
 title = "Check-in"
 placement = "popup"
-width = "60%"
-height = "55%"
+width = "50%"
+height = "50%"
 command = ["./target/release/herdr-checkin", "pane"]
 
 # Events. Enqueue on agent status changes; evict on focus and close.

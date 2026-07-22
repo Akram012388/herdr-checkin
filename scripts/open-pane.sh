@@ -18,7 +18,7 @@ exec "$herdr_bin" plugin pane open \
   --plugin Akram012388.checkin \
   --entrypoint queue \
   --placement popup \
-  --width 60% \
-  --height 55% \
+  --width 50% \
+  --height 50% \
   --env HERDR_CHECKIN_POPUP=1 \
   --focus
