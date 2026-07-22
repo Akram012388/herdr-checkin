@@ -368,6 +368,7 @@ mod tests {
             title: Some("t".to_string()),
             status: WaitStatus::Blocked,
             enqueued_at_ms: 1_000,
+            last_touched_ms: 1_000,
         }
     }
 

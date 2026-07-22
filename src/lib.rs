@@ -148,9 +148,11 @@ fn evict_event_pane(runtime: &RuntimeEnv) -> Result<(), PluginError> {
 /// - **Focus first, evict on success only.** The target is kept in the queue while we focus it;
 ///   only a successful `agent focus` removes it. A focus failure leaves the entry in place.
 /// - **Never drop an entry the liveness snapshot couldn't see.** The `pane list` snapshot is
-///   taken before the lock, so an entry enqueued after it would look stale. We prune an entry as
-///   stale only if it predates the snapshot; newer ones are kept (this window is exactly when you
-///   press `next` as an agent blocks).
+///   taken before the lock, so an entry enqueued — or *refreshed* — after it would look stale. We
+///   prune an entry as stale only if both its enqueue and its last refresh predate the snapshot
+///   (`max(enqueued_at_ms, last_touched_ms) < snapshot_ms`); newer ones are kept. This window is
+///   exactly when you press `next` as an agent blocks, or as a post-restart event re-pings a pane
+///   the seed persisted with an older `enqueued_at_ms`.
 fn next(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
     let snapshot_ms = current_unix_ms();
     let live = herdr.pane_status_map()?;
@@ -165,8 +167,8 @@ fn next(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
                 kept.push(entry); // keep the target until the focus is confirmed
                 break;
             }
-            if entry.enqueued_at_ms >= snapshot_ms {
-                kept.push(entry); // too new for the snapshot to judge — keep it
+            if entry.last_touched_ms.max(entry.enqueued_at_ms) >= snapshot_ms {
+                kept.push(entry); // enqueued or refreshed after the snapshot — too new to judge
             }
             // else: stale and older than the snapshot — drop it.
         }
@@ -197,7 +199,10 @@ fn peek(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
     let entries = StateStore::new(&runtime.state_dir).update(|entries| {
         let kept: Vec<QueueEntry> = entries
             .into_iter()
-            .filter(|entry| is_live(&live, &entry.pane_id) || entry.enqueued_at_ms >= snapshot_ms)
+            .filter(|entry| {
+                is_live(&live, &entry.pane_id)
+                    || entry.last_touched_ms.max(entry.enqueued_at_ms) >= snapshot_ms
+            })
             .collect();
         (kept.clone(), kept)
     })?;
@@ -261,6 +266,10 @@ fn startup(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
 /// already queued, its fields and status are updated in place, preserving its
 /// FIFO position and original `enqueued_at_ms` (it has been waiting since the
 /// first ping). Otherwise it is appended to the back.
+///
+/// Either way it stamps `last_touched_ms = now_ms`. `enqueued_at_ms` drives FIFO order and the
+/// "waited" display; `last_touched_ms` records this refresh so `next`/`peek`'s prune guard can tell
+/// a just-refreshed persisted entry from a genuinely stale one (see those functions).
 fn enqueue(entries: &mut Vec<QueueEntry>, event: &StatusEvent, status: WaitStatus, now_ms: u64) {
     if let Some(existing) = entries.iter_mut().find(|e| e.pane_id == event.pane_id) {
         existing.workspace_id = event.workspace_id.clone();
@@ -268,6 +277,7 @@ fn enqueue(entries: &mut Vec<QueueEntry>, event: &StatusEvent, status: WaitStatu
         existing.display_agent = event.display_agent.clone();
         existing.title = event.title.clone();
         existing.status = status;
+        existing.last_touched_ms = now_ms;
     } else {
         entries.push(QueueEntry {
             pane_id: event.pane_id.clone(),
@@ -277,6 +287,7 @@ fn enqueue(entries: &mut Vec<QueueEntry>, event: &StatusEvent, status: WaitStatu
             title: event.title.clone(),
             status,
             enqueued_at_ms: now_ms,
+            last_touched_ms: now_ms,
         });
     }
 }
@@ -711,6 +722,14 @@ struct QueueEntry {
     title: Option<String>,
     status: WaitStatus,
     enqueued_at_ms: u64,
+    /// When this entry was last enqueued or refreshed (an upsert bumps it; `enqueued_at_ms` stays
+    /// put). Prune guards compare `max(enqueued_at_ms, last_touched_ms)` against the pre-lock
+    /// snapshot, so a concurrent refresh of a persisted entry — its `enqueued_at_ms` predating the
+    /// snapshot — is not mistaken for stale and dropped. `serde(default)` keeps pre-0.2.x state
+    /// files (which lack the field) loadable: they read `0`, and `max` falls back to
+    /// `enqueued_at_ms`, exactly reproducing the old behavior until the entry is next touched.
+    #[serde(default)]
+    last_touched_ms: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1230,6 +1249,107 @@ mod tests {
     }
 
     #[test]
+    fn re_enqueue_bumps_last_touched_but_keeps_enqueued_at() {
+        let dir = temp_state_dir("last-touched");
+        feed_status(&dir, 1_000, "w1:p1", "w1", "blocked", "x");
+        // A later re-ping refreshes the same waiter.
+        feed_status(&dir, 5_000, "w1:p1", "w1", "done", "x");
+        let entries = load(&dir);
+        assert_eq!(entries[0].enqueued_at_ms, 1_000, "FIFO age is preserved");
+        assert_eq!(
+            entries[0].last_touched_ms, 5_000,
+            "refresh bumps last_touched"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn next_keeps_a_refreshed_entry_whose_enqueue_predates_the_snapshot() {
+        // The post-restart race: a persisted entry (old enqueued_at) is refreshed to blocked by a
+        // concurrent event (last_touched postdates any snapshot) while its pane is absent from the
+        // pre-lock liveness snapshot. Pruning on enqueued_at alone would lose this live ping;
+        // max(enqueued_at, last_touched) must keep it.
+        let dir = temp_state_dir("next-refreshed");
+        StateStore::new(&dir)
+            .update(|mut entries| {
+                entries.push(QueueEntry {
+                    pane_id: "wR:p1".to_string(),
+                    workspace_id: "wR".to_string(),
+                    agent: None,
+                    display_agent: None,
+                    title: None,
+                    status: WaitStatus::Blocked,
+                    enqueued_at_ms: 1_000,     // old — predates the snapshot
+                    last_touched_ms: u64::MAX, // fresh — a concurrent refresh
+                });
+                (entries, ())
+            })
+            .expect("seed should succeed");
+        let herdr = FakeHerdr::new(&[]); // pane absent from the live snapshot
+        let rt = runtime(dir.clone(), 2_000);
+
+        next(&rt, &herdr).expect("next should succeed");
+
+        assert!(
+            herdr.focused.into_inner().is_empty(),
+            "the pane is not live, so nothing is focused"
+        );
+        assert_eq!(
+            load(&dir).len(),
+            1,
+            "a concurrently-refreshed entry must not be pruned as stale"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn peek_keeps_a_refreshed_entry_whose_enqueue_predates_the_snapshot() {
+        let dir = temp_state_dir("peek-refreshed");
+        StateStore::new(&dir)
+            .update(|mut entries| {
+                entries.push(QueueEntry {
+                    pane_id: "wR:p1".to_string(),
+                    workspace_id: "wR".to_string(),
+                    agent: None,
+                    display_agent: None,
+                    title: None,
+                    status: WaitStatus::Blocked,
+                    enqueued_at_ms: 1_000,
+                    last_touched_ms: u64::MAX,
+                });
+                (entries, ())
+            })
+            .expect("seed should succeed");
+        let herdr = FakeHerdr::new(&[]);
+        let rt = runtime(dir.clone(), 2_000);
+
+        peek(&rt, &herdr).expect("peek should succeed");
+
+        assert_eq!(
+            load(&dir).len(),
+            1,
+            "a concurrently-refreshed entry must survive peek's prune"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn state_file_without_last_touched_loads_and_defaults_to_zero() {
+        // Backward compatibility: a pre-0.2.x state.json has no last_touched_ms field.
+        let dir = temp_state_dir("legacy-state");
+        fs::write(
+            dir.join(STATE_FILE_NAME),
+            r#"{"version":1,"entries":[{"pane_id":"w1:p1","workspace_id":"w1","status":"blocked","enqueued_at_ms":1000}]}"#,
+        )
+        .expect("legacy state should write");
+        let entries = load(&dir);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].enqueued_at_ms, 1_000);
+        assert_eq!(entries[0].last_touched_ms, 0, "missing field defaults to 0");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn status_event_parses_the_top_level_shape_without_a_data_wrapper() {
         let dir = temp_state_dir("toplevel-shape");
         let mut rt = runtime(dir.clone(), 1_000);
@@ -1254,6 +1374,7 @@ mod tests {
             title: None,
             status: WaitStatus::Done,
             enqueued_at_ms: 0,
+            last_touched_ms: 0,
         };
         let line = describe_entry(&entry, 0);
         assert!(!line.contains("[,"), "line was: {line}");

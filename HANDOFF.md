@@ -3,7 +3,7 @@
 Development status and orientation for the next contributor (human or agent). For user-facing
 docs see [README.md](README.md); for the release log see [CHANGELOG.md](CHANGELOG.md).
 
-**Current version:** 0.2.0 · **License:** MIT · **Repo:** https://github.com/Akram012388/herdr-checkin
+**Current version:** 0.3.0 · **License:** MIT · **Repo:** https://github.com/Akram012388/herdr-checkin
 · **CI:** fmt + clippy + test, green on `main`.
 
 ---
@@ -65,7 +65,11 @@ Two execution modes share one on-disk queue:
 2. **Focus first, evict on success only** (`next` and pane `Enter`). A failed jump must keep the
    entry — losing it is the exact failure the plugin exists to prevent.
 3. **Never prune an entry the liveness snapshot couldn't see.** `next`/`peek` take the `pane list`
-   snapshot before the lock; an entry with `enqueued_at_ms >= snapshot` is kept, not judged stale.
+   snapshot before the lock; an entry with `max(enqueued_at_ms, last_touched_ms) >= snapshot` is
+   kept, not judged stale. `last_touched_ms` (bumped by every `enqueue` upsert, unlike the FIFO
+   `enqueued_at_ms`) closes a lost-ping race: a persisted entry that a concurrent event *refreshes*
+   during the snapshot→lock window would otherwise be pruned on its old `enqueued_at_ms`. This is
+   the exact race the post-restart startup seed makes reachable.
 4. **`decide` assumes one globally-focused pane** (verified: herdr reports a single `focused:true`
    across all workspaces). The status pane is identified in `pane list` only by its `label`
    ("Check-in" — the `[[panes]]` title; keep `PANE_LABEL` in sync).
@@ -121,6 +125,8 @@ next, `prefix+alt+p` peek, `prefix+alt+c` clear, `prefix+alt+q` open-pane. After
    fresh and misses panes already `blocked`/`done`. The `startup` subcommand scans `pane list` and
    seeds the queue, closing that gap. Shipped: `[[startup]]` manifest entry, `startup` subcommand
    (`src/lib.rs`) reusing the `enqueue` upsert, `PaneInfo`/`parse_pane_infos`, unit + CLI tests.
+   **Companion fix (same change):** the `last_touched_ms` prune-guard race in invariant #3 — a
+   pre-existing lost-ping bug the seed made reachable — is fixed and regression-tested.
    **Contract confirmed** (spike, verified against herdr 0.7.5 source + `api schema`):
    - Manifest: `[[startup]]` array-of-tables, only `command` (required argv) + optional `platforms`.
      No `id`/`on`. We use `command = ["./target/release/herdr-checkin", "startup"]`.

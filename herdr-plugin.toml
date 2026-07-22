@@ -1,6 +1,6 @@
 id = "Akram012388.checkin"
 name = "Check-in"
-version = "0.2.0"
+version = "0.3.0"
 min_herdr_version = "0.7.0"
 description = "Durable attention queue for agent panes: queue agents that go blocked or done, then jump to the oldest waiter on demand."
 platforms = ["linux", "macos"]

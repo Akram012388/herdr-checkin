@@ -16,8 +16,9 @@ first** — it has the architecture, herdr API facts, and the pending backlog.
 ## Invariants (each has a regression test — don't regress)
 - Mutations go through `StateStore::update` (delta under the lock), never a model write-back.
 - `next` / pane `Enter`: focus first, evict only on success (a failed jump keeps the entry).
-- `next`/`peek`: keep any entry with `enqueued_at_ms >= snapshot` (don't prune what the pre-lock
-  `pane list` snapshot couldn't see).
+- `next`/`peek`: keep any entry with `max(enqueued_at_ms, last_touched_ms) >= snapshot` (don't
+  prune what the pre-lock `pane list` snapshot couldn't see — including a persisted entry a
+  concurrent event just refreshed; `last_touched_ms` is bumped by every `enqueue` upsert).
 - `startup`: re-seed the queue additively via the `enqueue` upsert (never a wholesale rewrite); no
   eviction — leave stale-entry pruning to `next`/`peek`.
 - Pure logic (queue transitions, `PaneModel`, `decide`) is unit-tested; keep the terminal loop thin.
