@@ -261,7 +261,17 @@ feel and eyeball live: fine-tune the `SELECTION_BG` grey shade if it reads too d
 placeholder shade; the two-line indent. **Refresh `docs/pane-demo.gif`** — it predates all of this
 session's changes (old single-line reply footer, no two-line rows, no grey band); regenerate with the
 **`demo-gif`** skill (VHS; `scripts/pane-demo.tape` + `scripts/pane-demo-setup.sh`, no real agents)
-once the polish settles.
+once the polish settles. **Deferred by the maintainer until all polish is done.** Two findings from
+a first pass, apply when regenerating:
+  1. **Seed needs the four identity fields.** `pane-demo-setup.sh`'s `state.json` predates the
+     redesign — add `tab_id`/`workspace_label`/`tab_label` (leave `pane_label:null`) to each entry
+     so the two-line destination renders human names (`api-server · claude · pane 1`) instead of
+     sparse id fallbacks.
+  2. **The tape's mid-sequence `Enter` now EXITS the pane.** A successful jump returns `Ok(())` and
+     closes the pane regardless of popup mode (`pane.rs` ~L160), and the demo's fake `agent focus`
+     always succeeds — so the current tape's `Enter` (between reply and `d`) drops to the shell and
+     the following `d`/`c`/`y`/`q` leak there. Reorder so the jump is the FINAL action (end on it
+     instead of `q`), or drop the jump step.
 
 ### Decisions — settled, do NOT relitigate
 - **Popup modal is KEPT.** A dedicated split/tab pane (like herdr-file-viewer) was considered and
