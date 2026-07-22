@@ -1,11 +1,21 @@
-# Triage-overlay design (v0.5.0 direction)
+# Triage-overlay design (the next release — the chosen interface)
 
 Design gate for evolving the status pane from a passive **list + jump** into an active **triage
-console**: per row, reply inline (route an answer straight into the agent's session) instead of only
-jumping. Optionally summoned as an **overlay**. This is the design; no code yet.
+console** that **looks and behaves like a Claude Code agents-view TUI session, rendered via herdr's
+overlay primitive**: entries grouped by status, and per row you reply inline (route an answer
+straight into the agent's session) instead of only jumping. This is the design; no code yet.
+
+**This overlay is now THE interface the maintainer wants** — not one placement option among several.
+The overlay presentation and the CC-agents-view look are **core requirements**, not deferred nice-
+to-haves.
+
+**Release change (maintainer decision, 2026-07-22):** there is **no standalone 0.4.0**. The queued
+`[Unreleased]` pane features (mouse-select, clear-all, README demo, module split) **ship together
+with this overlay** as the next release. (Working label: 0.5.0; final number assigned at release —
+could equally be 0.4.0. The point is one interface release, not a mechanical version bump first.)
 
 Owner: this is a design-gate artifact (see [CLAUDE.md](../CLAUDE.md) "design gate before code").
-Companion facts live in [HANDOFF.md](../HANDOFF.md) SS3-4. **Status: draft, pre-build.**
+Companion facts live in [HANDOFF.md](../HANDOFF.md) SS3-4. **Status: design locked, pre-build.**
 
 ---
 
@@ -29,8 +39,10 @@ Notes that correct the HANDOFF's assumptions:
   `placement = "split"` is only the default; the launcher can override per-open.
 - Caveat (not yet verified): the overlay opened **within the current tab** (a tab-scoped layer),
   not a global cross-workspace floating summon like herdr's `prefix+s`. The three behaviors we need
-  (persistent + keyboard-interactive + survives-blur) all hold; only the "summon-from-anywhere"
-  flavor is unconfirmed. Per HANDOFF, placement is negotiable - the interaction is the value.
+  (persistent + keyboard-interactive + survives-blur) all hold, so overlay is the chosen interface;
+  only the "summon-from-anywhere" flavor is unconfirmed and is off the critical path. If herdr later
+  exposes a global popup that routes full keyboard focus, adopt it - but the tab-scoped overlay
+  already delivers the interaction, which is the value.
 
 **Probe 2 - `agent prompt` target + reply routing:**
 - **TARGET is the `pane_id` we already store** (`w4:p1` form). Prompting by pane_id delivered and the
@@ -89,15 +101,39 @@ not a pivot toward a live mirror. That is the line we hold.
 
 ---
 
-## 3. UX design - the triage console
+## 3. UX design - the triage console (Claude Code agents-view look)
 
-### Layout
-Keep the current single FIFO list (oldest first) as the backbone. Each row already reads:
-`N. <Agent> - <status> - <title> [<workspace>, <age>]`. Minimal change: the row is unchanged; we add
-a **reply affordance** and a **reply input line**.
+The target look and feel is a **Claude Code agents-view TUI session**, rendered in a herdr overlay.
+Same data as today (the durable queue — **only enqueued waiters**, never a roster; SS2a), but
+presented as an agents console rather than a flat list.
 
-Optional (defer): visually group `blocked` above `done` within the list. Low value early; the FIFO
-order is the product promise. Ship flat first.
+### Layout — grouped-by-status console (core, not deferred)
+The overlay presents the queue in **status sections**, CC-agents-view style:
+
+```
+  Check-in                                                  (overlay)
+  AWAITING YOU
+  > Claude   admin: fix auth guard          [wF, 2m]
+    Codex    or1: review reply?             [wR, 1m]
+  DONE
+    Claude   website: build failed          [wG, 3m]
+  ------------------------------------------------------------------
+  space reply   enter jump   d drop   c clear   q close
+```
+
+- **Only enqueued entries appear** — an agent that never pinged is never shown (that is herdr's
+  native view; SS2a). "AWAITING YOU" = `blocked`; "DONE" = `done`. No "working"/"idle" section (those
+  agents have no debt).
+- **Within each section, FIFO oldest-first** — the durable-queue promise is preserved; grouping is a
+  presentation layer over the same ordered `Vec`, not a reordering of the queue.
+- Each row keeps the existing content (`<Agent> - <title> [<workspace>, <age>]`); the leading index
+  is replaced by the section membership + a selection cursor (`>`). Selection (`j`/`k`/click) moves
+  across the flattened, section-ordered list.
+- **Reply input line** renders at the footer in reply mode (SS3 flow).
+
+This flips the earlier "ship flat first" note: the grouped, agents-view presentation is now the
+chosen interface (SS1/maintainer), so it is built in, not deferred. The grouping is pure view
+(`draw`) over the queue; it introduces no new data and no queue-invariant surface (SS4).
 
 ### Key bindings (extends the current set)
 | Key | Action | Status |
@@ -166,8 +202,21 @@ existing `focus_agent` (`herdr agent focus <pane_id>`), reusing `command_failure
 - Submit handler `on_reply_submit` mirrors `on_enter` (`pane.rs:153`): resolve the selected pane_id,
   call `herdr.prompt_agent`, then `evict_pane` on success, set `model.status`, `model.sync`.
 
-**`draw` (`pane.rs:425`)** renders the footer input line when `model.reply.is_some()` (as the
-clear-confirm prompt is rendered today). The list rows are unchanged.
+**`draw` (`pane.rs:425`) - the grouped agents-view render (SS3).** This is the biggest UI change and
+the one with a subtlety worth calling out:
+- Render the queue in status sections (AWAITING YOU = `blocked`, DONE = `done`), FIFO within each.
+  This is a pure view transform over the ordered `Vec<QueueEntry>` - no new model state, no
+  reordering of the queue itself.
+- **Section headers are non-selectable rows**, so the existing selection/hit-testing math must map
+  over an interleaved list of headers + entries. Two clean options: (a) keep `PaneModel.selected` an
+  **index into `entries`** (the source of truth) and compute the on-screen row from the grouped
+  layout in `draw`; or (b) build a per-frame `Vec<Row>` (Header | Entry(idx)) and translate. Prefer
+  (a): selection stays an entry index (matches `selected_pane_id`, `sync`'s selection-preservation,
+  and the `j/k` clamp), and only `row_for_click`/`draw` learn the header offsets. This keeps the
+  tested model logic (`pane.rs` tests) intact and confines the change to the view + click mapping.
+- **`row_for_click` (`pane.rs:219`) must skip header rows** - a click on a section header selects
+  nothing (like a click on a blank row today). Extend its unit tests for the header case.
+- Footer input line renders when `model.reply.is_some()` (as the clear-confirm prompt does today).
 
 **Invariant mapping (no regressions):**
 - #1 mutations-are-deltas: eviction after reply reuses `evict_pane` -> `StateStore::update`. Clean.
@@ -190,10 +239,18 @@ existing `pane.rs` test style. No new e2e needed for the model; a `tests/cli.rs`
 3. **Submit wiring**: `on_reply_submit` -> `prompt_agent` -> evict-on-success / keep-on-failure,
    unit-tested against the fake. (green)
 4. **`space` binding + footer render** in the live loop (thin, like the existing key wiring).
-5. **Launcher overlay**: switch `scripts/open-pane.sh` open to `--placement overlay`; manual E2E.
-6. Update README (new keybind + overlay note), CHANGELOG, HANDOFF.
+5. **Grouped agents-view render** (the CC-style look): `draw` renders AWAITING-YOU / DONE sections
+   with non-selectable headers; `row_for_click` skips headers (extend its unit tests); `selected`
+   stays an index into `entries` (SS4). This is the interface-defining slice.
+6. **Launcher overlay**: switch `scripts/open-pane.sh` open to `--placement overlay`; manual E2E of
+   the whole console (grouped render, reply, jump, overlay summon/blur).
+7. Update README (new keybind + overlay/agents-view note + a fresh demo gif), CHANGELOG, HANDOFF.
+   Since there is no standalone 0.4.0, this ships the `[Unreleased]` pane features **and** the
+   overlay as one release; set the version at cut time.
 
-Each slice keeps `cargo fmt --check && cargo clippy -D warnings && cargo test` green.
+Each slice keeps `cargo fmt --check && cargo clippy -D warnings && cargo test` green. Slices 1-4 are
+the reply mechanism; slice 5 is the visual identity; do them in that order so the console is proven
+functional before it is restyled.
 
 ---
 

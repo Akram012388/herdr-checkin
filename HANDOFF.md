@@ -4,14 +4,16 @@ Orientation for the next session (human or agent). Read this first, then start o
 User-facing docs: [README.md](README.md). Release log: [CHANGELOG.md](CHANGELOG.md). Working rules
 and the model-tier strategy: [CLAUDE.md](CLAUDE.md).
 
-**Version:** 0.3.0 (0.4.0 unreleased, pending the maintainer's go) · **License:** MIT · **Repo:**
-https://github.com/Akram012388/herdr-checkin · **State:** `main` is green (fmt + clippy + test) and
-pushed (HEAD `ba83f02`). No open branches, no worktrees. There is an unshipped `[Unreleased]`
-CHANGELOG set (mouse-select, clear-all, README demo, internal module split), and the plugin passed a
-full **manual end-to-end test in real herdr** (see §6). The **triage-overlay direction is now
-design-gated** in [docs/triage-overlay-design.md](docs/triage-overlay-design.md) — both option-(b)
-unknowns were probed against real herdr and passed. Nothing is tagged (maintainer tags on request).
-**START AT §6 — a release-timing choice remains: prep 0.4.0 first, or start the 0.5.0 overlay build.**
+**Version:** 0.3.0 shipped · **no standalone 0.4.0** — the unshipped `[Unreleased]` pane features
+ship bundled with the triage overlay as the next release (working label 0.5.0) · **License:** MIT ·
+**Repo:** https://github.com/Akram012388/herdr-checkin · **State:** `main` is green (fmt + clippy +
+test) and pushed. No open branches, no worktrees. The `[Unreleased]` CHANGELOG set (mouse-select,
+clear-all, README demo, internal module split) passed a full **manual end-to-end test in real
+herdr** (see §6). The **triage overlay is the chosen next interface** — a Claude Code agents-view-
+style TUI in a herdr overlay — **design-gated** in
+[docs/triage-overlay-design.md](docs/triage-overlay-design.md) (probes passed + Fable advisor pass).
+Nothing is tagged (maintainer tags on request). **START AT §6 — build the overlay per the design
+doc's 7-slice plan.**
 
 ---
 
@@ -158,59 +160,63 @@ visible`, and drive keys with `herdr pane send-keys <pane_id> <key>`. For the `s
 `prefix+alt+p` peek, `prefix+alt+c` clear, `prefix+alt+q` open-pane. After editing:
 `herdr config check && herdr server reload-config`.
 
-## 6. Next up (START HERE) — probes done + design-gated; a release-timing choice remains
+## 6. Next up (START HERE) — build the triage overlay (the chosen interface)
 
-**Update (this session, HEAD `ba83f02`):** the maintainer chose **(b)** — the two triage-overlay
-unknowns were **probed against real herdr 0.7.5 and both passed**, and the overlay direction is now
-**design-gated** in [docs/triage-overlay-design.md](docs/triage-overlay-design.md) (with a Fable
-advisor pass). Probe findings, verbatim, live in that doc §1; the short version:
+**Decision (this session):** **no standalone 0.4.0.** The maintainer settled the direction: the
+**triage overlay is THE interface** — a status pane that **looks and behaves like a Claude Code
+agents-view TUI session, rendered via herdr's overlay primitive**. The queued `[Unreleased]` pane
+features (mouse-select, clear-all, README demo, module split) **ship together with the overlay** as
+the next release (working label 0.5.0; final number at cut time — could be 0.4.0). Do not cut a
+mechanical version bump first.
+
+The direction is **design-gated** in
+[docs/triage-overlay-design.md](docs/triage-overlay-design.md) (verified probes + a Fable advisor
+pass). Both option-(b) unknowns were **probed against real herdr 0.7.5 and passed**:
 - **Overlay placement works** — a persistent, keyboard-interactive TUI that survives blur. The enum
   is **`overlay`** (not `popup`), and it's a `plugin pane open --placement` **CLI flag**, so
   offering it is a one-line launcher change, not a manifest rewrite.
 - **`agent prompt` routes an inline reply by the `pane_id` we already store** (the `agent_session`
   uuid is rejected). **`blocked` is narrower than "waiting for me"** — a Claude prose-question reads
   as `done`/`idle`, so the queue keys on `done` and uses acknowledgment (jump/reply/drop + evict-on-
-  focus) rather than sniffing status. `--wait --until` is flaky from a non-working start → reply
-  should be fire-and-poll, not `--wait`-gated.
+  focus) rather than sniffing status. `--wait --until` is flaky from a non-working start → reply is
+  fire-and-poll, not `--wait`-gated.
 
-**The remaining choice (pick up here):**
+**Data-model guardrail (maintainer-confirmed):** the agents-view is a **look**, not a pivot. The
+console stays an **inbox** — only *enqueued waiters* appear, grouped by status (AWAITING YOU =
+`blocked`, DONE = `done`), FIFO within each. It is **not** a live roster of all agents (that is
+herdr's native view). See design doc §2a and the litmus test: *does a feature operate on an enqueued
+entry?*
 
-> (a) **Prep the 0.4.0 release now** (the `[Unreleased]` set), then start the 0.5.0 overlay build; or
-> (b) **Start building the 0.5.0 triage overlay** straight from the design doc (§5 has the 6-slice
->     build plan), and fold 0.4.0 in whenever.
+**Build it:** follow [docs/triage-overlay-design.md](docs/triage-overlay-design.md) §5 — a 7-slice
+tracer-bullet plan. Slices 1-4 are the reply mechanism (`Herdr::prompt_agent`; a `PaneModel` reply
+mode mirroring `confirm_clear`; submit → evict-on-success; the `space` binding). **Slice 5 is the
+interface-defining one:** the grouped agents-view render (`draw` sections + `row_for_click` skipping
+headers; `selected` stays an index into `entries`). Slice 6 flips the launcher to `--placement
+overlay` + manual E2E; slice 7 is docs + the bundled release. Each slice keeps the CI gate (§5)
+green. No more probing needed before code.
 
-Everything is committed and pushed (HEAD `ba83f02`). The `[Unreleased]` CHANGELOG set from the prior
-session — **Feature A** (mouse click-to-select), **Feature B** (`c` clear-all with confirm),
-**Feature C** (README demo GIF), the `lib.rs` module split — is still unshipped and passed a full
-**manual E2E test in real herdr** (pane launch/render/refresh, live enqueue, real event delivery +
-auto-eviction, mouse-select, clear-all confirm, `Enter` graceful focus-failure *and* success,
-`peek`, durability across a ~2.5 h gap). Details live in the commit history and `CHANGELOG.md`.
-
-### If (a) — prep 0.4.0 (mechanical, ~15 min)
-1. In `CHANGELOG.md`, rename `## [Unreleased]` → `## [0.4.0] - <today's date>`.
-2. Bump `version = "0.3.0"` → `"0.4.0"` in **`herdr-plugin.toml`** and **`Cargo.toml`** (keep them in
-   sync; `Cargo.lock` refreshes on the next build).
-3. Update this file's header Version line to 0.4.0.
-4. Run the CI gate (§5), then commit + push. **Do NOT tag** — the maintainer tags on request.
+Everything is committed and pushed (HEAD is this session's tip). The `[Unreleased]` set passed a full
+**manual E2E in real herdr** (pane launch/render/refresh, live enqueue, real event delivery +
+auto-eviction, mouse-select, clear-all confirm, `Enter` graceful focus-failure *and* success, `peek`,
+durability across a ~2.5 h gap). Details live in the commit history and `CHANGELOG.md`.
 
 (Commit/push at own discretion is pre-approved for this repo — see the memory index.)
 
-### If (b) — start the 0.5.0 triage-overlay build
-Follow [docs/triage-overlay-design.md](docs/triage-overlay-design.md) §5 — a 6-slice tracer-bullet
-plan (add `Herdr::prompt_agent`; a `PaneModel` reply mode mirroring `confirm_clear`; submit →
-evict-on-success; the `space` binding; the launcher `--placement overlay` switch; docs). Each slice
-keeps the CI gate (§5) green. The two unknowns are already verified (see the update above), so no
-more probing is needed before code.
-
 ---
 
-### The triage-overlay idea (the 0.5.0 direction) — designed, not built
+### The triage overlay (the chosen next interface) — designed, not built
 
-The maintainer wants to evolve the status pane from a passive **list + jump** into an active
-**triage console**, modeled on **Claude Code's agents view**: agents grouped by status (awaiting
-input / working / done), and **per row you reply inline** — type an answer that routes straight into
-that agent's session — instead of only jumping to it. Optionally presented as a **popup/overlay**
-summoned like herdr's `prefix+s`, rather than a persistent split.
+> Full authoritative design: [docs/triage-overlay-design.md](docs/triage-overlay-design.md). This is
+> the condensed rationale; the doc supersedes it on any conflict.
+
+The maintainer's chosen interface: evolve the status pane from a passive **list + jump** into an
+active **triage console** that **looks and behaves like Claude Code's agents view, rendered in a
+herdr overlay** — enqueued waiters grouped by status (AWAITING YOU / DONE), and **per row you reply
+inline** (type an answer that routes straight into that agent's session via `herdr agent prompt
+<pane_id>`) instead of only jumping. The overlay is **the interface**, not an optional placement.
+Guardrail (maintainer-confirmed): the agents-view is a **look** over the durable queue — the console
+shows only *enqueued* waiters (an inbox), **never a live roster of all agents** (that is herdr's
+native view).
 
 **herdr already has every primitive** (verified via CLI this session — see §4):
 - `enter to return` -> `herdr agent focus <target>` (already our `Enter`).
