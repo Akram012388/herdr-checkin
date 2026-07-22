@@ -28,11 +28,9 @@ use queue::{on_closed, on_focused, on_status_changed};
 pub(crate) use actions::{agent_label, clear, describe_entry};
 pub(crate) use herdr::Herdr;
 pub(crate) use queue::evict;
-pub(crate) use state::{current_unix_ms, load_entries, PluginError, QueueEntry, StateStore};
-// Only pane.rs's test fixtures name `WaitStatus` directly (production code only ever reaches it
-// through `QueueEntry::status`), so the re-export is test-only to keep the release build clean.
-#[cfg(test)]
-pub(crate) use state::WaitStatus;
+pub(crate) use state::{
+    current_unix_ms, load_entries, PluginError, QueueEntry, StateStore, WaitStatus,
+};
 
 /// Entrypoint used by `main`: parse argv, read the herdr-provided environment,
 /// dispatch, and translate the result into a process exit code.

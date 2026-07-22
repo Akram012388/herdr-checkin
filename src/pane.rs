@@ -15,7 +15,7 @@
 
 use crate::{
     agent_label, clear, current_unix_ms, describe_entry, evict, load_entries, Herdr, PluginError,
-    QueueEntry, RuntimeEnv, StateStore,
+    QueueEntry, RuntimeEnv, StateStore, WaitStatus,
 };
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -261,32 +261,32 @@ fn on_mouse(model: &mut PaneModel, mouse: MouseEvent, list_area: Option<Rect>, o
         return;
     }
     if let Some(area) = list_area {
-        if let Some(index) =
-            row_for_click(area, offset, model.entries.len(), mouse.column, mouse.row)
-        {
+        // Recompute the grouped layout the same way `draw` did this frame — the entries are
+        // unchanged between draw and this click (the next `sync` runs only after event handling),
+        // so it reproduces exactly what was painted. A click on a header row selects nothing.
+        let rows = layout_rows(&model.entries);
+        if let Some(index) = row_for_click(area, offset, &rows, mouse.column, mouse.row) {
             model.selected = index;
         }
     }
 }
 
 /// Map a click at terminal cell `(col, row)` to the queue index it lands on, or `None` if the
-/// click is outside the list `area` or falls on a blank row below the last entry. `offset` is the
-/// index of the first visible row (the list's scroll position), so the clicked index is
-/// `offset + (row - area.y)`. Pure and unit-tested.
-fn row_for_click(
-    area: Rect,
-    offset: usize,
-    entry_count: usize,
-    col: u16,
-    row: u16,
-) -> Option<usize> {
+/// click is outside the list `area`, on a section header, or on a blank row below the last row.
+/// `offset` is the index of the first visible row (the list's scroll position), so the clicked
+/// display row is `offset + (row - area.y)`; that row is translated back to an entry index through
+/// the grouped `rows` layout (headers map to `None`). Pure and unit-tested.
+fn row_for_click(area: Rect, offset: usize, rows: &[Row], col: u16, row: u16) -> Option<usize> {
     let inside_x = col >= area.x && col < area.x.saturating_add(area.width);
     let inside_y = row >= area.y && row < area.y.saturating_add(area.height);
     if !inside_x || !inside_y {
         return None;
     }
-    let index = offset + (row - area.y) as usize;
-    (index < entry_count).then_some(index)
+    let display_index = offset + (row - area.y) as usize;
+    match rows.get(display_index) {
+        Some(Row::Entry(index)) => Some(*index),
+        _ => None,
+    }
 }
 
 /// Remove a pane from the queue as a delta under the lock (never a full model write-back).
@@ -528,6 +528,45 @@ impl PaneModel {
 
 // --- view ------------------------------------------------------------------
 
+/// The section header text for each `WaitStatus`, in the order sections are shown: agents that need
+/// input first, then finished ones. These are the CC-agents-view group labels.
+const AWAITING_HEADER: &str = "AWAITING YOU";
+const DONE_HEADER: &str = "DONE";
+
+/// One rendered line of the grouped agents-view: either a non-selectable section header or an
+/// entry carrying its index into `entries` (the selection source of truth). Built per-frame by
+/// [`layout_rows`].
+enum Row {
+    Header(&'static str),
+    Entry(usize),
+}
+
+/// Group the queue into status sections for display — `AWAITING YOU` (`blocked`) then `DONE`
+/// (`done`), FIFO within each — as a pure view transform. It never reorders `entries`: each
+/// `Row::Entry` keeps the entry's original index, and a section header is emitted only when that
+/// section has at least one entry (so an all-`done` queue shows no "AWAITING YOU" heading). This is
+/// the only place the on-screen row order diverges from `entries`; `draw` and `row_for_click` both
+/// go through it, so the paint and the click hit-testing always agree.
+fn layout_rows(entries: &[QueueEntry]) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for (header, status) in [
+        (AWAITING_HEADER, WaitStatus::Blocked),
+        (DONE_HEADER, WaitStatus::Done),
+    ] {
+        let mut section: Vec<Row> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.status == status)
+            .map(|(index, _)| Row::Entry(index))
+            .collect();
+        if !section.is_empty() {
+            rows.push(Row::Header(header));
+            rows.append(&mut section);
+        }
+    }
+    rows
+}
+
 fn draw(
     frame: &mut Frame,
     model: &PaneModel,
@@ -555,16 +594,25 @@ fn draw(
             areas[1],
         );
     } else {
-        let items: Vec<ListItem> = model
-            .entries
+        // The CC-agents-view look: entries grouped into status sections with non-selectable
+        // headers. `layout_rows` is a pure view over the FIFO queue — it never reorders `entries`,
+        // so `selected` stays an index into `entries` and we translate it to its on-screen row here.
+        let rows = layout_rows(&model.entries);
+        let items: Vec<ListItem> = rows
             .iter()
-            .enumerate()
-            .map(|(index, entry)| ListItem::new(row_text(index, entry, now_ms)))
+            .map(|row| match row {
+                Row::Header(title) => ListItem::new(*title).bold(),
+                Row::Entry(index) => ListItem::new(describe_entry(&model.entries[*index], now_ms)),
+            })
             .collect();
         let list = List::new(items)
             .highlight_style(Style::new().reversed())
             .highlight_symbol("> ");
-        list_state.select(Some(model.selected));
+        // Highlight the display row that carries the selected entry (headers are never selected).
+        let selected_row = rows
+            .iter()
+            .position(|row| matches!(row, Row::Entry(index) if *index == model.selected));
+        list_state.select(selected_row);
         // Record the list's rect for this frame so mouse clicks can be hit-tested against exactly
         // what was painted; `render_stateful_widget` updates `list_state`'s scroll offset in place.
         *list_area = Some(areas[1]);
@@ -604,23 +652,23 @@ fn header_text(count: usize) -> String {
     }
 }
 
-fn row_text(index: usize, entry: &QueueEntry, now_ms: u64) -> String {
-    format!("{}. {}", index + 1, describe_entry(entry, now_ms))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::WaitStatus;
 
     fn entry(pane_id: &str) -> QueueEntry {
+        entry_with_status(pane_id, WaitStatus::Blocked)
+    }
+
+    fn entry_with_status(pane_id: &str, status: WaitStatus) -> QueueEntry {
         QueueEntry {
             pane_id: pane_id.to_string(),
             workspace_id: pane_id.split(':').next().unwrap_or("").to_string(),
             agent: Some("claude".to_string()),
             display_agent: Some("Claude".to_string()),
             title: Some("t".to_string()),
-            status: WaitStatus::Blocked,
+            status,
             enqueued_at_ms: 1_000,
             last_touched_ms: 1_000,
         }
@@ -776,8 +824,8 @@ mod tests {
         assert!(prompt.contains("use option B"));
     }
 
-    // The list rect used across the click tests: starts at row 1 (row 0 is the header), 10 rows
-    // tall, 40 wide.
+    // The list rect used across the click tests: starts at row 1 (row 0 is the top header line),
+    // 10 rows tall, 40 wide.
     fn list_area() -> Rect {
         Rect {
             x: 0,
@@ -787,36 +835,96 @@ mod tests {
         }
     }
 
+    // All-blocked entries render as [Header("AWAITING YOU"), Entry(0), Entry(1), ...] — the section
+    // header occupies the first display row, so entry N sits one row lower than in a flat list.
+    fn blocked_rows(count: usize) -> Vec<Row> {
+        let entries: Vec<QueueEntry> = (0..count).map(|i| entry(&format!("w{i}:p1"))).collect();
+        layout_rows(&entries)
+    }
+
     #[test]
-    fn row_for_click_maps_top_row_to_first_entry() {
-        // No scroll: the first visible row (area.y) is entry 0.
-        assert_eq!(row_for_click(list_area(), 0, 3, 5, 1), Some(0));
-        assert_eq!(row_for_click(list_area(), 0, 3, 0, 3), Some(2));
+    fn row_for_click_maps_rows_to_entries_past_the_header() {
+        // No scroll: display row 0 (area.y) is the "AWAITING YOU" header, so row 1 is entry 0.
+        let rows = blocked_rows(3);
+        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 2), Some(0));
+        assert_eq!(row_for_click(list_area(), 0, &rows, 0, 4), Some(2));
+    }
+
+    #[test]
+    fn row_for_click_skips_section_headers() {
+        // The header display row selects nothing, like a blank row.
+        let rows = blocked_rows(3);
+        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 1), None);
     }
 
     #[test]
     fn row_for_click_accounts_for_scroll_offset() {
-        // Scrolled down by 2: the first visible row now maps to entry 2.
-        assert_eq!(row_for_click(list_area(), 2, 5, 10, 1), Some(2));
-        assert_eq!(row_for_click(list_area(), 2, 5, 10, 3), Some(4));
+        // Scrolled down by 2: display row at area.y is display index 2 — which is Entry(1) here
+        // ([Header, Entry(0), Entry(1), ...]).
+        let rows = blocked_rows(5);
+        assert_eq!(row_for_click(list_area(), 2, &rows, 10, 1), Some(1));
+        assert_eq!(row_for_click(list_area(), 2, &rows, 10, 3), Some(3));
     }
 
     #[test]
     fn row_for_click_rejects_blank_rows_below_the_last_entry() {
-        // Only 3 entries but the rect is 10 tall; a click on row 4 (would-be index 3) is blank.
-        assert_eq!(row_for_click(list_area(), 0, 3, 5, 4), None);
+        // Header + 3 entries = 4 display rows; a click on display row 4 (row 5) is blank.
+        let rows = blocked_rows(3);
+        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 5), None);
     }
 
     #[test]
     fn row_for_click_rejects_clicks_outside_the_area() {
-        assert_eq!(row_for_click(list_area(), 0, 3, 5, 0), None); // header row, above the list
-        assert_eq!(row_for_click(list_area(), 0, 3, 5, 11), None); // below the list
-        assert_eq!(row_for_click(list_area(), 0, 3, 40, 1), None); // one past the right edge
+        let rows = blocked_rows(3);
+        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 0), None); // above the list
+        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 11), None); // below the list
+        assert_eq!(row_for_click(list_area(), 0, &rows, 40, 2), None); // one past the right edge
     }
 
     #[test]
     fn row_for_click_is_safe_on_an_empty_queue() {
-        assert_eq!(row_for_click(list_area(), 0, 0, 5, 1), None);
+        let rows = blocked_rows(0);
+        assert_eq!(row_for_click(list_area(), 0, &rows, 5, 1), None);
+    }
+
+    #[test]
+    fn layout_rows_groups_by_status_fifo_without_reordering_entries() {
+        // A queue interleaving blocked and done: the layout emits AWAITING YOU (blocked, FIFO) then
+        // DONE (done, FIFO), each Entry keeping its original index into `entries`.
+        let entries = vec![
+            entry_with_status("w0:p1", WaitStatus::Blocked),
+            entry_with_status("w1:p1", WaitStatus::Done),
+            entry_with_status("w2:p1", WaitStatus::Blocked),
+            entry_with_status("w3:p1", WaitStatus::Done),
+        ];
+        let rows = layout_rows(&entries);
+        let shape: Vec<String> = rows
+            .iter()
+            .map(|row| match row {
+                Row::Header(title) => format!("#{title}"),
+                Row::Entry(index) => format!("{index}"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec!["#AWAITING YOU", "0", "2", "#DONE", "1", "3"],
+            "sections group by status, FIFO within, indices unchanged"
+        );
+    }
+
+    #[test]
+    fn layout_rows_omits_an_empty_section_header() {
+        // All done: no AWAITING YOU heading, only DONE.
+        let entries = vec![
+            entry_with_status("w0:p1", WaitStatus::Done),
+            entry_with_status("w1:p1", WaitStatus::Done),
+        ];
+        let rows = layout_rows(&entries);
+        assert!(
+            matches!(rows.first(), Some(Row::Header(DONE_HEADER))),
+            "an all-done queue leads with the DONE header, not AWAITING YOU"
+        );
+        assert_eq!(rows.len(), 3, "one header + two entries");
     }
 
     fn mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
@@ -830,14 +938,30 @@ mod tests {
 
     #[test]
     fn on_mouse_left_click_selects_the_clicked_row() {
+        // All blocked -> [Header, Entry(0), Entry(1), Entry(2)] at terminal rows 1..=4. A click on
+        // row 4 lands on the third entry (index 2), past the section header on row 1.
         let mut m = model(&["w1:p1", "w2:p1", "w3:p1"]);
         on_mouse(
             &mut m,
-            mouse(MouseEventKind::Down(MouseButton::Left), 5, 3),
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 4),
             Some(list_area()),
             0,
         );
         assert_eq!(m.selected, 2);
+    }
+
+    #[test]
+    fn on_mouse_left_click_on_a_header_row_selects_nothing() {
+        // The "AWAITING YOU" header sits at terminal row 1; clicking it leaves the selection put.
+        let mut m = model(&["w1:p1", "w2:p1"]);
+        m.move_down(); // selection at 1
+        on_mouse(
+            &mut m,
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
+            Some(list_area()),
+            0,
+        );
+        assert_eq!(m.selected, 1, "a header click must not reselect");
     }
 
     #[test]
@@ -847,12 +971,12 @@ mod tests {
                        // A scroll event must not move the selection.
         on_mouse(
             &mut m,
-            mouse(MouseEventKind::ScrollDown, 5, 1),
+            mouse(MouseEventKind::ScrollDown, 5, 2),
             Some(list_area()),
             0,
         );
         assert_eq!(m.selected, 1);
-        // A left click on a blank row (index 5, past the 2 entries) is a no-op.
+        // A left click on a blank row (past the header + 2 entries) is a no-op.
         on_mouse(
             &mut m,
             mouse(MouseEventKind::Down(MouseButton::Left), 5, 6),
@@ -863,7 +987,7 @@ mod tests {
         // No list area (empty queue was drawn) is a no-op even for a left click.
         on_mouse(
             &mut m,
-            mouse(MouseEventKind::Down(MouseButton::Left), 5, 1),
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 2),
             None,
             0,
         );
@@ -875,13 +999,6 @@ mod tests {
         assert_eq!(header_text(0), "Check-in — queue empty");
         assert_eq!(header_text(1), "Check-in — 1 agent waiting");
         assert_eq!(header_text(3), "Check-in — 3 agents waiting");
-    }
-
-    #[test]
-    fn row_text_is_one_indexed_and_describes_the_entry() {
-        let row = row_text(0, &entry("w7:p2"), 1_000);
-        assert!(row.starts_with("1. "), "row was: {row}");
-        assert!(row.contains("blocked"), "row was: {row}");
     }
 
     fn pane_info(pane_id: &str, tab: &str, focused: bool, label: Option<&str>) -> PaneInfo {
