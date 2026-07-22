@@ -4,6 +4,7 @@
 
 use crate::herdr::{Herdr, StatusEvent};
 use crate::queue::{enqueue, evict, is_live};
+use crate::roster::{render_roster_text, RosterSnapshot};
 use crate::state::{current_unix_ms, PluginError, QueueEntry, StateStore};
 use crate::RuntimeEnv;
 
@@ -262,6 +263,20 @@ fn format_waited(ms: u64) -> String {
     } else {
         format!("{hours}h{remainder}m")
     }
+}
+
+/// Hidden `roster` subcommand: sample `herdr agent list` and print the grouped roster as text.
+/// Dev-only visibility into the Agents-view data path (Slice 1) — no queue mutation, no UI. The
+/// grouping and formatting live in the Herdr-free `roster.rs`; this only bridges the CLI sample into
+/// a [`RosterSnapshot`] stamped with the run's sample time and prints the dump.
+pub(crate) fn roster(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
+    let agents = herdr.agent_list()?;
+    let snapshot = RosterSnapshot {
+        sampled_at_ms: runtime.now_ms,
+        agents,
+    };
+    print!("{}", render_roster_text(&snapshot));
+    Ok(())
 }
 
 #[cfg(test)]

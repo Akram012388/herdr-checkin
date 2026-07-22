@@ -3,6 +3,7 @@
 //! the release binary.
 
 use crate::herdr::{Herdr, PaneInfo};
+use crate::roster::RosterAgent;
 use crate::state::{read_state, PluginError, QueueEntry, STATE_FILE_NAME};
 use crate::RuntimeEnv;
 use std::cell::RefCell;
@@ -14,6 +15,7 @@ use std::path::{Path, PathBuf};
 pub(crate) struct FakeHerdr {
     live: HashMap<String, String>,
     panes: Vec<PaneInfo>,
+    agents: Vec<RosterAgent>,
     workspace_labels: HashMap<String, String>,
     tab_labels: HashMap<String, String>,
     focus_fails: bool,
@@ -47,6 +49,7 @@ impl FakeHerdr {
                     title: None,
                 })
                 .collect(),
+            agents: Vec::new(),
             workspace_labels: HashMap::new(),
             tab_labels: HashMap::new(),
             focus_fails: false,
@@ -107,6 +110,10 @@ impl Herdr for FakeHerdr {
 
     fn tab_labels(&self) -> Result<HashMap<String, String>, PluginError> {
         Ok(self.tab_labels.clone())
+    }
+
+    fn agent_list(&self) -> Result<Vec<RosterAgent>, PluginError> {
+        Ok(self.agents.clone())
     }
 
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError> {

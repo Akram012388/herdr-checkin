@@ -115,7 +115,7 @@ this doc is the durable design, the issues are the per-slice work tracker.
 | Slice | Issue | Type |
 | --- | --- | --- |
 | 0 split `pane.rs` + snapshots **(DONE)** | [#1](https://github.com/Akram012388/herdr-checkin/issues/1) | AFK |
-| 1 `agent_list` seam + `roster.rs` | [#2](https://github.com/Akram012388/herdr-checkin/issues/2) | AFK |
+| 1 `agent_list` seam + `roster.rs` **(DONE)** | [#2](https://github.com/Akram012388/herdr-checkin/issues/2) | AFK |
 | 2 tab toggle + live roster | [#3](https://github.com/Akram012388/herdr-checkin/issues/3) | HITL |
 | 3 jump + reply parity | [#4](https://github.com/Akram012388/herdr-checkin/issues/4) | HITL |
 | 4 last-line status column | [#5](https://github.com/Akram012388/herdr-checkin/issues/5) | HITL |
@@ -129,9 +129,12 @@ this doc is the durable design, the issues are the per-slice work tracker.
   ratatui `TestBackend` snapshot coverage** (empty queue, grouped CHECKIN/DONE, compose strip, the
   `> ` cursor) — content-level, trimming horizontal styling that stays under live tuning. Gate met:
   CI green (84 lib + 5 CLI tests). Popup pixel-identical still wants the maintainer's live eyeball.
-- **Slice 1** — `Herdr::agent_list` + parser + pure `roster.rs` grouping + a hidden `roster` debug
-  subcommand that prints the grouped roster. *Gate:* fixture unit tests on captured live JSON + live
-  printout eyeball.
+- **Slice 1 (DONE)** — `Herdr::agent_list` + `parse_agent_list` (over a pristine live-captured JSON
+  fixture) + pure `roster.rs` (`AgentStatus`, `RosterAgent`, `RosterSnapshot`, `WorkspaceGroup`,
+  `group_by_workspace`, `render_roster_text` — Herdr-free) + a hidden `roster` debug subcommand. Gate
+  met: fixture unit tests (incl. an `unknown` status and a live agent with no `agent_session`) + a
+  live printout verified inside herdr (groups by workspace, marks focus, dashes missing fields). CI
+  green (94 lib + 5 CLI).
 - **Slice 2** — Tab/Ctrl+S toggle + read-only Agents view fed by the sampler thread (1s `agent list`
   cadence, mpsc, tick never blocks). Rows: destination + `{status} · {title}`, grouped by workspace.
   *Gate:* live status flip visible within ~1s; Queue tab unaffected; no jank. **This is the tracer

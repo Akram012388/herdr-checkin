@@ -1,0 +1,259 @@
+//! The Agents-view roster: pure data + grouping over `herdr agent list` output. **Herdr-free by the
+//! same rule as `queue.rs`** — the `Herdr` trait never reaches this module. The herdr seam
+//! (`herdr.rs`) parses the CLI JSON into [`RosterAgent`]s; this module only groups, orders, and
+//! renders them, so it stays trivially unit-testable with no herdr in the loop.
+//!
+//! Slice 1 of the Agents view (design doc §5): the types, grouping-by-workspace, and a plain-text
+//! dump for the hidden `roster` debug subcommand. The live view, sampler, and pins come later.
+
+/// An agent pane's live status, from `herdr agent list`'s `agent_status`. The vocabulary is
+/// closed (live-verified, herdr 0.7.5): `idle`/`working`/`blocked`/`done`, with **`Unknown` as the
+/// catch-all** for an empty or unrecognized value — herdr has no separate `failed`/`stopped`, so an
+/// unfamiliar string is a herdr we don't fully know, rendered honestly rather than dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentStatus {
+    Idle,
+    Working,
+    Blocked,
+    Done,
+    Unknown,
+}
+
+impl AgentStatus {
+    /// Map herdr's `agent_status` string to a variant; anything outside the known vocabulary (and
+    /// the empty string) becomes [`AgentStatus::Unknown`].
+    pub(crate) fn parse(raw: &str) -> Self {
+        match raw {
+            "idle" => AgentStatus::Idle,
+            "working" => AgentStatus::Working,
+            "blocked" => AgentStatus::Blocked,
+            "done" => AgentStatus::Done,
+            _ => AgentStatus::Unknown,
+        }
+    }
+
+    /// The lowercase word for this status (round-trips [`parse`](Self::parse) for known variants).
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            AgentStatus::Idle => "idle",
+            AgentStatus::Working => "working",
+            AgentStatus::Blocked => "blocked",
+            AgentStatus::Done => "done",
+            AgentStatus::Unknown => "unknown",
+        }
+    }
+}
+
+/// One agent pane as surfaced by `herdr agent list`, reduced to the fields the Agents view needs.
+/// Plain data the herdr seam parses and the view renders — never a place the `Herdr` trait reaches.
+/// `agent_session` (the session uuid) is `None` for a pane herdr lists without one (seen live for a
+/// non-Claude/Codex agent); it is the stable key pins will use later (design §6), so it is carried
+/// even though Slice 1 only prints it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RosterAgent {
+    pub(crate) pane_id: String,
+    pub(crate) workspace_id: String,
+    pub(crate) tab_id: Option<String>,
+    pub(crate) agent: Option<String>,
+    pub(crate) agent_status: AgentStatus,
+    pub(crate) agent_session: Option<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) focused: bool,
+    pub(crate) terminal_title: Option<String>,
+}
+
+/// A single sampler delivery: the whole roster at one instant. The view replaces this wholesale each
+/// sample (design §5, never persisted); `sampled_at_ms` stamps when it was read so the view can age
+/// it. Slice 1 constructs it only for the `roster` debug dump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RosterSnapshot {
+    pub(crate) sampled_at_ms: u64,
+    pub(crate) agents: Vec<RosterAgent>,
+}
+
+/// Agents sharing one workspace, in display order. Produced by [`group_by_workspace`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceGroup {
+    pub(crate) workspace_id: String,
+    pub(crate) agents: Vec<RosterAgent>,
+}
+
+/// Group agents by `workspace_id`, preserving the order workspaces are first seen and the order of
+/// agents within each. Pins float to the top of their workspace group in Slice 6; until then the
+/// within-group order is plain encounter order, so this is the single place that ordering will hook
+/// in (the view never re-sorts). Pure: clones its input into the groups.
+pub(crate) fn group_by_workspace(agents: &[RosterAgent]) -> Vec<WorkspaceGroup> {
+    let mut groups: Vec<WorkspaceGroup> = Vec::new();
+    for agent in agents {
+        match groups
+            .iter_mut()
+            .find(|group| group.workspace_id == agent.workspace_id)
+        {
+            Some(group) => group.agents.push(agent.clone()),
+            None => groups.push(WorkspaceGroup {
+                workspace_id: agent.workspace_id.clone(),
+                agents: vec![agent.clone()],
+            }),
+        }
+    }
+    groups
+}
+
+/// Render a snapshot as a plain-text dump for the hidden `roster` debug subcommand: a header line
+/// (sample time + counts) then, per workspace, one line per agent showing **every** parsed field
+/// (pane/tab ids, agent, status, session uuid, cwd, focus, terminal title). Dev-only visibility into
+/// the data path — not a UI. A missing optional renders as `-`, a focused pane is marked `*`.
+pub(crate) fn render_roster_text(snapshot: &RosterSnapshot) -> String {
+    let groups = group_by_workspace(&snapshot.agents);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "roster @ {}ms - {} agent(s), {} workspace(s)\n",
+        snapshot.sampled_at_ms,
+        snapshot.agents.len(),
+        groups.len(),
+    ));
+    for group in &groups {
+        out.push_str(&format!("{}\n", group.workspace_id));
+        for agent in &group.agents {
+            let focus = if agent.focused { "*" } else { " " };
+            let pane_id = &agent.pane_id;
+            let tab_id = agent.tab_id.as_deref().unwrap_or("-");
+            let name = agent.agent.as_deref().unwrap_or("-");
+            let status = agent.agent_status.as_str();
+            let session = agent.agent_session.as_deref().unwrap_or("-");
+            let cwd = agent.cwd.as_deref().unwrap_or("-");
+            let title = agent.terminal_title.as_deref().unwrap_or("");
+            out.push_str(&format!(
+                "  {focus} {pane_id:<8} {tab_id:<8} {name:<8} {status:<8} {session}  {cwd}  :: {title}\n"
+            ));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(pane_id: &str, workspace_id: &str, status: AgentStatus) -> RosterAgent {
+        RosterAgent {
+            pane_id: pane_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            tab_id: Some(format!("{workspace_id}:t1")),
+            agent: Some("claude".to_string()),
+            agent_status: status,
+            agent_session: Some("uuid-1".to_string()),
+            cwd: Some("/tmp".to_string()),
+            focused: false,
+            terminal_title: Some("title".to_string()),
+        }
+    }
+
+    #[test]
+    fn agent_status_parses_the_known_vocabulary() {
+        assert_eq!(AgentStatus::parse("idle"), AgentStatus::Idle);
+        assert_eq!(AgentStatus::parse("working"), AgentStatus::Working);
+        assert_eq!(AgentStatus::parse("blocked"), AgentStatus::Blocked);
+        assert_eq!(AgentStatus::parse("done"), AgentStatus::Done);
+    }
+
+    #[test]
+    fn agent_status_folds_unknown_and_empty_into_unknown() {
+        // herdr has no failed/stopped; an unfamiliar or empty status is Unknown, never dropped.
+        assert_eq!(AgentStatus::parse("unknown"), AgentStatus::Unknown);
+        assert_eq!(
+            AgentStatus::parse("some_future_state"),
+            AgentStatus::Unknown
+        );
+        assert_eq!(AgentStatus::parse(""), AgentStatus::Unknown);
+    }
+
+    #[test]
+    fn agent_status_as_str_round_trips_known_variants() {
+        for status in [
+            AgentStatus::Idle,
+            AgentStatus::Working,
+            AgentStatus::Blocked,
+            AgentStatus::Done,
+            AgentStatus::Unknown,
+        ] {
+            assert_eq!(AgentStatus::parse(status.as_str()), status);
+        }
+    }
+
+    #[test]
+    fn group_by_workspace_preserves_workspace_and_within_group_order() {
+        // Interleaved workspaces: the groups keep first-seen workspace order (w4, then wT), and each
+        // group keeps its agents in encounter order — never reordered or sorted by id.
+        let agents = vec![
+            agent("w4:p1", "w4", AgentStatus::Idle),
+            agent("wT:p1", "wT", AgentStatus::Working),
+            agent("w4:p2", "w4", AgentStatus::Blocked),
+        ];
+        let groups = group_by_workspace(&agents);
+        assert_eq!(groups.len(), 2, "one group per distinct workspace");
+        assert_eq!(groups[0].workspace_id, "w4");
+        assert_eq!(
+            groups[0]
+                .agents
+                .iter()
+                .map(|a| a.pane_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["w4:p1", "w4:p2"],
+            "w4's two agents stay in encounter order"
+        );
+        assert_eq!(groups[1].workspace_id, "wT");
+        assert_eq!(groups[1].agents.len(), 1);
+    }
+
+    #[test]
+    fn group_by_workspace_is_empty_for_no_agents() {
+        assert!(group_by_workspace(&[]).is_empty());
+    }
+
+    #[test]
+    fn render_roster_text_headers_the_counts_and_lists_every_workspace() {
+        let snapshot = RosterSnapshot {
+            sampled_at_ms: 1_234,
+            agents: vec![
+                agent("w4:p1", "w4", AgentStatus::Idle),
+                agent("wT:p1", "wT", AgentStatus::Working),
+            ],
+        };
+        let text = render_roster_text(&snapshot);
+        assert!(
+            text.starts_with("roster @ 1234ms - 2 agent(s), 2 workspace(s)\n"),
+            "header reads the sample time and counts; got:\n{text}"
+        );
+        assert!(text.contains("\nw4\n"), "the w4 group is listed");
+        assert!(text.contains("\nwT\n"), "the wT group is listed");
+        assert!(text.contains("w4:p1"), "the agent row shows its pane id");
+    }
+
+    #[test]
+    fn render_roster_text_marks_focus_and_dashes_missing_optionals() {
+        let focused_no_session = RosterAgent {
+            focused: true,
+            agent_session: None,
+            terminal_title: None,
+            cwd: None,
+            tab_id: None,
+            ..agent("wN:p2", "wN", AgentStatus::Idle)
+        };
+        let snapshot = RosterSnapshot {
+            sampled_at_ms: 0,
+            agents: vec![focused_no_session],
+        };
+        let text = render_roster_text(&snapshot);
+        let row = text
+            .lines()
+            .find(|line| line.contains("wN:p2"))
+            .expect("the agent row is present");
+        assert!(
+            row.trim_start().starts_with('*'),
+            "a focused pane is marked"
+        );
+        // Missing session/tab/cwd all render as `-`, never a blank that hides the field.
+        assert!(row.contains(" - "), "a missing optional shows a dash");
+    }
+}

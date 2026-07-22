@@ -17,11 +17,12 @@ mod actions;
 mod herdr;
 mod pane;
 mod queue;
+mod roster;
 mod state;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-use actions::{next, peek, startup};
+use actions::{next, peek, roster, startup};
 use herdr::{enrich_location, CliHerdr};
 use queue::{on_closed, on_focused, on_status_changed};
 
@@ -88,6 +89,7 @@ fn run(subcommand: Subcommand, runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Resul
         Subcommand::Clear => clear(runtime),
         Subcommand::Startup => startup(runtime, herdr),
         Subcommand::Pane => pane::run(runtime, herdr),
+        Subcommand::Roster => roster(runtime, herdr),
     }
 }
 
@@ -103,6 +105,9 @@ enum Subcommand {
     Clear,
     Startup,
     Pane,
+    /// Hidden dev-only subcommand: dump the live agent roster as text (Agents-view data path).
+    /// Deliberately absent from `usage()` — it is not a user-facing action.
+    Roster,
 }
 
 enum ParseCommandError {
@@ -130,6 +135,8 @@ where
         "clear" => Ok(Subcommand::Clear),
         "startup" => Ok(Subcommand::Startup),
         "pane" => Ok(Subcommand::Pane),
+        // Hidden: parseable but intentionally left out of `usage()` (dev-only roster dump).
+        "roster" => Ok(Subcommand::Roster),
         "help" | "--help" | "-h" => Err(ParseCommandError::Usage(usage())),
         other => Err(ParseCommandError::Usage(format!(
             "unknown subcommand: {other}\n{}",

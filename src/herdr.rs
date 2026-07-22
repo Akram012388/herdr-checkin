@@ -2,6 +2,7 @@
 //! show` implementation) and the JSON parsing for both `pane list` responses and plugin event
 //! payloads.
 
+use crate::roster::{AgentStatus, RosterAgent};
 use crate::state::{PluginError, WaitStatus};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -40,6 +41,11 @@ pub(crate) trait Herdr {
     /// Map of `tab_id -> label` from `herdr tab list` (e.g. `w4:t2 -> "claude"`). The tab label is
     /// usually the running program, exactly what herdr's go-to picker shows for the tab.
     fn tab_labels(&self) -> Result<HashMap<String, String>, PluginError>;
+    /// The live roster from `herdr agent list` — every detected agent pane, all states. Backs the
+    /// Agents view (design doc §3). Distinct from `pane_infos`: it carries the `agent_session` uuid
+    /// and `focused` flag the queue path deliberately ignores, and its status is the full agent
+    /// vocabulary, not just the wait states.
+    fn agent_list(&self) -> Result<Vec<RosterAgent>, PluginError>;
     /// Bring the agent in the given pane into focus (jumps workspace/tab/pane).
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError>;
     /// Submit `text` as a reply into the agent in the given pane (routes into its session).
@@ -127,6 +133,26 @@ impl CliHerdr {
 
         Ok(output.stdout)
     }
+
+    /// Run `herdr agent list` and return its raw stdout, or an error if the command failed.
+    fn agent_list_stdout(&self) -> Result<Vec<u8>, PluginError> {
+        let output = Command::new(&self.bin_path)
+            .arg("agent")
+            .arg("list")
+            .output()
+            .map_err(|error| {
+                PluginError::new(format!(
+                    "failed to run HERDR_BIN_PATH agent list ({}): {error}",
+                    self.bin_path.display()
+                ))
+            })?;
+
+        if !output.status.success() {
+            return Err(command_failure("HERDR_BIN_PATH agent list", &output));
+        }
+
+        Ok(output.stdout)
+    }
 }
 
 impl Herdr for CliHerdr {
@@ -144,6 +170,10 @@ impl Herdr for CliHerdr {
 
     fn tab_labels(&self) -> Result<HashMap<String, String>, PluginError> {
         parse_tab_labels(&self.tab_list_stdout()?)
+    }
+
+    fn agent_list(&self) -> Result<Vec<RosterAgent>, PluginError> {
+        parse_agent_list(&self.agent_list_stdout()?)
     }
 
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError> {
@@ -309,6 +339,66 @@ fn parse_pane_infos(stdout: &[u8]) -> Result<Vec<PaneInfo>, PluginError> {
         });
     }
     Ok(infos)
+}
+
+/// Parse `herdr agent list` into [`RosterAgent`]s, preserving the returned order (grouping happens
+/// later, in `roster.rs`). Agents without a `pane_id` are skipped; a missing/empty `agent_status`
+/// folds to [`AgentStatus::Unknown`]; the session uuid is read from the nested `agent_session.value`
+/// (absent for some agents, so `Option`). A herdr error or an unexpected shape surfaces as `Err`.
+fn parse_agent_list(stdout: &[u8]) -> Result<Vec<RosterAgent>, PluginError> {
+    let value: Value = serde_json::from_slice(stdout).map_err(|error| {
+        PluginError::new(format!(
+            "failed to parse HERDR_BIN_PATH agent list JSON: {error}"
+        ))
+    })?;
+
+    if let Some(error) = herdr_error_message(&value) {
+        return Err(PluginError::new(format!(
+            "HERDR_BIN_PATH agent list returned an error: {error}"
+        )));
+    }
+
+    let agents = value
+        .get("result")
+        .and_then(|result| result.get("agents"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            PluginError::new(
+                "HERDR_BIN_PATH agent list returned an unexpected response".to_string(),
+            )
+        })?;
+
+    let mut roster = Vec::with_capacity(agents.len());
+    for agent in agents {
+        let Some(pane_id) = non_empty_string(agent, "pane_id") else {
+            continue;
+        };
+        let status = agent
+            .get("agent_status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        roster.push(RosterAgent {
+            pane_id,
+            workspace_id: non_empty_string(agent, "workspace_id").unwrap_or_default(),
+            tab_id: non_empty_string(agent, "tab_id"),
+            agent: non_empty_string(agent, "agent"),
+            agent_status: AgentStatus::parse(status),
+            agent_session: agent_session_value(agent),
+            cwd: non_empty_string(agent, "cwd"),
+            focused: agent
+                .get("focused")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            terminal_title: non_empty_string(agent, "terminal_title"),
+        });
+    }
+    Ok(roster)
+}
+
+/// The session uuid from an agent's nested `agent_session.value`, or `None` when the object (or the
+/// value) is absent — herdr lists some agents without a session, and pins key on this later (§6).
+fn agent_session_value(agent: &Value) -> Option<String> {
+    non_empty_string(agent.get("agent_session")?, "value")
 }
 
 /// Parse `herdr workspace list` into a `workspace_id -> label` map. Workspaces without an id or with
@@ -517,6 +607,74 @@ mod tests {
         assert_eq!(labels.get("w4").map(String::as_str), Some("home"));
         assert_eq!(labels.get("wT").map(String::as_str), Some("herdr-checkin"));
         assert_eq!(labels.get("wX"), None);
+    }
+
+    #[test]
+    fn parse_agent_list_reads_a_captured_live_response() {
+        // A pristine capture of real `herdr agent list` output (herdr 0.7.5) — NOT hand-written, so
+        // the parser is proven against the true schema (extra fields like revision/terminal_id, the
+        // nested agent_session, agents across three workspaces). The middle agent (amp) was listed
+        // live with NO agent_session and NO terminal_title — the missing-session case, for free.
+        let json = include_str!("fixtures/agent_list.json");
+        let agents = parse_agent_list(json.as_bytes()).expect("live agent list should parse");
+        assert_eq!(agents.len(), 3);
+
+        assert_eq!(agents[0].pane_id, "w4:p1");
+        assert_eq!(agents[0].agent.as_deref(), Some("codex"));
+        assert_eq!(agents[0].agent_status, AgentStatus::Idle);
+        assert_eq!(agents[0].tab_id.as_deref(), Some("w4:t1"));
+        assert_eq!(agents[0].workspace_id, "w4");
+        assert!(!agents[0].focused);
+        assert_eq!(
+            agents[0].agent_session.as_deref(),
+            Some("019f8b57-77d7-7353-9062-35f49261a20d"),
+            "the session uuid is read from the nested agent_session.value"
+        );
+        assert_eq!(agents[0].cwd.as_deref(), Some("/Users/akram"));
+        assert!(agents[0].terminal_title.is_some());
+
+        // amp: listed live without a session or a terminal_title, and it holds focus.
+        assert_eq!(agents[1].pane_id, "wN:p2");
+        assert_eq!(agents[1].agent.as_deref(), Some("amp"));
+        assert_eq!(
+            agents[1].agent_session, None,
+            "no agent_session on this pane"
+        );
+        assert_eq!(agents[1].terminal_title, None);
+        assert!(agents[1].focused);
+
+        assert_eq!(agents[2].pane_id, "wT:p1");
+        assert_eq!(agents[2].agent_status, AgentStatus::Working);
+        assert_eq!(
+            agents[2].agent_session.as_deref(),
+            Some("c157c523-3984-4c0a-bbb5-afd9b7fad361")
+        );
+    }
+
+    #[test]
+    fn parse_agent_list_folds_unknown_status_and_skips_idless_agents() {
+        // Schema mirrors the live capture, crafted to exercise cases the live sample lacked: an
+        // explicit `unknown` status, an unrecognized future status, and a pane_id-less agent.
+        let json = br#"{"result":{"type":"agent_list","agents":[
+            {"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1","agent":"claude","agent_status":"unknown","focused":false},
+            {"pane_id":"w2:p1","workspace_id":"w2","agent":"codex","agent_status":"reticulating","focused":false},
+            {"workspace_id":"w3","agent_status":"idle"}
+        ]}}"#;
+        let agents = parse_agent_list(json).expect("edge agent list should parse");
+        assert_eq!(agents.len(), 2, "the pane_id-less agent is skipped");
+        assert_eq!(agents[0].agent_status, AgentStatus::Unknown);
+        assert_eq!(
+            agents[1].agent_status,
+            AgentStatus::Unknown,
+            "an unrecognized status folds to Unknown, never dropped"
+        );
+        assert_eq!(agents[0].agent_session, None);
+    }
+
+    #[test]
+    fn parse_agent_list_surfaces_a_herdr_error() {
+        let json = br#"{"error":{"code":"no_session","message":"not attached"}}"#;
+        assert!(parse_agent_list(json).is_err(), "a herdr error maps to Err");
     }
 
     #[test]

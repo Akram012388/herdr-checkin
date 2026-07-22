@@ -79,7 +79,8 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
 - `src/herdr.rs` (~560) — the herdr seam. `Herdr` trait / `CliHerdr` / `PaneInfo` (+ `tab_id`,
   `label`); parsers `parse_pane_infos`, `parse_workspace_labels`/`parse_tab_labels` (shared
   `parse_id_label_map`), `parse_status_event`. Trait methods: `pane_status_map`, `pane_infos`,
-  **`workspace_labels`**, **`tab_labels`**, `focus_agent`, `prompt_agent`, `show_notification`,
+  **`workspace_labels`**, **`tab_labels`**, **`agent_list`** (`parse_agent_list` over `herdr agent
+  list` into `roster::RosterAgent` — the Agents view), `focus_agent`, `prompt_agent`, `show_notification`,
   `popup_close`. **`enrich_location(&dyn Herdr, &mut StatusEvent)`** fills `tab_id`+`pane_label` (from
   `pane list`), `workspace_label` (from `workspace list`), `tab_label` (from `tab list`) — best-effort,
   never fails the enqueue.
@@ -87,6 +88,13 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
   (`on_status_changed`/`on_focused`/`on_closed`). **Never depends on the `Herdr` trait.**
   `on_status_changed(runtime, enrich: impl FnOnce(&mut StatusEvent))` runs `enrich` **before the
   lock** and **only when it will enqueue** (a `working` eviction pays for no lookups).
+- `src/roster.rs` (~230) — the Agents-view roster (Slice 1). **Herdr-free like `queue.rs`** (invariant
+  #6): pure types `AgentStatus` (idle/working/blocked/done/**unknown catch-all**), `RosterAgent`,
+  `RosterSnapshot`, `WorkspaceGroup`; `group_by_workspace` (encounter order; the pins hook for Slice 6)
+  and `render_roster_text` (the hidden `roster` debug dump). `herdr.rs` parses into these; this module
+  never touches the `Herdr` trait. `src/fixtures/agent_list.json` is a **pristine live capture** of
+  `herdr agent list` that the `parse_agent_list` test `include_str!`s (one agent listed live with no
+  `agent_session`/`terminal_title`, so the missing-session path is covered by real data).
 - `src/actions.rs` (~640) — the actions (`next`/`peek`/`clear`/`startup`), the toast copy, and the
   **row-render helpers**: `agent_label`, **`entry_destination`** (`{workspace} · {tab} · {pane}`,
   human-name-with-id-fallback), **`entry_detail`** (`{status} · {title} · {waited}`), and
@@ -268,10 +276,10 @@ Claude Code's agent view but powered by herdr primitives. **Fully aligned with t
   reads cramped. Surface is a `--placement` flag, so the choice stays cheaply reversible.
 - Live data via a **worker thread** (never CLI on the render tick); `roster.json` is a **separate,
   prunable** store from `state.json` (new **invariant #7**).
-- **Build order (tracer-bullet, each green + eyeballed):** ~~Slice 0 split `pane.rs`~~ **DONE** → 1
-  data seam + `roster.rs` + hidden `roster` debug cmd (**START HERE, issue #2**) → 2 tab toggle +
-  read-only live roster (the tracer bullet) → 3 jump/reply parity → 4 last-line column → 5
-  `roster.json` + time-in-state → 6 pin-to-top. Full slice table in the design doc §8.
+- **Build order (tracer-bullet, each green + eyeballed):** ~~Slice 0 split `pane.rs`~~ **DONE** →
+  ~~1 data seam + `roster.rs` + hidden `roster` debug cmd~~ **DONE** → 2 tab toggle + read-only live
+  roster — the tracer bullet (**START HERE, issue #3**) → 3 jump/reply parity → 4 last-line column →
+  5 `roster.json` + time-in-state → 6 pin-to-top. Full slice table in the design doc §8.
 - **Per-slice tracker: GitHub issues [#1–#7](https://github.com/Akram012388/herdr-checkin/issues)**
   (Slice 0→#1 … Slice 6→#7), dependency-ordered, labeled `ready-for-agent` (AFK: #1/#2/#6) or
   `ready-for-human` (HITL live-eyeball: #3/#4/#5/#7). This doc + the design doc are the durable
