@@ -538,10 +538,33 @@ fn draw(
             .iter()
             .position(|row| matches!(row, Row::Entry(index) if *index == model.selected));
         list_state.select(selected_row);
+        // Reserve the right-most column for a scrollbar when the grouped rows overflow the
+        // viewport, so the list text never collides with the thumb. `List`+`ListState` already
+        // scrolls to keep the selection in view; the scrollbar only makes that off-screen content
+        // discoverable. Each `ListItem` is one row, so display-row count == item count == the units
+        // `list_state.offset()` counts in.
+        let viewport = areas[1].height as usize;
+        let overflow = rows.len() > viewport;
+        let list_rect = if overflow {
+            Rect {
+                width: areas[1].width.saturating_sub(1),
+                ..areas[1]
+            }
+        } else {
+            areas[1]
+        };
         // Record the list's rect for this frame so mouse clicks can be hit-tested against exactly
         // what was painted; `render_stateful_widget` updates `list_state`'s scroll offset in place.
-        *list_area = Some(areas[1]);
-        frame.render_stateful_widget(list, areas[1], list_state);
+        *list_area = Some(list_rect);
+        frame.render_stateful_widget(list, list_rect, list_state);
+        if overflow {
+            let track = Rect {
+                x: areas[1].x + areas[1].width - 1,
+                width: 1,
+                ..areas[1]
+            };
+            render_list_scrollbar(frame, track, rows.len(), viewport, list_state.offset());
+        }
     }
 
     let footer = if let Some(draft) = &model.reply {
@@ -576,6 +599,66 @@ fn header_text(count: usize) -> String {
         0 => "queue empty".to_string(),
         1 => "1 agent waiting".to_string(),
         n => format!("{n} agents waiting"),
+    }
+}
+
+/// Geometry of a vertical scrollbar thumb: its top offset within the track and its length, both in
+/// cells. Produced by [`scrollbar_thumb`], consumed by [`render_list_scrollbar`].
+struct Thumb {
+    top: u16,
+    len: u16,
+}
+
+/// Proportional geometry for a vertical scrollbar thumb — the same shape herdr draws for its own
+/// popups (thumb length scaled to the visible fraction, position scaled to the scroll offset),
+/// reduced to integer math and kept colorless. Returns `None` when everything fits (no scrollbar).
+/// `total` display rows, `viewport` visible rows, `offset` index of the first visible row.
+fn scrollbar_thumb(
+    total: usize,
+    viewport: usize,
+    offset: usize,
+    track_height: u16,
+) -> Option<Thumb> {
+    if viewport == 0 || track_height == 0 || total <= viewport {
+        return None;
+    }
+    let track = track_height as usize;
+    // total > viewport here, so max_offset >= 1 and the divisions below never hit zero.
+    let len = (viewport * track / total).clamp(1, track);
+    let max_top = track - len;
+    let max_offset = total - viewport;
+    let top = if max_top == 0 {
+        0
+    } else {
+        offset.min(max_offset) * max_top / max_offset
+    };
+    Some(Thumb {
+        top: top as u16,
+        len: len as u16,
+    })
+}
+
+/// Draw a 1-column vertical scrollbar in `track` when the grouped rows overflow the viewport: a dim
+/// track with a brighter thumb, both colorless to match the pane. A no-op when it all fits.
+fn render_list_scrollbar(
+    frame: &mut Frame,
+    track: Rect,
+    total: usize,
+    viewport: usize,
+    offset: usize,
+) {
+    let Some(thumb) = scrollbar_thumb(total, viewport, offset, track.height) else {
+        return;
+    };
+    let buf = frame.buffer_mut();
+    for y in track.y..track.y.saturating_add(track.height) {
+        buf[(track.x, y)]
+            .set_symbol("▕")
+            .set_style(Style::new().dim());
+    }
+    let thumb_top = track.y.saturating_add(thumb.top);
+    for y in thumb_top..thumb_top.saturating_add(thumb.len) {
+        buf[(track.x, y)].set_symbol("▐");
     }
 }
 
@@ -963,6 +1046,48 @@ mod tests {
         assert_eq!(header_text(0), "queue empty");
         assert_eq!(header_text(1), "1 agent waiting");
         assert_eq!(header_text(3), "3 agents waiting");
+    }
+
+    #[test]
+    fn scrollbar_thumb_is_none_when_everything_fits() {
+        // Content shorter than or equal to the viewport needs no scrollbar.
+        assert!(scrollbar_thumb(5, 10, 0, 10).is_none());
+        assert!(scrollbar_thumb(10, 10, 0, 10).is_none());
+        // Degenerate tracks/viewports are also a no-op (never divide by zero).
+        assert!(scrollbar_thumb(20, 0, 0, 10).is_none());
+        assert!(scrollbar_thumb(20, 10, 0, 0).is_none());
+    }
+
+    #[test]
+    fn scrollbar_thumb_scales_length_and_slides_with_the_offset() {
+        // 20 rows through a 10-row viewport: the thumb spans half the track (10 * 10 / 20 = 5),
+        // and its top slides from 0 (top) through the middle to max_top (bottom) as we scroll.
+        let at = |offset| scrollbar_thumb(20, 10, offset, 10).expect("overflow => thumb");
+        let top = at(0);
+        assert_eq!((top.top, top.len), (0, 5), "scrolled to the top");
+        let mid = at(5);
+        assert_eq!((mid.top, mid.len), (2, 5), "5 * (10-5) / (20-10) = 2");
+        let bottom = at(10);
+        assert_eq!(
+            (bottom.top, bottom.len),
+            (5, 5),
+            "max offset pins the thumb to the bottom"
+        );
+        // An offset past the max is clamped, never overruns the track.
+        let over = at(99);
+        assert_eq!(
+            over.top + over.len,
+            10,
+            "thumb bottom never exceeds the track height"
+        );
+    }
+
+    #[test]
+    fn scrollbar_thumb_length_is_at_least_one_cell() {
+        // A huge list through a tiny viewport still shows a visible (>= 1 cell) thumb.
+        let thumb = scrollbar_thumb(1_000, 1, 0, 8).expect("overflow => thumb");
+        assert!(thumb.len >= 1, "the thumb is never zero-height");
+        assert!(thumb.top + thumb.len <= 8, "and stays within the track");
     }
 
     // --- reply submit (impure: reads/writes state.json, talks to a fake herdr) ---------------
