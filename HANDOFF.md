@@ -1,25 +1,29 @@
 # HANDOFF
 
-Orientation for the next session (human or agent). Read this first, then start on §6 (Next up).
+Orientation for the next session (human or agent). **Read this first, then start on §6.**
 User-facing docs: [README.md](README.md). Release log: [CHANGELOG.md](CHANGELOG.md). Working rules
-and the model-tier strategy: [CLAUDE.md](CLAUDE.md). The active feature's authoritative design:
-[docs/triage-overlay-design.md](docs/triage-overlay-design.md).
+and the model-tier strategy: [CLAUDE.md](CLAUDE.md). The feature's original (overlay-era) design that
+later pivoted to a popup: [docs/triage-overlay-design.md](docs/triage-overlay-design.md).
 
 **Version:** **0.4.0 — the triage-popup release — is cut** (version in `Cargo.toml` +
 `herdr-plugin.toml` + `Cargo.lock`, CHANGELOG dated 2026-07-22, README + demo gif refreshed). **NOT
 tagged** — the maintainer tags on request. · **License:** MIT · **Repo:**
 https://github.com/Akram012388/herdr-checkin · **State:** `main` is green (fmt + clippy + test,
-**67 lib + 5 CLI tests**) and pushed. No open branches, no worktrees, working tree clean.
+**67 lib + 5 CLI tests**) and pushed; latest substantive commit `1d21213` (the overlay→popup switch).
+No open branches, no worktrees, working tree clean.
 
-**The status pane is DONE and shipped as a centered popup modal.** It looks and behaves like herdr's
-own `prefix+s` settings popup: a session-level `--placement popup` that herdr draws with a border +
+**START HERE — the maintainer has pending edits to land.** Before anything else, the maintainer is
+handing you a specific set of edits (they will describe them directly at the start of the session).
+Those edits are the immediate task: apply them, keep the CI gate green after each change
+(`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`), then commit and push
+(pre-approved for this repo). Everything below is orientation and what remains once those edits are in.
+
+**The status pane shipped as a centered popup modal.** It looks and behaves like herdr's own
+`prefix+s` settings popup: a session-level `--placement popup` that herdr draws with a border +
 "Check-in" title, holding the durable queue grouped into **CHECKIN** (`blocked`) / **DONE** (`done`)
 sections, keyboard-navigable and reply-able, dismissed with `q`/`Esc` (the pane calls the
-`popup.close` socket method on exit). It began as the 7-slice "triage overlay" build, then pivoted to
-`popup` placement once the herdr source revealed it (the CLI `--help` omits `popup` via a stale
-value-parser — the real parser accepts it). **Verified live end-to-end** in herdr 0.7.5. **START AT §6
-— no in-flight feature; the release just needs the maintainer's tag, and only parked/optional items
-remain.**
+`popup.close` socket method on exit). It began as a 7-slice "triage overlay" build, then pivoted to
+`popup` placement once the herdr source revealed it. **Verified live end-to-end in herdr 0.7.5.**
 
 ---
 
@@ -28,8 +32,8 @@ remain.**
 A herdr plugin: a **durable FIFO attention queue** for agent panes. herdr's native
 jump-to-notification only reaches the toast currently on screen, so a ping is lost once the toast
 fades, and simultaneous pings can't queue. This plugin remembers them — agents that go `blocked`
-(need input) or `done` (finished) are enqueued; you jump to (or, as of slices 1–4, reply inline to)
-the oldest waiter on demand.
+(need input) or `done` (finished) are enqueued; you jump to, or reply inline to, the oldest waiter
+on demand.
 
 - **Manifest id:** `Akram012388.checkin` (GitHub-handle prefix). **Repo/dir name:** `herdr-checkin`
   (the `herdr-` prefix is what ecosystem discovery expects). These deliberately differ — do NOT
@@ -56,33 +60,33 @@ guarded by `state.lock` (`fs2`). Writes are atomic temp+rename; reads outside a 
 
 **Files** (`lib.rs` was split into cohesive modules; each holds the `#[cfg(test)]` tests for its own
 code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still resolve):
-- `src/lib.rs` (~170 lines) — the orientation page: argv dispatch (`run_from_env`/`run`), subcommand
+- `src/lib.rs` (~160 lines) — the orientation page: argv dispatch (`run_from_env`/`run`), subcommand
   parsing, `RuntimeEnv`, and the `mod`/`pub(crate) use` wiring for everything below.
 - `src/state.rs` (~306) — persisted state: `QueueEntry`, `WaitStatus`, `StateStore` (lock + atomic
   temp+rename write), `StateLock`, `read_state`/`write_state`/`load_entries`, `PluginError`. Owns
   the "all mutations via `StateStore::update`" invariant.
-- `src/herdr.rs` (~385) — the herdr CLI seam (`Herdr` trait / `CliHerdr`, `PaneInfo`) plus JSON
-  parsing for both `pane list` responses and plugin event payloads (`StatusEvent`). The `Herdr`
-  trait's methods: `pane_status_map`, `pane_infos`, `focus_agent`, **`prompt_agent`** (slice 1),
-  `show_notification`.
+- `src/herdr.rs` (~430) — the herdr seam (`Herdr` trait / `CliHerdr`, `PaneInfo`) plus JSON parsing
+  for `pane list` responses and plugin event payloads (`StatusEvent`). Trait methods: `pane_status_map`,
+  `pane_infos`, `focus_agent`, `prompt_agent`, `show_notification`, **`popup_close`** (socket call).
 - `src/queue.rs` (~215) — pure queue transitions (`enqueue`/`evict`/`is_live`) and the event handlers
   (`on_status_changed`/`on_focused`/`on_closed`). Must never depend on the `Herdr` trait (enforced
   by the module boundary now, not just a comment).
 - `src/actions.rs` (~540) — the actions (`next`/`peek`/`clear`/`startup`), the toast copy they
-  render, and **`agent_label`** (the display-name helper, shared by the list rows and the reply
-  footer). The only non-pane callers that also talk to herdr.
+  render, and `agent_label` (the display-name helper, shared by the list rows and the reply footer).
 - `src/test_support.rs` (~165) — `#[cfg(test)]`-only shared fake `Herdr` + state fixtures. The
-  `FakeHerdr` records `focused`, **`prompts`** (`(pane_id, text)`), and `notifications`, with
-  `with_failing_focus`/**`with_failing_prompt`** toggles.
-- `src/pane.rs` (~1030) — the ratatui TUI (`PaneModel`, event loop, view, mouse hit-testing) and the
-  **inline reply mode** (slices 2–4). Pure model/decision code is unit-tested; the terminal loop is
-  thin. Reaches domain/storage/herdr types via `use crate::{…}`.
+  `FakeHerdr` records `focused`, `prompts` (`(pane_id, text)`), and `notifications`, with
+  `with_failing_focus`/`with_failing_prompt` toggles; `popup_close` is a no-op.
+- `src/pane.rs` (~880) — the ratatui TUI (`PaneModel`, event loop, grouped view, mouse hit-testing),
+  the **inline reply mode**, the **grouped CHECKIN/DONE render** (`layout_rows` → `Row::Spacer |
+  Header | Entry`), and the **popup lifecycle** (close-on-exit + close-on-jump). Pure model code is
+  unit-tested; the terminal loop is thin.
 - `src/main.rs` — one-line entry into `lib::run_from_env`.
 - `tests/cli.rs` — end-to-end tests that spawn the built binary against a fake `herdr` on
   `HERDR_BIN_PATH`.
-- `herdr-plugin.toml` — manifest: `[[actions]]`, `[[events]]`, one `[[panes]]`, `[[build]]`,
+- `herdr-plugin.toml` — manifest: `[[actions]]`, `[[events]]`, one `[[panes]]` (popup), `[[build]]`,
   `[[startup]]`.
-- `scripts/open-pane.sh` — launcher for `open-pane` (opens the pane as a popup; no toggle logic).
+- `scripts/open-pane.sh` — launcher for `open-pane`: opens the pane as a `popup` with
+  `--width`/`--height` and `--env HERDR_CHECKIN_POPUP=1`. No toggle logic (a popup is a singleton).
 
 ## 3. Behavior + load-bearing invariants
 
@@ -93,22 +97,28 @@ code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still re
 - **`next`** focuses the oldest still-live waiter (`herdr agent focus <pane_id>`, cross-workspace)
   and evicts it **only after** the focus succeeds. **`peek`** shows the queue as a toast.
   **`clear`** empties it. **`startup`** re-seeds the queue from `pane list` after a herdr restart.
-- **Status pane** keys: `j`/`k`/arrows or **left-click** move/select, `Enter` jump+evict-on-success
-  (and closes the popup), **`space` reply inline** (slices 2–4), `d` drop, `c` clear-all (with a
-  `y`/`n` confirm), `q`/`Esc` close (dismissing the popup). `open-pane` just opens it — a popup is a
-  session-level singleton, so there is no open/focus/close toggle.
-- **Inline reply** (slices 2–4): `space` opens a reply line for the selected waiter; you type an
-  answer and `Enter` routes it into that agent's session via `herdr agent prompt <pane_id> <text>`,
-  then evicts the entry **only on submit success** (a failed submit keeps it). `Esc`/click cancels;
-  the reply's **target is captured when reply mode is armed**, so a concurrent queue refresh can't
-  retarget it. Empty/whitespace `Enter` sends nothing and stays in reply mode.
+- **Status pane** keys: `j`/`k`/arrows or **left-click** move/select (in on-screen display order;
+  headers and spacer rows are non-selectable), `Enter` jump+evict-on-success (**and closes the
+  popup**), **`space` reply inline**, `d` drop, `c` clear-all (with a `y`/`n` confirm), `q`/`Esc`
+  close (dismissing the popup). `open-pane` just opens it — a popup is a session-level singleton, so
+  there is no open/focus/close toggle.
+- **Grouped render:** `layout_rows` groups the FIFO queue into **CHECKIN** (`blocked`) then **DONE**
+  (`done`) sections, each preceded by a blank `Row::Spacer` for visual separation, FIFO within each.
+  Pure view over the ordered `Vec` — it never reorders `entries`. `selected` stays an index into
+  `entries`; only `draw`/`row_for_click` learn the spacer+header offsets. The top line is just the
+  count (herdr draws "Check-in" on the popup border).
+- **Inline reply:** `space` opens a reply line for the selected waiter; you type an answer and
+  `Enter` routes it into that agent's session via `herdr agent prompt <pane_id> <text>`, then evicts
+  the entry **only on submit success** (a failed submit keeps it). `Esc`/click cancels; the reply's
+  **target is captured when reply mode is armed**, so a concurrent queue refresh can't retarget it.
+  Empty/whitespace `Enter` sends nothing and stays in reply mode.
 
 **Invariants (do not regress — each has a regression test):**
 1. **Mutations are deltas** through `StateStore::update` (read-modify-write under the lock), never a
    full model write-back. The pane polls while event binaries write concurrently; a stale write-back
    would clobber a fresh enqueue.
-2. **Act first, evict on success only.** Applies to `next`, pane `Enter` (focus then evict), **and
-   inline reply** (`on_reply_submit`: prompt then evict). A failed action keeps the entry — losing it
+2. **Act first, evict on success only.** Applies to `next`, pane `Enter` (focus then evict), and
+   inline reply (`on_reply_submit`: prompt then evict). A failed action keeps the entry — losing it
    is the exact failure the plugin exists to prevent.
 3. **Never prune an entry the liveness snapshot couldn't see.** `next`/`peek` take the `pane list`
    snapshot before the lock; keep any entry with `max(enqueued_at_ms, last_touched_ms) >= snapshot`.
@@ -120,8 +130,9 @@ code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still re
    evicts. Stale entries are pruned by `next`/`peek`'s liveness pass. The hook is spawned async and
    races the live event loop, so this merge-not-rewrite discipline is what keeps it safe.
 5. **The popup dismisses itself only when it opened one.** `run()` calls `popup.close` on exit only
-   when `HERDR_CHECKIN_POPUP` is set (the launcher sets it) — so a non-popup launch (e.g. manual
-   `herdr-checkin pane` invocation) never closes an unrelated session popup.
+   when `HERDR_CHECKIN_POPUP` is set (the launcher sets it) — so a non-popup launch (e.g. a manual
+   `herdr-checkin pane` invocation, or a future split/overlay launch) never closes an unrelated
+   session popup.
 
 ## 4. herdr API facts (0.7.5, protocol 17)
 
@@ -132,8 +143,7 @@ code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still re
 - **Focus an agent pane:** `herdr agent focus <pane_id>` (jumps workspace/tab/pane). The CLI
   `herdr pane focus` is *directional* only; there is no by-id `pane.focus` CLI. **`agent focus` only
   accepts real *agent* panes** — targeting a plain shell returns `{"error":{"code":"agent_not_found"}}`.
-- **Reply into an agent (USED by inline reply):** `herdr agent prompt <TARGET> <TEXT>`. **Probed live
-  this session** — the load-bearing findings the reply mode is built on:
+- **Reply into an agent (USED by inline reply):** `herdr agent prompt <TARGET> <TEXT>`.
   - **`<TARGET>` is the `pane_id` we already store** (`w4:p1` form). The `agent_session` uuid from
     `agent list` is **rejected** (`agent_not_found`).
   - The reply routes cleanly into the target's session and the agent acts on it.
@@ -144,34 +154,41 @@ code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still re
   - **`--wait --until <state>` is flaky from a non-working start** (returns `timeout` even when the
     submit succeeded), so `prompt_agent` is **fire-and-forget** — "submit accepted" is the success
     boundary for eviction; the pane never blocks on the agent's next turn.
-  - `herdr agent` also exposes `list`/`get`/`read`/`send-keys`/`wait`/`rename`/`start`. `agent list`
-    returns per-agent `agent_status`, `pane_id`, `agent_session` (uuid), `tab_id`, `cwd`, `title`.
+  - `herdr agent` also exposes `list`/`get`/`read`/`send-keys`/`wait`/`rename`/`start`.
 - **Pane info:** `herdr pane list` → `result.panes[]` of `PaneInfo`. Fields we use: `pane_id`,
-  `workspace_id`, `agent_status`, `focused`, plus optional `agent`, `display_agent`, `title`.
+  `workspace_id`, `agent_status`, plus optional `agent`, `display_agent`, `title`. (Note: a **popup
+  pane is NOT in `pane list`** — see the plugin-pane bullet.)
 - **`[[startup]]` hook:** manifest is an array-of-tables with only `command` (required argv) +
   optional `platforms` — no `id`/`on`. Fires **once per server process** (cold start and live-handoff
   takeover). One-shot run-and-exit. Receives the normal plugin env plus `HERDR_PLUGIN_EVENT=startup`;
   **no pane payload** — the hook calls `pane list` itself. Spawned **async and not awaited**, so it
   races the live event loop (see invariant #4).
-- **Plugin pane:** declared via `[[panes]]`; opened with
-  `herdr plugin pane open --plugin <id> --entrypoint <pane-id> --placement <PLACEMENT> --focus`. No
-  push events to a running pane → poll. **`--placement` values: `overlay`, `split`, `tab`, `zoomed`,
-  `popup`** (it's a **CLI flag**, so the launcher can override the manifest's default per-open — no
-  manifest rewrite needed). **We use `popup`:** a centered, session-modal floating popup (like
-  herdr's own `prefix+s` settings), sized via `--width`/`--height` `"NN%"` percentages of the
-  available area (herdr's `PopupSize`); herdr draws the border and the `[[panes]]` `title` on it. A
-  popup is a session-level singleton with no separate focus/close-by-id CLI to manage — the pane
-  dismisses it from the inside by calling the `popup.close` socket method on exit (gated on the
-  launcher-set `HERDR_CHECKIN_POPUP` env var so a non-popup launch never closes an unrelated popup).
-  **Probed live:** `--placement overlay` (the pre-popup choice) runs a persistent, keyboard-
-  interactive TUI that survives blur but is tab-scoped, not a global `prefix+s`-style summon —
-  superseded by `popup` for this plugin.
-- **Env a pane/handler receives:** `HERDR_PLUGIN_STATE_DIR`, `HERDR_BIN_PATH`,
+- **Plugin pane:** declared via `[[panes]]`; opened with `herdr plugin pane open --plugin <id>
+  --entrypoint <pane-id> --placement <PLACEMENT> [--width W --height H] [--env K=V] --focus`. No push
+  events to a running pane → poll. **`--placement` values: `overlay`, `split`, `tab`, `zoomed`,
+  `popup`** — but the CLI `--help` **omits `popup`** (a stale clap value-parser in herdr
+  `src/cli/spec.rs`); the real arg parser accepts and runs it. **We use `popup`:** a centered,
+  session-modal float (like `prefix+s` settings), sized via `--width`/`--height` — an integer cell
+  count or a `"NN%"` percent (herdr's `PopupSize`). On the **CLI** both parse; in the **manifest** a
+  cell count must be a bare integer and a percent a `"NN%"` string. herdr centers it
+  (`resolve_popup_geometry`, default 50%×50%) and draws the border + the `[[panes]]` `title` itself.
+  **Load-bearing popup facts (verified in herdr source + live):** a popup is a **session-level
+  singleton** (`AppState.popup_pane`) that is **not** in `pane list` or the API snapshot and has **no
+  addressable pane_id**; a second open while one is up errors `plugin_pane_open_failed: "popup already
+  open"`; it can only open while herdr's mode is `Terminal`; it **auto-closes when its process dies**
+  (`AppEvent::PaneDied`). Dismiss it from inside via the **`popup.close`** socket method (there is no
+  `herdr popup close` CLI): connect to `$HERDR_SOCKET_PATH`, write one newline-terminated line
+  `{"id":<str>,"method":"popup.close","params":{}}` (herdr's socket protocol is newline-delimited
+  JSON). The pane fires this on exit (gated on `HERDR_CHECKIN_POPUP`). **Background dim is
+  herdr-core-only** — `render_popup_pane` never calls `dim_background`; only `Mode`-driven native
+  modals dim (see §6 note 1). (`--placement overlay`, the pre-popup choice, is tab-scoped and persists
+  on blur but is not a global modal — superseded by `popup`.)
+- **Env a pane/handler receives:** `HERDR_PLUGIN_STATE_DIR`, `HERDR_BIN_PATH`, `HERDR_SOCKET_PATH`,
   `HERDR_PLUGIN_CONTEXT_JSON`, `HERDR_PANE_ID`, `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_ID`.
   **Gotcha:** the id is percent-encoded in the state-dir path (`%41kram012388.checkin`). Always use
-  the `HERDR_PLUGIN_STATE_DIR` env var — never construct the path. (For manual seeding this session it
-  resolved to `~/.local/state/herdr/plugins/%41kram012388.checkin/state.json`, but that's an
-  implementation detail — do not hardcode it in code.)
+  the `HERDR_PLUGIN_STATE_DIR` env var — never construct the path. (This session it resolved to
+  `~/.local/state/herdr/plugins/%41kram012388.checkin/state.json`, but that's an implementation
+  detail — do not hardcode it in code.)
 - **Toast:** `herdr notification show <title> [--body B] --sound none|request|done`.
 
 ## 5. Dev loop
@@ -179,132 +196,94 @@ code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still re
 ```sh
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test   # what CI runs
 cargo build --release
-herdr plugin link "$PWD"                                   # register the local build
+herdr plugin link "$PWD"                                   # register the local build (re-run after a manifest edit)
 herdr plugin action invoke <next|peek|clear|open-pane> --plugin Akram012388.checkin
 herdr plugin log list --plugin Akram012388.checkin        # inspect event/action/startup runs
 ```
 
-**Manual E2E of the pane/queue** (no real agent needed): seed `state.json` directly (find the path
-via the `HERDR_PLUGIN_STATE_DIR` env; running any action once materializes it), open the pane, read
-it with `herdr pane read <pane_id> --source visible` (or `--ansi` for the rendered TUI), and drive
-keys with `herdr pane send-keys <pane_id> <key>`.
+**Manual E2E — seed the queue.** Seed `state.json` directly (find the path via the
+`HERDR_PLUGIN_STATE_DIR` env — running any action once materializes it), then
+`herdr plugin action invoke open-pane` to open the popup.
+
+**Popup E2E is different from a normal pane (important gotcha).** A `popup` pane is a session-level
+singleton — it is **not** in `pane list` and has **no addressable pane_id**, so you cannot
+`herdr pane read`/`send-keys` it by id. To verify:
+- **It opened:** the `open-pane` action's stdout is `{"type":"ok"}` (the popup path), not a
+  `plugin_pane_opened` object with a pane id (that was the old overlay path). `pgrep -f
+  "herdr-checkin pane"` confirms the TUI process is alive (leave it undisturbed — running other herdr
+  CLI commands from another pane can steal focus and close it).
+- **Test/close the close path yourself over the socket** (exactly what the pane fires on exit):
+  connect to `$HERDR_SOCKET_PATH` and write `{"id":"x","method":"popup.close","params":{}}\n`.
+  `"result":{"type":"ok"}` = a popup was open and is now closed; `"error":{"code":"popup_not_open"}`
+  = none was open. (A tiny Python `AF_UNIX` client does this — see this session's transcript.)
+- **The visual (centered/bordered) and keyboard dismissal are user-only** — a popup can't be
+  pane-read, so confirming the modal look + `q`/`Esc` behavior needs a human at the terminal.
 
 **Manual E2E of the inline-reply path** (needs a real agent, since `agent prompt` only accepts agent
-panes — verified this session): in a spare pane, launch `claude`; get its `pane_id` from
-`herdr agent list`; seed a queue entry for it; open the status pane; `send-keys <pane> ' '` to arm
-reply, type text, `send-keys <pane> Enter`; confirm the reply landed in the agent and the entry was
-evicted. To exercise placement, open with `herdr plugin pane open … --placement overlay`. The
-`startup` path can be exercised with a fake `herdr` on `HERDR_BIN_PATH` that prints a canned
-`pane list` (see `tests/cli.rs`).
+panes): in a spare pane, launch `claude`; get its `pane_id` from `herdr agent list`; seed a queue
+entry for it; open the popup; type your reply and press `Enter` **at the real keyboard** (you can't
+`send-keys` a popup by id); confirm the reply landed in the agent and the entry was evicted. The
+`startup` path can be exercised with a fake `herdr` on `HERDR_BIN_PATH` (see `tests/cli.rs`).
 
 **Keybinds** live in the user's `~/.config/herdr/config.toml` (NOT the plugin): `prefix+alt+o` next,
 `prefix+alt+p` peek, `prefix+alt+c` clear, `prefix+alt+q` open-pane. After editing:
 `herdr config check && herdr server reload-config`. (No keybind is needed for `space` reply — that is
-a pane-internal key, handled inside the running TUI.)
+a pane-internal key.)
 
-## 6. Next up (START HERE) — the triage overlay shipped as 0.4.0; only the tag + parked items remain
+## 6. Next up (START HERE)
 
-The **triage overlay was THE chosen interface** (maintainer decision) and is now **built, verified
-live, and cut as 0.4.0**: a status pane that **looks and behaves like a Claude Code agents-view TUI
-session, rendered via herdr's overlay primitive**. The authoritative design (verified probes + Fable
-advisor pass) is [docs/triage-overlay-design.md](docs/triage-overlay-design.md); its §5 was the
-7-slice build plan, **all 7 slices done**.
+### 0. Pending maintainer edits — the immediate task
+The maintainer has a specific set of edits to land and will describe them to you directly at the
+start of the session. **Apply those first.** Keep the CI gate green after each change
+(`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`), then commit/push
+(pre-approved for this repo). Only once those are in should you weigh the items below.
 
-**Immediate next step: none required.** `main` is green and pushed at 0.4.0 but **not tagged** — the
-maintainer tags on request (do NOT tag autonomously). If asked to release, the code/docs/version are
-all in place; tagging `v0.4.0` at the current HEAD is the only remaining act. Otherwise, only the
-**Parked / optional** items below remain, and they all wait on upstream herdr.
+### Release status
+0.4.0 is **cut but not tagged**. All code/docs/version are in place on `main`. Tagging `v0.4.0` at
+HEAD is the maintainer's call — **do NOT tag autonomously.** (Note: the pending edits above may add
+commits on top of the current HEAD before any tag.)
 
-**Data-model guardrail (maintainer + advisor confirmed — do not drift):** the agents-view is a
-**look**, not a pivot. The console stays an **inbox** — only *enqueued waiters* appear, grouped by
-status (CHECKIN = `blocked`, DONE = `done`), FIFO within each. It is **not** a live roster of all
-agents (that is herdr's native view, and cloning it loses). Litmus test for any feature: *does it
-operate on an enqueued entry?* If no, reject.
+### Two open follow-ups the maintainer flagged (both optional)
+1. **Background-dim upstream PR (herdr-core, optional).** The popup does not dim the panes behind it
+   the way `prefix+s` settings does. This is **not fixable from the plugin** — dimming is herdr-core-
+   only (`render_popup_pane` in the herdr source never calls `dim_background`; only its `Mode`-driven
+   native modals do, over `frame.area()`). Closing it means a small (~1-line) contribution to
+   `ogulcancelik/herdr`: call `dim_background(frame, frame.area())` around `render_popup_pane`
+   (`src/ui.rs`, ~the `render_popup_pane` call site), gated on `app.popup_pane.is_some()`. It only
+   takes effect after merge + a herdr release + the user updating herdr — a slow external track. The
+   maintainer chose to **ship 0.4.0 without the dim** (border + centering + title already read as a
+   modal). Draft the PR only if the maintainer asks.
+2. **Popup size tuning (plugin-side, trivial).** The popup is sized `width="60%" height="55%"` — set
+   in **two places that must stay in sync**: the `[[panes]]` entry in `herdr-plugin.toml` (integer =
+   cells, `"NN%"` string = percent) and the `--width`/`--height` flags in `scripts/open-pane.sh`.
+   Retuning is a one-line edit in each; re-run `herdr plugin link "$PWD"` to pick up the manifest
+   change.
 
-### DONE so far (committed, gate green)
-- **Slice 1** (`2806f2a`): `Herdr::prompt_agent(pane_id, text)` → `herdr agent prompt <pane_id>
-  <text>`, fire-and-forget, mirroring `focus_agent`. `FakeHerdr` records prompts. Command-shaping
-  tests live in `src/herdr.rs` (a real `CliHerdr` vs a throwaway fake `herdr` asserting argv + Ok/Err
-  — `tests/cli.rs` can't reach `pub(crate) CliHerdr`).
-- **Slices 2–4** (`646c285`): the **inline reply input mode** in `src/pane.rs`. Landed as one commit
-  because Rust's `-D warnings` dead-code gate flags a model-only slice with no production caller.
-  What exists now:
-  - `ReplyDraft { target, label, buffer }` and `PaneModel.reply: Option<ReplyDraft>`, mirroring the
-    `confirm_clear` modal. Methods: `begin_reply` (arms on the selected entry; captures target+label
-    at arm time; no-op on empty queue or while a clear-confirm is pending), `reply_push`,
-    `reply_backspace`, `cancel_reply`.
-  - `on_reply_submit` (impure handler): route via `herdr.prompt_agent`, then `evict_pane` **only on
-    success** (invariant #2); keep-on-failure with a `reply failed: …` status; empty/whitespace
-    buffer sends nothing and stays in reply mode.
-  - `event_loop`: a **top-priority reply-key guard** hoisted above the `confirm_clear` and normal
-    branches (chars → buffer; `Enter` → submit; `Backspace` → edit; `Esc`/click → cancel; `Ctrl-C`
-    still quits). A `space` binding in the normal branch calls `begin_reply`.
-  - `draw` footer renders the draft via `reply_prompt(label, buffer)`; `FOOTER_HINTS` lists
-    `space reply`.
-  - Support: `agent_label` extracted to `src/actions.rs` (shared list+footer naming);
-    `FakeHerdr::with_failing_prompt` for the keep-on-failure test.
-- **Slice 5** (`74220d2`): the **grouped agents-view render** in `src/pane.rs` — the CC-agents-view
-  look. Pure view + click-mapping; no new model state, no queue-invariant surface. What exists now:
-  - `layout_rows(&[QueueEntry]) -> Vec<Row>` groups the FIFO queue into sections — `AWAITING YOU`
-    (`blocked`) then `DONE` (`done`), FIFO within each — as a pure view transform. `Row` is
-    `Header(&'static str) | Entry(usize)`; each `Entry` keeps its **original index into `entries`**,
-    and a section header is emitted only when that section is non-empty. It never reorders `entries`.
-  - `draw` renders through `layout_rows` and highlights the display row carrying `model.selected`
-    (headers are never selected). The leading `N.` numbering is gone — section membership + the `>`
-    cursor replace it.
-  - `selected` stays an **index into `entries`** (design doc §4 option a); only `draw` and
-    `row_for_click` learn the header offsets, so `selected_pane_id`/`sync`/reply-target capture are
-    untouched. **`j`/`k` traverse in on-screen display order** (`PaneModel::display_order` — the same
-    `layout_rows` grouping projected to its entries), so the cursor moves monotonically down-screen
-    even when the FIFO queue interleaves blocked/done. The selection *representation* is unchanged (an
-    entry index); only the traversal *order* is derived from the layout, so it can't drift from paint.
-  - `row_for_click(area, offset, &rows, col, row)` maps a click back to an entry index via the
-    grouped `rows`, returning `None` on a header (a header click selects nothing). `on_mouse`
-    recomputes `layout_rows` — entries are unchanged between draw and the click, so it reproduces
-    exactly what was painted.
-  - `WaitStatus` re-export in `lib.rs` is no longer test-only (production `draw`/`layout_rows` name
-    it). Tests: `layout_rows` grouping/FIFO/empty-section, header-skip on click, updated click/mouse.
-- **Slice 6** (`f29f4dc`): the **overlay launcher** — `scripts/open-pane.sh`'s open now uses
-  `--placement overlay` (the split-only `--direction right` dropped; it has no meaning for a centered
-  overlay). The open/focus/close toggle is unchanged (it keys off the pane `label`, placement-
-  independent), so the decision logic + its tests are untouched. **Verified live in herdr 0.7.5**
-  (first full end-to-end run of the console): grouped AWAITING-YOU/DONE render on an interleaved
-  queue; `j`/`k` stepped A→C→B→D across the section boundary and clamped; `d`/`c`+`y` evicted through
-  the overlay; the overlay persisted on blur and kept rendering; and `space` reply on a **real claude
-  agent** routed the typed text into its session via `herdr agent prompt` (the agent began acting) and
-  evicted the entry on submit success with a `replied to Claude` footer.
-
-- **Slice 7 — docs + the bundled release (cut as 0.4.0).** `README.md` rewritten for the overlay/
-  agents-view console (the `space` reply key, the grouped AWAITING-YOU/DONE sections, headers non-
-  selectable, the fire-and-forget reply semantics) with a **refreshed demo gif** (`docs/pane-demo.gif`,
-  via the updated `scripts/pane-demo.tape` — the tape now shows the grouped view + a `space` reply,
-  rendered offline with the fake herdr; the `*` catch-all covers `agent prompt`). `CHANGELOG.md` has a
-  `[0.4.0] - 2026-07-22` section bundling the overlay, inline reply, grouped render, clear-all,
-  mouse-select, and the module split. Version bumped to **0.4.0** in `Cargo.toml`, `herdr-plugin.toml`,
-  and `Cargo.lock`. **Not tagged** (maintainer tags on request).
-
-### The release is cut — remaining action is the maintainer's tag
-Everything for 0.4.0 is committed and pushed on `main`. The only unreleased step is tagging `v0.4.0`
-at HEAD, which is the maintainer's call — do NOT tag autonomously. Beyond that, see **Parked /
-optional** below (all upstream-gated).
-
-(Commit/push at own discretion is pre-approved for this repo — see the memory index.)
-
-### Parked / optional (unchanged)
-- **Idempotent-toggle identity** — `open-pane` identifies the status pane by `label` ("Check-in");
-  switch `PaneInfo::is_status_pane` to plugin/entrypoint identity if herdr ever exposes it in
-  `pane list`. Waits on upstream.
-- **Global-summon overlay** — the tab-scoped overlay is verified; a global `prefix+s`-style summon is
-  not, and is off the critical path (design doc §1 caveat).
+### Parked / optional (all upstream-gated)
+- **Global-summon popup** — the popup is summoned by a herdr keybind (`prefix+alt+q`) and is
+  session-global, which is the value. A dedicated `prefix+s`-style global-summon binding for it is
+  not wired; low priority.
 - **Docs note** — herdr 0.7.5 made plugin install/enabled state global-per-user; only relevant if a
   per-session-install section is ever added to the README.
 
-### Suggested skills for the next session
-- **`/herdr`** — control herdr from inside it (only when `HERDR_ENV=1`): split panes, spawn/read
-  agents, run `herdr agent prompt`/`focus`. The tool for the slice-6 manual E2E.
-- **`demo-gif`** — regenerate the README demo gif in slice 7 (VHS-based).
-- **A Fable-5 advisor subagent** — for a genuine load-bearing call during the build, used sparingly.
-  The strategic queue-vs-native design call is already settled (design doc §2/§7).
+### How we got here (overlay → popup, one paragraph)
+The feature was designed and built as a 7-slice "triage overlay" (`--placement overlay`, full-tab;
+committed slices 1–7, cut as 0.4.0 at `1a618ae`). The maintainer then pushed back that it should look
+like herdr's `prefix+s` settings, and — since herdr is OSS — a source study (clone → Sonnet researcher
+→ Fable advisor) proved herdr has a **`popup`** placement giving the centered-modal look with **zero
+herdr changes** (the CLI `--help` hides `popup` behind a stale value-parser). The pane was switched to
+`popup` (`1d21213`): renamed the first section `AWAITING YOU`→`CHECKIN`, added blank-line group
+spacing, slimmed the header (herdr draws "Check-in" on the border), added `popup.close`-on-exit +
+close-on-jump, removed the now-dead open/focus/close toggle, bumped `min_herdr_version` to 0.7.5, and
+shipped without the background dim. All verified live in herdr 0.7.5. Full per-slice history is in the
+git log and `CHANGELOG.md`.
+
+### Suggested skills
+- **`/herdr`** — control herdr from inside it (`HERDR_ENV=1`): split panes, spawn/read agents, run
+  `herdr agent prompt`/`focus`. The tool for any live E2E.
+- **`demo-gif`** — regenerate the README demo gif (VHS; `scripts/pane-demo.tape`, no real agents).
+- **Sonnet-5 subagents** for research/exploration and mechanical edits (maintainer preference: delegate
+  mechanical work); a **Fable-5 advisor subagent** for a genuine load-bearing call, used sparingly.
 - **`/handoff`** — to snapshot again at the end of the next session.
 
 ## 7. How we work here (see CLAUDE.md for the short version)
@@ -312,13 +291,13 @@ optional** below (all upstream-gated).
 - **Model tiers:** Opus orchestrates (plan/decide/integrate/own correctness); Sonnet subagents do
   research, exploration, scoping, and mechanical implementation; a Fable subagent is the advisor for
   genuine doubt on load-bearing decisions — used sparingly.
-- **Design gate before code, adversarial review after.** This has paid off repeatedly (the
-  `[[startup]]` race the Fable advisor caught → invariant #3; v0.2.0's clinical review found two
-  ping-loss bugs; this session a probe corrected the design's target-capture and the overlay
-  placement assumptions). Keep doing it for anything touching the queue's mutation/prune paths.
-- **Verify foundations first.** Confirm an API contract with a throwaway probe/schema check before
-  building on it (done this session for `agent prompt`'s target + the `overlay` placement before the
-  reply mode was written).
+- **Design gate before code, adversarial review after.** This keeps paying off: the `[[startup]]`
+  race the Fable advisor caught → invariant #3; v0.2.0's clinical review found two ping-loss bugs;
+  and the overlay→popup pivot came from taking a maintainer pushback seriously and reading the herdr
+  source rather than trusting the CLI `--help`.
+- **Verify foundations first.** Confirm an API contract with a throwaway probe or a source read before
+  building on it — e.g. `agent prompt`'s target, and the `popup` placement's existence, wire shape,
+  and lifecycle were all confirmed against herdr 0.7.5 source before the switch.
 - **Tracer-bullet slices, each green.** Small commits that each keep `fmt + clippy -D warnings + test`
   passing. When Rust's dead-code gate would force a lint suppression on a caller-less seam, prefer
-  merging the seam with its first real caller over sprinkling `allow(dead_code)` (see slices 2–4).
+  merging the seam with its first real caller over sprinkling `allow(dead_code)`.
