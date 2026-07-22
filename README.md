@@ -31,9 +31,38 @@ consistent.
 | `Akram012388.checkin.next` | Focus the oldest waiting agent and pop it from the queue. Cross-workspace jumps are allowed. Stale entries (pane gone, or resumed to `working`) are skipped. An empty queue is a clean no-op. |
 | `Akram012388.checkin.peek` | Show the current queue as a herdr toast — how many agents are waiting, and for each: agent, status, title, workspace, and how long it has waited. |
 | `Akram012388.checkin.clear` | Empty the queue. |
+| `Akram012388.checkin.open-pane` | Open the **status pane** (see below) — a persistent, keyboard-driven queue view in a split. |
 
 `next` uses `herdr agent focus`, which brings the agent's workspace, tab, and pane all into
 view, so a single press takes you straight to the waiting agent wherever it lives.
+
+## The status pane
+
+`open-pane` opens a persistent TUI in a split — "mission control" for pending agents, a richer
+alternative to the transient `peek` toast. It lists the live queue and lets you jump without
+leaving the keyboard:
+
+```
+Check-in — 2 agents waiting
+> 1. Claude — blocked — needs your input [wA, 3m]
+  2. Codex — done — build finished [wB, just now]
+j/k move  ·  Enter jump  ·  d drop  ·  q quit
+```
+
+| Key | Action |
+| --- | --- |
+| `j` / `k` (or down / up) | Move the selection. |
+| `Enter` | Jump to the selected agent (`herdr agent focus`, cross-workspace) and drop it from the queue. If the jump fails, the entry stays and the error shows in the footer. |
+| `d` | Drop the selected entry without jumping. |
+| `q` / `Esc` | Close the pane. |
+
+The pane refreshes itself — herdr delivers events only to short-lived handlers, not to a
+running pane, so it re-reads the shared queue on a 250ms tick. As agents queue and drain (or you
+act elsewhere), the list and the waiting-times update on their own.
+
+Opening the pane again opens a second split rather than toggling; that's only cosmetic — every
+pane reads the same queue and all changes go through a lockfile, so nothing is lost or corrupted.
+Close extras with `q`. (An idempotent open-or-focus toggle is planned.)
 
 ## Install
 
@@ -44,7 +73,7 @@ Cargo).
 herdr plugin install Akram012388/herdr-checkin
 ```
 
-herdr clones the repo, runs the build step, and registers the three actions. Manage it with:
+herdr clones the repo, runs the build step, and registers the actions. Manage it with:
 
 ```sh
 herdr plugin list
@@ -71,8 +100,17 @@ Reload the config after editing:
 herdr config check && herdr server reload-config
 ```
 
-Then press your herdr prefix (default `ctrl+b`) followed by `alt+o`. `peek` and `clear` can be
-bound the same way if you want them on keys.
+Then press your herdr prefix (default `ctrl+b`) followed by `alt+o`. `peek`, `clear`, and
+`open-pane` can be bound the same way — for example `prefix+alt+p` for `peek` and a key of your
+choice for `open-pane`:
+
+```toml
+[[keys.command]]
+key = "prefix+alt+p"
+type = "plugin_action"
+command = "Akram012388.checkin.peek"
+description = "check-in: peek queue"
+```
 
 ## Local development
 
