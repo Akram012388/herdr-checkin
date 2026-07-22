@@ -10,20 +10,24 @@
 //! herdr invokes this binary once per event and once per action; all state
 //! lives in `state.json` under `HERDR_PLUGIN_STATE_DIR`, guarded by a lockfile.
 
-use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 
 mod herdr;
 mod pane;
+mod queue;
 mod state;
 
-use herdr::{parse_event_string, parse_status_event, CliHerdr, StatusEvent};
+use herdr::{CliHerdr, StatusEvent};
+use queue::{enqueue, is_live, on_closed, on_focused, on_status_changed};
 
 pub(crate) use herdr::Herdr;
-pub(crate) use state::{
-    current_unix_ms, load_entries, PluginError, QueueEntry, StateStore, WaitStatus,
-};
+pub(crate) use queue::evict;
+pub(crate) use state::{current_unix_ms, load_entries, PluginError, QueueEntry, StateStore};
+// Only pane.rs's test fixtures name `WaitStatus` directly (production code only ever reaches it
+// through `QueueEntry::status`), so the re-export is test-only to keep the release build clean.
+#[cfg(test)]
+pub(crate) use state::WaitStatus;
 
 /// Entrypoint used by `main`: parse argv, read the herdr-provided environment,
 /// dispatch, and translate the result into a process exit code.
@@ -89,51 +93,6 @@ fn run(subcommand: Subcommand, runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Resul
         // Handled in `run_from_env` before the environment is read.
         Subcommand::PaneDecision => unreachable!("pane-decision is dispatched before run()"),
     }
-}
-
-// --- event handlers (pure queue transitions; no herdr calls) ---------------
-
-/// `pane.agent_status_changed`: enqueue on `blocked`/`done`, evict on `working`.
-/// Other statuses (`idle`, `unknown`) leave the queue untouched.
-fn on_status_changed(runtime: &RuntimeEnv) -> Result<(), PluginError> {
-    let Some(event) = runtime.event_json.as_deref().and_then(parse_status_event) else {
-        return Ok(());
-    };
-
-    let now_ms = runtime.now_ms;
-    StateStore::new(&runtime.state_dir).update(|mut entries| {
-        match event.wait_status() {
-            Some(status) => enqueue(&mut entries, &event, status, now_ms),
-            None if event.is_working() => evict(&mut entries, &event.pane_id),
-            None => {}
-        }
-        (entries, ())
-    })
-}
-
-/// `pane.focused`: you looked at the pane, so it no longer needs your attention.
-fn on_focused(runtime: &RuntimeEnv) -> Result<(), PluginError> {
-    evict_event_pane(runtime)
-}
-
-/// `pane.closed`: the pane is gone, drop any queued entry for it.
-fn on_closed(runtime: &RuntimeEnv) -> Result<(), PluginError> {
-    evict_event_pane(runtime)
-}
-
-fn evict_event_pane(runtime: &RuntimeEnv) -> Result<(), PluginError> {
-    let Some(pane_id) = runtime
-        .event_json
-        .as_deref()
-        .and_then(|raw| parse_event_string(raw, "pane_id"))
-    else {
-        return Ok(());
-    };
-
-    StateStore::new(&runtime.state_dir).update(|mut entries| {
-        evict(&mut entries, &pane_id);
-        (entries, ())
-    })
 }
 
 // --- actions ---------------------------------------------------------------
@@ -255,52 +214,6 @@ fn startup(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
         }
         (entries, ())
     })
-}
-
-// --- queue transitions -----------------------------------------------------
-
-/// Add or refresh an entry for a pane. Deduplicates per pane: if the pane is
-/// already queued, its fields and status are updated in place, preserving its
-/// FIFO position and original `enqueued_at_ms` (it has been waiting since the
-/// first ping). Otherwise it is appended to the back.
-///
-/// Either way it stamps `last_touched_ms = now_ms`. `enqueued_at_ms` drives FIFO order and the
-/// "waited" display; `last_touched_ms` records this refresh so `next`/`peek`'s prune guard can tell
-/// a just-refreshed persisted entry from a genuinely stale one (see those functions).
-fn enqueue(entries: &mut Vec<QueueEntry>, event: &StatusEvent, status: WaitStatus, now_ms: u64) {
-    if let Some(existing) = entries.iter_mut().find(|e| e.pane_id == event.pane_id) {
-        existing.workspace_id = event.workspace_id.clone();
-        existing.agent = event.agent.clone();
-        existing.display_agent = event.display_agent.clone();
-        existing.title = event.title.clone();
-        existing.status = status;
-        existing.last_touched_ms = now_ms;
-    } else {
-        entries.push(QueueEntry {
-            pane_id: event.pane_id.clone(),
-            workspace_id: event.workspace_id.clone(),
-            agent: event.agent.clone(),
-            display_agent: event.display_agent.clone(),
-            title: event.title.clone(),
-            status,
-            enqueued_at_ms: now_ms,
-            last_touched_ms: now_ms,
-        });
-    }
-}
-
-/// Remove any entry for the given pane.
-fn evict(entries: &mut Vec<QueueEntry>, pane_id: &str) {
-    entries.retain(|entry| entry.pane_id != pane_id);
-}
-
-/// A queued pane is still worth jumping to if it exists and has not resumed
-/// working. Missing pane => gone; `working` => the agent picked back up.
-fn is_live(live: &HashMap<String, String>, pane_id: &str) -> bool {
-    match live.get(pane_id) {
-        Some(status) => status != "working",
-        None => false,
-    }
 }
 
 // --- toast copy ------------------------------------------------------------
@@ -442,6 +355,7 @@ mod tests {
     use serde_json::Value;
     use state::{read_state, STATE_FILE_NAME};
     use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
 
