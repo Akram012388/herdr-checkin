@@ -6,10 +6,12 @@ and the model-tier strategy: [CLAUDE.md](CLAUDE.md).
 
 **Version:** 0.3.0 (0.4.0 unreleased, pending the maintainer's go) · **License:** MIT · **Repo:**
 https://github.com/Akram012388/herdr-checkin · **State:** `main` is green (fmt + clippy + test) and
-pushed (HEAD `5fecc57`). No open branches, no worktrees. There is an unshipped `[Unreleased]`
+pushed (HEAD `ba83f02`). No open branches, no worktrees. There is an unshipped `[Unreleased]`
 CHANGELOG set (mouse-select, clear-all, README demo, internal module split), and the plugin passed a
-full **manual end-to-end test in real herdr** this session (see §6). Nothing is tagged (maintainer
-tags on request). **START AT §6 — the immediate task is the maintainer's (a)/(b) decision.**
+full **manual end-to-end test in real herdr** (see §6). The **triage-overlay direction is now
+design-gated** in [docs/triage-overlay-design.md](docs/triage-overlay-design.md) — both option-(b)
+unknowns were probed against real herdr and passed. Nothing is tagged (maintainer tags on request).
+**START AT §6 — a release-timing choice remains: prep 0.4.0 first, or start the 0.5.0 overlay build.**
 
 ---
 
@@ -156,23 +158,33 @@ visible`, and drive keys with `herdr pane send-keys <pane_id> <key>`. For the `s
 `prefix+alt+p` peek, `prefix+alt+c` clear, `prefix+alt+q` open-pane. After editing:
 `herdr config check && herdr server reload-config`.
 
-## 6. Next up (START HERE) — a maintainer decision is pending
+## 6. Next up (START HERE) — probes done + design-gated; a release-timing choice remains
 
-At the end of the prior session, Claude asked the maintainer to choose. **Pick up by acting on their
-answer** to:
+**Update (this session, HEAD `ba83f02`):** the maintainer chose **(b)** — the two triage-overlay
+unknowns were **probed against real herdr 0.7.5 and both passed**, and the overlay direction is now
+**design-gated** in [docs/triage-overlay-design.md](docs/triage-overlay-design.md) (with a Fable
+advisor pass). Probe findings, verbatim, live in that doc §1; the short version:
+- **Overlay placement works** — a persistent, keyboard-interactive TUI that survives blur. The enum
+  is **`overlay`** (not `popup`), and it's a `plugin pane open --placement` **CLI flag**, so
+  offering it is a one-line launcher change, not a manifest rewrite.
+- **`agent prompt` routes an inline reply by the `pane_id` we already store** (the `agent_session`
+  uuid is rejected). **`blocked` is narrower than "waiting for me"** — a Claude prose-question reads
+  as `done`/`idle`, so the queue keys on `done` and uses acknowledgment (jump/reply/drop + evict-on-
+  focus) rather than sniffing status. `--wait --until` is flaky from a non-working start → reply
+  should be fire-and-poll, not `--wait`-gated.
 
-> (a) **Prep the 0.4.0 release now**, and park the "triage overlay" idea (below) as the next design
->     task; or
-> (b) **Verify the two triage-overlay unknowns first**, before deciding.
+**The remaining choice (pick up here):**
 
-Everything from the prior session is committed and pushed (HEAD `5fecc57`). The prior session:
-shipped the whole `src/pane.rs` lane — **Feature A** (mouse click-to-select), **Feature B** (`c`
-clear-all with confirm), **Feature C** (README demo GIF) — all in the `[Unreleased]` CHANGELOG;
-split the `lib.rs` god-file into modules (§2); verified the install setup against herdr standards;
-and ran a full **manual E2E test in real herdr that passed** (pane launch/render/refresh, live
-enqueue, real event delivery + auto-eviction, mouse-select, clear-all confirm, `Enter` graceful
-focus-failure *and* success, `peek`, plus durability across a ~2.5 h gap). Details live in the
-commit history and `CHANGELOG.md` — not repeated here.
+> (a) **Prep the 0.4.0 release now** (the `[Unreleased]` set), then start the 0.5.0 overlay build; or
+> (b) **Start building the 0.5.0 triage overlay** straight from the design doc (§5 has the 6-slice
+>     build plan), and fold 0.4.0 in whenever.
+
+Everything is committed and pushed (HEAD `ba83f02`). The `[Unreleased]` CHANGELOG set from the prior
+session — **Feature A** (mouse click-to-select), **Feature B** (`c` clear-all with confirm),
+**Feature C** (README demo GIF), the `lib.rs` module split — is still unshipped and passed a full
+**manual E2E test in real herdr** (pane launch/render/refresh, live enqueue, real event delivery +
+auto-eviction, mouse-select, clear-all confirm, `Enter` graceful focus-failure *and* success,
+`peek`, durability across a ~2.5 h gap). Details live in the commit history and `CHANGELOG.md`.
 
 ### If (a) — prep 0.4.0 (mechanical, ~15 min)
 1. In `CHANGELOG.md`, rename `## [Unreleased]` → `## [0.4.0] - <today's date>`.
@@ -183,8 +195,12 @@ commit history and `CHANGELOG.md` — not repeated here.
 
 (Commit/push at own discretion is pre-approved for this repo — see the memory index.)
 
-### If (b) — verify the two unknowns, then re-decide
-Run the two probes under "unknowns" below, report findings, then re-ask (a) vs. proceed to build.
+### If (b) — start the 0.5.0 triage-overlay build
+Follow [docs/triage-overlay-design.md](docs/triage-overlay-design.md) §5 — a 6-slice tracer-bullet
+plan (add `Herdr::prompt_agent`; a `PaneModel` reply mode mirroring `confirm_clear`; submit →
+evict-on-success; the `space` binding; the launcher `--placement overlay` switch; docs). Each slice
+keeps the CI gate (§5) green. The two unknowns are already verified (see the update above), so no
+more probing is needed before code.
 
 ---
 
@@ -204,23 +220,24 @@ summoned like herdr's `prefix+s`, rather than a persistent split.
 - `delete` -> our existing `evict` (`d`).
 - group-by-status <- `herdr agent list`.
 
-**Two load-bearing unknowns to verify BEFORE committing (option (b)):**
-1. **Does herdr `placement = "popup"` / `"overlay"` support a persistent, keyboard-interactive TUI
-   pane?** Popups may be built for transient content that dismisses on blur, or may not route full
-   keyboard focus to a plugin process the way a `split` does. If not, keep it a split — the
-   *interaction* is the value; placement is negotiable. **Probe:** a throwaway manifest with
-   `placement="popup"` + `herdr server reload-config`, open it, test typing + persistence-on-blur.
-   This is the gating question for the whole overlay direction.
-2. **`agent prompt` target + blocked behavior:** does `<TARGET>` take the `pane_id` we store
-   (`w4:p1`) or the `agent_session` uuid from `agent list`? And does prompting a *blocked* agent
-   cleanly answer its prompt? **Probe:** one live `herdr agent prompt <a real test agent> "<text>"`.
+**The two load-bearing unknowns are now RESOLVED** (probed against real herdr 0.7.5; full findings in
+[docs/triage-overlay-design.md](docs/triage-overlay-design.md) §1):
+1. **Overlay placement — YES.** `plugin pane open --placement overlay` runs a persistent,
+   keyboard-interactive TUI that survives blur. The enum is **`overlay`** (not `popup`), and it's a
+   **CLI flag** (no manifest rewrite / `reload-config` needed). Caveat: it's tab-scoped, not a global
+   `prefix+s`-style summon — that flavor is unverified and off the critical path.
+2. **`agent prompt` target — the `pane_id` we store** (`w4:p1` form); the `agent_session` uuid is
+   rejected. Inline reply routes cleanly and the agent acts. **But `blocked` is narrower than
+   "waiting for me"** — a Claude prose-question reads as `done`/`idle`, so key on `done` +
+   acknowledgment, not status-sniffing. `--wait --until` is flaky from a non-working start → reply is
+   fire-and-poll, not `--wait`-gated.
 
-**Strategic caution (worth a Fable-5 advisor pass):** herdr's *native* `agent list` already renders
-a live status view resembling that Claude Code screenshot. This plugin's differentiator is the
-**durable FIFO queue** (remembers pings across toast-fade, restart, simultaneous blocks). Keep the
-queue as the backbone and layer inline-reply on top — do **not** drift into re-implementing herdr's
-built-in view. Queue-plus-inline-action is additive; a pure live mirror is not. (Reference
-screenshots of the Claude Code agents view were shared in the prior chat; not saved to the repo.)
+**Strategic frame (Fable advisor pass, done — see design doc §2/§7):** herdr's *native* `agent list`
+renders live status; this plugin's differentiator is the **durable FIFO queue** (memory across
+toast-fade / restart / simultaneous blocks). Hold the line: the console is an **inbox** of
+unacknowledged pings, **not a roster**. Litmus test for any feature — *does it operate on an enqueued
+entry?* The reply feedback loop stays an inbox (not a treadmill) because **reply evicts immediately**;
+a later turn-end re-enqueues at the tail as fresh debt.
 
 ### Parked / optional (unchanged)
 - **Idempotent-toggle identity** — `open-pane` identifies the status pane by `label` ("Check-in");
@@ -231,9 +248,10 @@ screenshots of the Claude Code agents view were shared in the prior chat; not sa
 
 ### Suggested skills for the next session
 - **`/herdr`** — control herdr from inside it (only when `HERDR_ENV=1`): split panes, spawn/read
-  agents, run `herdr agent prompt`/`focus`, drive the option-(b) probes.
-- **A Fable-5 advisor subagent** — for the strategic queue-vs-native-view call, used sparingly for
-  genuine load-bearing doubt (this repo's design-gate pattern; see §7).
+  agents, run `herdr agent prompt`/`focus`. Handy for manual E2E of the 0.5.0 reply path (seed
+  `state.json`, spawn a throwaway agent, prompt it by `pane_id`).
+- **A Fable-5 advisor subagent** — for a load-bearing call during the build (used sparingly). The
+  strategic queue-vs-native design call is already settled (design doc §2/§7).
 - **`/handoff`** — to snapshot again at the end of the next session.
 
 ## 7. How we work here (see CLAUDE.md for the short version)
