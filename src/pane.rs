@@ -23,10 +23,12 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use std::time::Duration;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// How long the input poll blocks each tick before we re-read the queue and repaint, so queue
 /// changes and the ticking "waited" column appear promptly without busy-spinning.
@@ -491,6 +493,20 @@ fn layout_rows(entries: &[QueueEntry]) -> Vec<Row> {
     rows
 }
 
+/// The most input rows the compose strip shows at once; longer replies scroll, keeping the last
+/// [`MAX_INPUT_ROWS`] lines (the tail, where the cursor is). Replies are short by design and
+/// vertical space in the popup is scarce, so the strip stays small.
+const MAX_INPUT_ROWS: usize = 3;
+
+/// Precomputed layout for the inline-reply compose strip: the live draft, its buffer wrapped into
+/// display-width lines, and the resulting input height (wrapped line count, capped at
+/// [`MAX_INPUT_ROWS`]). Computed up front in [`draw`] because the height drives the vertical split.
+struct ComposeLayout<'a> {
+    draft: &'a ReplyDraft,
+    lines: Vec<String>,
+    height: u16,
+}
+
 fn draw(
     frame: &mut Frame,
     model: &PaneModel,
@@ -498,12 +514,37 @@ fn draw(
     list_state: &mut ListState,
     list_area: &mut Option<Rect>,
 ) {
-    let areas = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .split(frame.area());
+    let interior = frame.area();
+
+    // In reply mode the single footer line expands into a compose strip docked below the list: a
+    // titled rule, a 1..=MAX_INPUT_ROWS input, and a hint row. The input height is the wrapped line
+    // count; compute the wrap up front because it drives the vertical split.
+    let compose = model.reply.as_ref().map(|draft| {
+        let lines = wrap_display(&draft.buffer, input_width(interior.width));
+        let height = lines.len().clamp(1, MAX_INPUT_ROWS) as u16;
+        ComposeLayout {
+            draft,
+            lines,
+            height,
+        }
+    });
+
+    let areas = match &compose {
+        Some(c) => Layout::vertical([
+            Constraint::Length(1),        // count header
+            Constraint::Min(0),           // the queue (dimmed while composing)
+            Constraint::Length(1),        // titled rule
+            Constraint::Length(c.height), // input
+            Constraint::Length(1),        // hint
+        ])
+        .split(interior),
+        None => Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(interior),
+    };
 
     frame.render_widget(
         Paragraph::new(header_text(model.entries.len())).bold(),
@@ -518,69 +559,284 @@ fn draw(
             areas[1],
         );
     } else {
-        // The CC-agents-view look: entries grouped into status sections with non-selectable
-        // headers. `layout_rows` is a pure view over the FIFO queue — it never reorders `entries`,
-        // so `selected` stays an index into `entries` and we translate it to its on-screen row here.
-        let rows = layout_rows(&model.entries);
-        let items: Vec<ListItem> = rows
-            .iter()
-            .map(|row| match row {
-                Row::Spacer => ListItem::new(""),
-                Row::Header(title) => ListItem::new(*title).bold(),
-                Row::Entry(index) => ListItem::new(describe_entry(&model.entries[*index], now_ms)),
-            })
-            .collect();
-        let list = List::new(items)
-            .highlight_style(Style::new().reversed())
-            .highlight_symbol("> ");
-        // Highlight the display row that carries the selected entry (headers are never selected).
-        let selected_row = rows
-            .iter()
-            .position(|row| matches!(row, Row::Entry(index) if *index == model.selected));
-        list_state.select(selected_row);
-        // Reserve the right-most column for a scrollbar when the grouped rows overflow the
-        // viewport, so the list text never collides with the thumb. `List`+`ListState` already
-        // scrolls to keep the selection in view; the scrollbar only makes that off-screen content
-        // discoverable. Each `ListItem` is one row, so display-row count == item count == the units
-        // `list_state.offset()` counts in.
-        let viewport = areas[1].height as usize;
-        let overflow = rows.len() > viewport;
-        let list_rect = if overflow {
-            Rect {
-                width: areas[1].width.saturating_sub(1),
-                ..areas[1]
-            }
-        } else {
-            areas[1]
-        };
-        // Record the list's rect for this frame so mouse clicks can be hit-tested against exactly
-        // what was painted; `render_stateful_widget` updates `list_state`'s scroll offset in place.
-        *list_area = Some(list_rect);
-        frame.render_stateful_widget(list, list_rect, list_state);
-        if overflow {
-            let track = Rect {
-                x: areas[1].x + areas[1].width - 1,
-                width: 1,
-                ..areas[1]
-            };
-            render_list_scrollbar(frame, track, rows.len(), viewport, list_state.offset());
-        }
+        draw_list(
+            frame,
+            model,
+            now_ms,
+            list_state,
+            list_area,
+            areas[1],
+            compose.as_ref(),
+        );
     }
 
-    let footer = if let Some(draft) = &model.reply {
-        reply_prompt(&draft.label, &draft.buffer)
-    } else if model.confirm_clear {
-        confirm_prompt(model.entries.len())
-    } else {
-        model.status.as_deref().unwrap_or(FOOTER_HINTS).to_string()
-    };
-    frame.render_widget(Paragraph::new(footer).dim(), areas[2]);
+    match &compose {
+        // Composing: darken the header + queue as one veil so the strip is the only lit surface
+        // (focus by receding everything else, not by brightening the input), then draw the strip.
+        Some(c) => {
+            let veil = Rect {
+                height: areas[0].height + areas[1].height,
+                ..areas[0]
+            };
+            dim_area(frame, veil);
+            draw_compose(frame, c, areas[2], areas[3], areas[4]);
+        }
+        // Navigating: the one-line footer carries the clear-confirm, a transient status, or hints.
+        None => {
+            let footer = if model.confirm_clear {
+                confirm_prompt(model.entries.len())
+            } else {
+                model.status.as_deref().unwrap_or(FOOTER_HINTS).to_string()
+            };
+            frame.render_widget(Paragraph::new(footer).dim(), areas[2]);
+        }
+    }
 }
 
-/// The footer shown while composing an inline reply: who it goes to, the text so far, and the
-/// keys. A trailing `_` marks the caret (we don't drive the terminal's own cursor in the pane).
-fn reply_prompt(label: &str, buffer: &str) -> String {
-    format!("reply to {label}: {buffer}_   (enter send · esc cancel)")
+/// Render the grouped queue into `area`, recording the painted rect into `list_area` for click
+/// hit-testing and drawing a scrollbar when the rows overflow. `compose` decides the highlight:
+/// while navigating, the live selection in reversed video; while composing, only a plain `> ` marker
+/// on the captured reply target (the whole list is dimmed by the caller, and reversed+dim renders
+/// unreliably across terminals).
+fn draw_list(
+    frame: &mut Frame,
+    model: &PaneModel,
+    now_ms: u64,
+    list_state: &mut ListState,
+    list_area: &mut Option<Rect>,
+    area: Rect,
+    compose: Option<&ComposeLayout>,
+) {
+    // The CC-agents-view look: entries grouped into status sections with non-selectable headers.
+    // `layout_rows` is a pure view over the FIFO queue — it never reorders `entries`, so `selected`
+    // stays an index into `entries` and we translate it to its on-screen row here.
+    let rows = layout_rows(&model.entries);
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|row| match row {
+            Row::Spacer => ListItem::new(""),
+            Row::Header(title) => ListItem::new(*title).bold(),
+            Row::Entry(index) => ListItem::new(describe_entry(&model.entries[*index], now_ms)),
+        })
+        .collect();
+
+    let (highlight_index, highlight_style) = match compose {
+        Some(c) => (
+            model
+                .entries
+                .iter()
+                .position(|e| e.pane_id == c.draft.target),
+            Style::new(),
+        ),
+        None => (Some(model.selected), Style::new().reversed()),
+    };
+    // Highlight the display row that carries the highlighted entry (headers are never selected).
+    let selected_row = highlight_index.and_then(|target| {
+        rows.iter()
+            .position(|row| matches!(row, Row::Entry(index) if *index == target))
+    });
+    list_state.select(selected_row);
+
+    let list = List::new(items)
+        .highlight_style(highlight_style)
+        .highlight_symbol("> ");
+
+    // Reserve the right-most column for a scrollbar when the grouped rows overflow the viewport, so
+    // the list text never collides with the thumb. `List`+`ListState` already scrolls to keep the
+    // selection in view; the scrollbar only makes that off-screen content discoverable. Each
+    // `ListItem` is one row, so display-row count == item count == the units `offset()` counts in.
+    let viewport = area.height as usize;
+    let overflow = rows.len() > viewport;
+    let list_rect = if overflow {
+        Rect {
+            width: area.width.saturating_sub(1),
+            ..area
+        }
+    } else {
+        area
+    };
+    // Record the list's rect for this frame so mouse clicks can be hit-tested against exactly what
+    // was painted; `render_stateful_widget` updates `list_state`'s scroll offset in place.
+    *list_area = Some(list_rect);
+    frame.render_stateful_widget(list, list_rect, list_state);
+    if overflow {
+        let track = Rect {
+            x: area.x + area.width - 1,
+            width: 1,
+            ..area
+        };
+        render_list_scrollbar(frame, track, rows.len(), viewport, list_state.offset());
+    }
+}
+
+/// Draw the inline-reply compose strip: a titled rule, the input, and a hint row. The input renders
+/// the last up-to-[`MAX_INPUT_ROWS`] wrapped lines at normal intensity (everything above is dimmed
+/// by the caller) and drives the real terminal cursor to the end of the text — no fake caret.
+fn draw_compose(
+    frame: &mut Frame,
+    compose: &ComposeLayout,
+    rule_area: Rect,
+    input_area: Rect,
+    hint_area: Rect,
+) {
+    // The titled rule announces the mode switch and names the captured target (pinned at arm time,
+    // so it stays correct even if the queue re-orders under the dimmed list).
+    frame.render_widget(reply_rule(&compose.draft.label, rule_area.width), rule_area);
+
+    // One column of left padding aligns the input under the rule's label; the cursor rides the
+    // text's end. An empty buffer shows a dim-italic placeholder with the cursor parked at column 0.
+    let pad_x = input_area.x + 1;
+    if compose.draft.buffer.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                "type your reply".dim().italic(),
+            ])),
+            input_area,
+        );
+        frame.set_cursor_position((pad_x, input_area.y));
+    } else {
+        let visible = visible_input_lines(&compose.lines);
+        let body: Vec<Line> = visible
+            .iter()
+            .map(|line| Line::from(format!(" {line}")))
+            .collect();
+        frame.render_widget(Paragraph::new(body), input_area);
+        let last = visible.last().copied().unwrap_or("");
+        let cursor_x = pad_x + display_width(last) as u16;
+        let cursor_y = input_area.y + (visible.len() as u16).saturating_sub(1);
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
+
+    // The affordances: dim (reference, not the work), right-aligned to keep the typing edge clean.
+    frame.render_widget(
+        Paragraph::new(reply_hint(hint_area.width))
+            .dim()
+            .alignment(Alignment::Right),
+        hint_area,
+    );
+}
+
+/// Stamp every cell in `area` with the `DIM` modifier over whatever was already drawn there — the
+/// same post-hoc veil herdr uses to recede content behind a modal. Dims the queue uniformly while
+/// an inline reply is composed, including any scrollbar, so the compose strip reads as active.
+fn dim_area(frame: &mut Frame, area: Rect) {
+    let buf = frame.buffer_mut();
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            let cell = &mut buf[(x, y)];
+            let dimmed = cell.style().add_modifier(Modifier::DIM);
+            cell.set_style(dimmed);
+        }
+    }
+}
+
+/// The content width of the input after its one-column left pad. At least 1 so wrapping and cursor
+/// math never divide by or index past zero on a pathologically narrow popup.
+fn input_width(interior_width: u16) -> usize {
+    interior_width.saturating_sub(1).max(1) as usize
+}
+
+/// The last up-to-[`MAX_INPUT_ROWS`] wrapped lines — the tail of the reply, where the cursor sits.
+fn visible_input_lines(lines: &[String]) -> Vec<&str> {
+    let start = lines.len().saturating_sub(MAX_INPUT_ROWS);
+    lines[start..].iter().map(String::as_str).collect()
+}
+
+/// The compose strip's titled rule: `─ Reply to <label> ───`, the "Reply to <label>" bold, the
+/// leading and trailing dashes dim. The label (never the words "Reply to") is ellipsis-truncated on
+/// a narrow popup so the rule keeps a few trailing dashes and always fits one line.
+fn reply_rule(label: &str, width: u16) -> Paragraph<'static> {
+    const PREFIX: &str = "Reply to ";
+    const HEAD: usize = 2; // the leading "─ "
+    const GAP: usize = 1; // the space before the trailing dashes
+    const MIN_TAIL: usize = 3; // keep at least a few trailing dashes
+
+    let width = width as usize;
+    let label_budget = width
+        .saturating_sub(HEAD + display_width(PREFIX) + GAP + MIN_TAIL)
+        .max(1);
+    let title = format!("{PREFIX}{}", truncate_display(label, label_budget));
+    let tail = width.saturating_sub(HEAD + display_width(&title) + GAP);
+    Paragraph::new(Line::from(vec![
+        "─ ".dim(),
+        title.bold(),
+        Span::raw(" "),
+        "─".repeat(tail).dim(),
+    ]))
+}
+
+/// The full send/cancel hint, degrading to a terse form before it would clip on a narrow popup.
+fn reply_hint(width: u16) -> &'static str {
+    const FULL: &str = "enter send · esc cancel";
+    const SHORT: &str = "enter · esc";
+    if (width as usize) >= display_width(FULL) {
+        FULL
+    } else {
+        SHORT
+    }
+}
+
+/// Wrap `s` into lines no wider than `width` display columns, breaking between characters (the
+/// terminal line-editor idiom) so the render and the cursor share one deterministic mapping. Always
+/// returns at least one line, and appends a trailing empty line when the text ends exactly on a wrap
+/// boundary so the cursor has a row to sit on past a full line.
+fn wrap_display(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+    for ch in s.chars() {
+        let ch_width = char_width(ch);
+        if current_width + ch_width > width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += ch_width;
+    }
+    let ends_full = current_width == width && !current.is_empty();
+    lines.push(current);
+    if ends_full {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// Truncate `s` to at most `max` display columns, marking a cut with a trailing `…` (which itself
+/// occupies the last column). Returns `s` unchanged when it already fits.
+fn truncate_display(s: &str, max: usize) -> String {
+    if display_width(s) <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let budget = max - 1; // reserve one column for the ellipsis
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let ch_width = char_width(ch);
+        if used + ch_width > budget {
+            break;
+        }
+        out.push(ch);
+        used += ch_width;
+    }
+    out.push('…');
+    out
+}
+
+/// Display width of a string in terminal columns (wide/CJK characters count as 2).
+fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// Display width of a single character in terminal columns; control characters count as 0.
+fn char_width(ch: char) -> usize {
+    UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
 /// The footer prompt shown while a clear-all confirm is pending. Only armed on a non-empty queue,
@@ -861,10 +1117,66 @@ mod tests {
     }
 
     #[test]
-    fn reply_prompt_names_the_target_and_shows_the_buffer() {
-        let prompt = reply_prompt("Claude", "use option B");
-        assert!(prompt.contains("reply to Claude"));
-        assert!(prompt.contains("use option B"));
+    fn wrap_display_breaks_between_characters_at_the_width() {
+        // "abcdefg" through a width of 3 breaks into 3 + 3 + 1.
+        assert_eq!(wrap_display("abcdefg", 3), vec!["abc", "def", "g"]);
+        // Shorter than the width stays one line.
+        assert_eq!(wrap_display("hi", 5), vec!["hi"]);
+    }
+
+    #[test]
+    fn wrap_display_adds_a_trailing_line_when_the_text_ends_full() {
+        // "abc" exactly fills width 3, so the cursor needs an empty row past the full line.
+        assert_eq!(wrap_display("abc", 3), vec!["abc", ""]);
+        // "abcd" wraps to "abc" + "d" — the tail isn't full, so no extra line.
+        assert_eq!(wrap_display("abcd", 3), vec!["abc", "d"]);
+    }
+
+    #[test]
+    fn wrap_display_always_returns_at_least_one_line() {
+        assert_eq!(wrap_display("", 5), vec![""]);
+        // A zero width can't fit anything; it degrades to a single empty line, never a panic.
+        assert_eq!(wrap_display("abc", 0), vec![""]);
+    }
+
+    #[test]
+    fn wrap_display_counts_wide_characters_as_two_columns() {
+        // Each CJK glyph is 2 columns wide, so only one fits in a width of 3 (2 + 2 > 3).
+        assert_eq!(wrap_display("字字", 3), vec!["字", "字"]);
+        // A trailing narrow char shares the second glyph's line (2 + 1 <= 3 is false: 2+1=3 fits).
+        assert_eq!(wrap_display("字a", 3), vec!["字a", ""]);
+    }
+
+    #[test]
+    fn visible_input_lines_keeps_the_last_rows() {
+        let lines: Vec<String> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(visible_input_lines(&lines), vec!["c", "d", "e"]);
+        let short: Vec<String> = ["only"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(visible_input_lines(&short), vec!["only"]);
+    }
+
+    #[test]
+    fn truncate_display_keeps_short_labels_and_ellipsizes_long_ones() {
+        assert_eq!(truncate_display("Claude", 10), "Claude");
+        // Cut to 5 columns: 4 chars + the ellipsis cell.
+        assert_eq!(truncate_display("claude-backend", 5), "clau…");
+        assert_eq!(truncate_display("anything", 0), "");
+    }
+
+    #[test]
+    fn reply_hint_degrades_on_a_narrow_popup() {
+        assert_eq!(reply_hint(40), "enter send · esc cancel");
+        assert_eq!(reply_hint(12), "enter · esc");
+    }
+
+    #[test]
+    fn input_width_reserves_the_left_pad_and_never_underflows() {
+        assert_eq!(input_width(40), 39);
+        assert_eq!(input_width(1), 1);
+        assert_eq!(input_width(0), 1);
     }
 
     // The list rect used across the click tests: starts at row 1 (row 0 is the top header line),
