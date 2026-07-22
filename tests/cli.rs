@@ -142,6 +142,38 @@ fn peek_writes_a_toast_listing_the_queue() {
 
 #[test]
 #[cfg(unix)]
+fn startup_seeds_queue_from_pane_list() {
+    let temp = TempDir::new("startup");
+    let plugin = Plugin::in_dir(&temp);
+
+    // Post-restart pane list: two waiters plus a working pane that must be ignored.
+    plugin.write_pane_list(&[
+        ("wA:p1", "blocked"),
+        ("wB:p1", "working"),
+        ("wC:p1", "done"),
+    ]);
+    plugin.run("startup").assert_success();
+
+    let state = read_state_json(&plugin.state_dir);
+    let entries = state["entries"]
+        .as_array()
+        .expect("entries should be an array");
+    assert_eq!(entries.len(), 2, "only blocked/done panes are seeded");
+    assert_eq!(entries[0]["pane_id"], "wA:p1");
+    assert_eq!(entries[1]["pane_id"], "wC:p1");
+
+    // A cold start followed by a live-handoff takeover fires the hook twice: it must be a no-op.
+    plugin.run("startup").assert_success();
+    let state = read_state_json(&plugin.state_dir);
+    assert_eq!(
+        state["entries"].as_array().expect("entries array").len(),
+        2,
+        "running startup twice must not duplicate entries"
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn concurrent_status_events_keep_state_json_valid() {
     let temp = TempDir::new("concurrent");
     let plugin = Plugin::in_dir(&temp);

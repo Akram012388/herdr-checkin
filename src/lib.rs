@@ -87,6 +87,7 @@ fn run(subcommand: Subcommand, runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Resul
         Subcommand::Next => next(runtime, herdr),
         Subcommand::Peek => peek(runtime, herdr),
         Subcommand::Clear => clear(runtime),
+        Subcommand::Startup => startup(runtime, herdr),
         Subcommand::Pane => pane::run(runtime, herdr),
         // Handled in `run_from_env` before the environment is read.
         Subcommand::PaneDecision => unreachable!("pane-decision is dispatched before run()"),
@@ -216,6 +217,44 @@ fn clear(runtime: &RuntimeEnv) -> Result<(), PluginError> {
     StateStore::new(&runtime.state_dir).update(|_| (Vec::new(), ()))
 }
 
+/// `[[startup]]` hook: re-seed the queue after a herdr server (re)start. herdr runs this once per
+/// server process (cold start and live-handoff takeover); the event subscription starts fresh on
+/// restart and misses panes that were already `blocked`/`done`, so we scan the live `pane list`
+/// and enqueue them.
+///
+/// Two properties keep this safe:
+/// - **Additive-only, through the same upsert events use.** For each `blocked`/`done` pane we call
+///   [`enqueue`] under the lock — a delta, never a wholesale `state.json` rewrite (invariant #1).
+///   The hook is spawned async and races the now-live event loop, so a `status-changed` event may
+///   upsert the same pane concurrently; both merge, neither clobbers. A pane already queued
+///   (persisted across the restart) keeps its FIFO position and original `enqueued_at_ms`; a new
+///   waiter is appended stamped `now_ms`. Running twice (e.g. cold start then takeover) is a no-op.
+/// - **No eviction.** Stale persisted entries (panes that closed or resumed `working` during the
+///   downtime) are left for `next`/`peek`'s existing liveness pass to prune — eviction is the only
+///   operation that can lose a ping, so the seed never performs it. The currently-focused pane is
+///   seeded like any other (restart focus is not a user action).
+fn startup(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
+    let panes = herdr.pane_infos()?;
+    let now_ms = runtime.now_ms;
+
+    StateStore::new(&runtime.state_dir).update(|mut entries| {
+        for pane in &panes {
+            let event = StatusEvent {
+                pane_id: pane.pane_id.clone(),
+                workspace_id: pane.workspace_id.clone(),
+                agent_status: pane.agent_status.clone(),
+                agent: pane.agent.clone(),
+                display_agent: pane.display_agent.clone(),
+                title: pane.title.clone(),
+            };
+            if let Some(status) = event.wait_status() {
+                enqueue(&mut entries, &event, status, now_ms);
+            }
+        }
+        (entries, ())
+    })
+}
+
 // --- queue transitions -----------------------------------------------------
 
 /// Add or refresh an entry for a pane. Deduplicates per pane: if the pane is
@@ -327,6 +366,7 @@ enum Subcommand {
     Next,
     Peek,
     Clear,
+    Startup,
     Pane,
     PaneDecision,
 }
@@ -354,6 +394,7 @@ where
         "next" => Ok(Subcommand::Next),
         "peek" => Ok(Subcommand::Peek),
         "clear" => Ok(Subcommand::Clear),
+        "startup" => Ok(Subcommand::Startup),
         "pane" => Ok(Subcommand::Pane),
         "pane-decision" => Ok(Subcommand::PaneDecision),
         "help" | "--help" | "-h" => Err(ParseCommandError::Usage(usage())),
@@ -365,7 +406,7 @@ where
 }
 
 fn usage() -> String {
-    "usage: herdr-checkin <status-changed|focused|closed|next|peek|clear|pane|pane-decision>"
+    "usage: herdr-checkin <status-changed|focused|closed|next|peek|clear|startup|pane|pane-decision>"
         .to_string()
 }
 
@@ -388,9 +429,26 @@ struct RuntimeEnv {
 
 // --- herdr interface -------------------------------------------------------
 
+/// A pane as reported by `herdr pane list` — the subset of `PaneInfo` we seed the queue from.
+/// Same fields an event carries, so a scan can build full-fidelity queue entries. We deliberately
+/// do NOT carry `focused`: the seed queues every blocked/done pane regardless of which pane herdr
+/// mechanically restored focus to on restart (that is not a user "I looked at it" action, so it
+/// must not suppress the ping). Focus-based eviction stays where it belongs — the event path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaneInfo {
+    pane_id: String,
+    workspace_id: String,
+    agent_status: String,
+    agent: Option<String>,
+    display_agent: Option<String>,
+    title: Option<String>,
+}
+
 trait Herdr {
     /// Map of live `pane_id -> agent_status` from `herdr pane list`.
     fn pane_status_map(&self) -> Result<HashMap<String, String>, PluginError>;
+    /// Full `pane list` info, used by the startup hook to re-seed the queue.
+    fn pane_infos(&self) -> Result<Vec<PaneInfo>, PluginError>;
     /// Bring the agent in the given pane into focus (jumps workspace/tab/pane).
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError>;
     /// Show a herdr toast.
@@ -406,8 +464,11 @@ struct CliHerdr {
     bin_path: PathBuf,
 }
 
-impl Herdr for CliHerdr {
-    fn pane_status_map(&self) -> Result<HashMap<String, String>, PluginError> {
+impl CliHerdr {
+    /// Run `herdr pane list` and return its raw stdout, or an error if the command failed.
+    /// Shared by [`pane_status_map`](Self::pane_status_map) and [`pane_infos`](Self::pane_infos)
+    /// so both parse the same response without duplicating the spawn/error handling.
+    fn pane_list_stdout(&self) -> Result<Vec<u8>, PluginError> {
         let output = Command::new(&self.bin_path)
             .arg("pane")
             .arg("list")
@@ -423,7 +484,17 @@ impl Herdr for CliHerdr {
             return Err(command_failure("HERDR_BIN_PATH pane list", &output));
         }
 
-        parse_pane_status_map(&output.stdout)
+        Ok(output.stdout)
+    }
+}
+
+impl Herdr for CliHerdr {
+    fn pane_status_map(&self) -> Result<HashMap<String, String>, PluginError> {
+        parse_pane_status_map(&self.pane_list_stdout()?)
+    }
+
+    fn pane_infos(&self) -> Result<Vec<PaneInfo>, PluginError> {
+        parse_pane_infos(&self.pane_list_stdout()?)
     }
 
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError> {
@@ -488,6 +559,16 @@ fn command_failure(command: &str, output: &Output) -> PluginError {
 }
 
 fn parse_pane_status_map(stdout: &[u8]) -> Result<HashMap<String, String>, PluginError> {
+    Ok(parse_pane_infos(stdout)?
+        .into_iter()
+        .map(|pane| (pane.pane_id, pane.agent_status))
+        .collect())
+}
+
+/// Parse `herdr pane list` into the fields the queue needs. Preserves the panes' returned order
+/// (a `Vec`, not a map) so a re-seed is deterministic. Panes without a `pane_id` are skipped;
+/// missing `agent_status` falls back to `"unknown"` (which the seed ignores — not a wait status).
+fn parse_pane_infos(stdout: &[u8]) -> Result<Vec<PaneInfo>, PluginError> {
     let value: Value = serde_json::from_slice(stdout).map_err(|error| {
         PluginError::new(format!(
             "failed to parse HERDR_BIN_PATH pane list JSON: {error}"
@@ -508,18 +589,22 @@ fn parse_pane_status_map(stdout: &[u8]) -> Result<HashMap<String, String>, Plugi
             PluginError::new("HERDR_BIN_PATH pane list returned an unexpected response".to_string())
         })?;
 
-    let mut map = HashMap::with_capacity(panes.len());
+    let mut infos = Vec::with_capacity(panes.len());
     for pane in panes {
-        let Some(pane_id) = pane.get("pane_id").and_then(Value::as_str) else {
+        let Some(pane_id) = non_empty_string(pane, "pane_id") else {
             continue;
         };
-        let status = pane
-            .get("agent_status")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        map.insert(pane_id.to_string(), status.to_string());
+        infos.push(PaneInfo {
+            pane_id,
+            workspace_id: non_empty_string(pane, "workspace_id").unwrap_or_default(),
+            agent_status: non_empty_string(pane, "agent_status")
+                .unwrap_or_else(|| "unknown".to_string()),
+            agent: non_empty_string(pane, "agent"),
+            display_agent: non_empty_string(pane, "display_agent"),
+            title: non_empty_string(pane, "title"),
+        });
     }
-    Ok(map)
+    Ok(infos)
 }
 
 fn herdr_error_message(value: &Value) -> Option<String> {
@@ -854,6 +939,7 @@ mod tests {
 
     struct FakeHerdr {
         live: HashMap<String, String>,
+        panes: Vec<PaneInfo>,
         focus_fails: bool,
         focused: RefCell<Vec<String>>,
         notifications: RefCell<Vec<(String, Option<String>, String)>>,
@@ -866,6 +952,20 @@ mod tests {
                     .iter()
                     .map(|(pane_id, status)| (pane_id.to_string(), status.to_string()))
                     .collect(),
+                // Mirror `pane list`: derive full PaneInfos so `pane_infos()` and
+                // `pane_status_map()` stay consistent. Workspace is the pane-id prefix (as herdr's
+                // `wS:pN` ids encode it); agent/title are absent unless a test overrides `panes`.
+                panes: panes
+                    .iter()
+                    .map(|(pane_id, status)| PaneInfo {
+                        pane_id: pane_id.to_string(),
+                        workspace_id: pane_id.split(':').next().unwrap_or("").to_string(),
+                        agent_status: status.to_string(),
+                        agent: None,
+                        display_agent: None,
+                        title: None,
+                    })
+                    .collect(),
                 focus_fails: false,
                 focused: RefCell::new(Vec::new()),
                 notifications: RefCell::new(Vec::new()),
@@ -876,11 +976,21 @@ mod tests {
             self.focus_fails = true;
             self
         }
+
+        /// Override the `pane list` result with hand-built PaneInfos (for field-fidelity tests).
+        fn with_panes(mut self, panes: Vec<PaneInfo>) -> Self {
+            self.panes = panes;
+            self
+        }
     }
 
     impl Herdr for FakeHerdr {
         fn pane_status_map(&self) -> Result<HashMap<String, String>, PluginError> {
             Ok(self.live.clone())
+        }
+
+        fn pane_infos(&self) -> Result<Vec<PaneInfo>, PluginError> {
+            Ok(self.panes.clone())
         }
 
         fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError> {
@@ -1202,6 +1312,122 @@ mod tests {
         clear(&rt).expect("clear should succeed");
         assert!(load(&dir).is_empty());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn startup_seeds_blocked_and_done_and_ignores_others() {
+        let dir = temp_state_dir("startup-seed");
+        let herdr = FakeHerdr::new(&[
+            ("w1:p1", "blocked"),
+            ("w2:p1", "working"),
+            ("w3:p1", "done"),
+            ("w4:p1", "idle"),
+        ]);
+        let rt = runtime(dir.clone(), 5_000);
+
+        startup(&rt, &herdr).expect("startup should succeed");
+
+        let entries = load(&dir);
+        assert_eq!(entries.len(), 2, "only blocked/done panes are seeded");
+        assert_eq!(entries[0].pane_id, "w1:p1");
+        assert_eq!(entries[0].status, WaitStatus::Blocked);
+        assert_eq!(entries[0].enqueued_at_ms, 5_000);
+        assert_eq!(entries[1].pane_id, "w3:p1");
+        assert_eq!(entries[1].status, WaitStatus::Done);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn startup_upsert_preserves_position_and_enqueued_at() {
+        let dir = temp_state_dir("startup-upsert");
+        // Persisted before the restart: w1:p1 has been waiting since t=1000.
+        feed_status(&dir, 1_000, "w1:p1", "w1", "blocked", "old");
+        // After the restart the pane list still shows w1:p1 blocked, plus a fresh waiter.
+        let herdr = FakeHerdr::new(&[("w1:p1", "blocked"), ("w9:p1", "done")]);
+        let rt = runtime(dir.clone(), 9_000);
+
+        startup(&rt, &herdr).expect("startup should succeed");
+
+        let entries = load(&dir);
+        assert_eq!(entries.len(), 2);
+        // The persisted waiter keeps its slot and original wait time (upsert, not re-append).
+        assert_eq!(entries[0].pane_id, "w1:p1");
+        assert_eq!(entries[0].enqueued_at_ms, 1_000);
+        // The new waiter is appended, stamped at seed time.
+        assert_eq!(entries[1].pane_id, "w9:p1");
+        assert_eq!(entries[1].enqueued_at_ms, 9_000);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn startup_is_idempotent_when_run_twice() {
+        // A cold start immediately followed by a live-handoff takeover can fire the hook twice;
+        // the upsert must make the second run a no-op on positions and timestamps.
+        let dir = temp_state_dir("startup-twice");
+        let herdr = FakeHerdr::new(&[("w1:p1", "blocked"), ("w2:p1", "done")]);
+        let rt = runtime(dir.clone(), 5_000);
+
+        startup(&rt, &herdr).expect("first startup should succeed");
+        let once = load(&dir);
+        startup(&rt, &herdr).expect("second startup should succeed");
+        let twice = load(&dir);
+
+        assert_eq!(
+            once, twice,
+            "running the startup hook twice must be a no-op"
+        );
+        assert_eq!(twice.len(), 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn startup_carries_full_pane_fields() {
+        let dir = temp_state_dir("startup-fields");
+        let herdr = FakeHerdr::new(&[]).with_panes(vec![PaneInfo {
+            pane_id: "wA:p1".to_string(),
+            workspace_id: "wA".to_string(),
+            agent_status: "blocked".to_string(),
+            agent: Some("claude".to_string()),
+            display_agent: Some("Claude".to_string()),
+            title: Some("needs input".to_string()),
+        }]);
+        let rt = runtime(dir.clone(), 7_000);
+
+        startup(&rt, &herdr).expect("startup should succeed");
+
+        let entries = load(&dir);
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.workspace_id, "wA");
+        assert_eq!(entry.agent.as_deref(), Some("claude"));
+        assert_eq!(entry.display_agent.as_deref(), Some("Claude"));
+        assert_eq!(entry.title.as_deref(), Some("needs input"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn startup_on_empty_pane_list_is_a_noop() {
+        let dir = temp_state_dir("startup-empty");
+        let herdr = FakeHerdr::new(&[]);
+        let rt = runtime(dir.clone(), 1_000);
+        startup(&rt, &herdr).expect("startup should succeed");
+        assert!(load(&dir).is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parse_pane_infos_extracts_wait_fields_and_skips_idless_panes() {
+        let json = br#"{"result":{"type":"pane_list","panes":[
+            {"pane_id":"wA:p1","workspace_id":"wA","agent_status":"blocked","agent":"claude","display_agent":"Claude","title":"needs input","focused":true},
+            {"pane_id":"","agent_status":"done"},
+            {"agent_status":"done"}
+        ]}}"#;
+        let infos = parse_pane_infos(json).expect("pane list should parse");
+        assert_eq!(infos.len(), 1, "panes without a pane_id are skipped");
+        assert_eq!(infos[0].pane_id, "wA:p1");
+        assert_eq!(infos[0].workspace_id, "wA");
+        assert_eq!(infos[0].agent_status, "blocked");
+        assert_eq!(infos[0].title.as_deref(), Some("needs input"));
     }
 
     #[test]

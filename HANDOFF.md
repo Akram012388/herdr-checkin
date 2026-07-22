@@ -78,7 +78,12 @@ Two execution modes share one on-disk queue:
   top level if `data` is absent.
 - **Focus an agent pane:** `herdr agent focus <pane_id>` (jumps workspace/tab/pane). The CLI
   `herdr pane focus` is *directional* only; there is no by-id `pane.focus` CLI.
-- **Liveness:** `herdr pane list` → `result.panes[].{pane_id, agent_status, tab_id, focused, label}`.
+- **Liveness / pane info:** `herdr pane list` → `result.panes[]` of `PaneInfo`. Fields we use:
+  `pane_id`, `workspace_id`, `agent_status`, `focused` (all required except the last two are on
+  every pane), plus optional `agent`, `display_agent`, `title` — the same fields an event carries,
+  so a `pane list` scan can seed full-fidelity queue entries. (Also present but unused: `tab_id`,
+  `label`, `cwd`, `revision`, `terminal_*`, `tokens`, ….) Verified against `herdr api schema --json`
+  on 0.7.5 (`success_response.$defs.PaneInfo`).
 - **Plugin pane:** declared via `[[panes]]`; opened/focused/closed with
   `herdr plugin pane open --plugin <id> --entrypoint <pane-id> --placement split --focus` /
   `plugin pane focus <PANE_ID>` / `plugin pane close <PANE_ID>`. No push events to a running pane
@@ -111,11 +116,25 @@ next, `prefix+alt+p` peek, `prefix+alt+c` clear, `prefix+alt+q` open-pane. After
 
 ## 6. Pending / next up
 
-1. **`[[startup]]` queue rebuild (top candidate).** herdr 0.7.5 added a one-shot plugin
-   `[[startup]]` hook. After a herdr server restart the event subscription starts fresh and misses
-   panes already `blocked`/`done`. A startup hook that scans `pane list` and seeds the queue would
-   close that gap. **Before building:** read herdr's plugin-manifest docs to confirm the hook's
-   exact contract (the v0.7.5 release notes don't specify it).
+1. **`[[startup]]` queue re-seed (DONE — unreleased, on `main` after tests).** herdr 0.7.5 added a
+   one-shot plugin `[[startup]]` hook. After a herdr server restart the event subscription starts
+   fresh and misses panes already `blocked`/`done`. The `startup` subcommand scans `pane list` and
+   seeds the queue, closing that gap. Shipped: `[[startup]]` manifest entry, `startup` subcommand
+   (`src/lib.rs`) reusing the `enqueue` upsert, `PaneInfo`/`parse_pane_infos`, unit + CLI tests.
+   **Contract confirmed** (spike, verified against herdr 0.7.5 source + `api schema`):
+   - Manifest: `[[startup]]` array-of-tables, only `command` (required argv) + optional `platforms`.
+     No `id`/`on`. We use `command = ["./target/release/herdr-checkin", "startup"]`.
+   - Fires once per server process (cold start + live-handoff takeover), not per session/enable.
+     One-shot run-and-exit. Receives the normal plugin env (incl. `HERDR_PLUGIN_STATE_DIR`,
+     `HERDR_BIN_PATH`) plus `HERDR_PLUGIN_EVENT=startup`; NO pane payload — it calls `pane list`
+     itself. Failure is logged and does not stop the server.
+   - **Race-safety requirement (load-bearing):** the hook is spawned ASYNC and NOT awaited, so it
+     races the newly-live event loop — a `status-changed` event can fire for the same pane at the
+     same instant. Therefore it must NOT rebuild `state.json` wholesale; it merges each blocked/done
+     pane through the SAME per-pane `enqueue` upsert events use, under the state lock (a delta —
+     invariant #1). A concurrent event's upsert and the seed's upsert then merge, neither clobbers.
+     This is the same race class invariants #1/#3 already handle. Seed is additive-only (no evict);
+     stale entries are pruned by `next`/`peek`'s existing liveness pass.
 2. **Idempotent-toggle polish (optional):** the `open-pane` toggle identifies the pane by `label`
    ("Check-in"), which a user could theoretically collide with. If herdr later exposes plugin/
    entrypoint identity in `pane list`, switch to that.

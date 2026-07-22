@@ -18,6 +18,8 @@ first** — it has the architecture, herdr API facts, and the pending backlog.
 - `next` / pane `Enter`: focus first, evict only on success (a failed jump keeps the entry).
 - `next`/`peek`: keep any entry with `enqueued_at_ms >= snapshot` (don't prune what the pre-lock
   `pane list` snapshot couldn't see).
+- `startup`: re-seed the queue additively via the `enqueue` upsert (never a wholesale rewrite); no
+  eviction — leave stale-entry pruning to `next`/`peek`.
 - Pure logic (queue transitions, `PaneModel`, `decide`) is unit-tested; keep the terminal loop thin.
   `tests/cli.rs` runs the built binary against a fake herdr on `HERDR_BIN_PATH`.
 

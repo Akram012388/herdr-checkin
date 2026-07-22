@@ -9,6 +9,14 @@ platforms = ["linux", "macos"]
 command = ["cargo", "build", "--release"]
 platforms = ["linux", "macos"]
 
+# Startup hook. Runs once per server process (cold start + live-handoff takeover). After a restart
+# the event subscription starts fresh and misses panes already blocked/done, so this re-seeds the
+# queue from a live `pane list`. Race-safe: it merges each waiter through the same per-pane upsert
+# events use (a delta under the state lock), never a wholesale state.json rewrite.
+[[startup]]
+command = ["./target/release/herdr-checkin", "startup"]
+platforms = ["linux", "macos"]
+
 # Actions. Keybinds live in the user's herdr config (~/.config/herdr/config.toml),
 # not here — bind Akram012388.checkin.next to prefix+alt+o there.
 [[actions]]
