@@ -17,6 +17,8 @@ mod herdr;
 mod pane;
 mod queue;
 mod state;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use herdr::{CliHerdr, StatusEvent};
 use queue::{enqueue, is_live, on_closed, on_focused, on_status_changed};
@@ -353,132 +355,9 @@ mod tests {
     use super::*;
     use herdr::{herdr_error_message, parse_pane_infos, PaneInfo};
     use serde_json::Value;
-    use state::{read_state, STATE_FILE_NAME};
-    use std::cell::RefCell;
-    use std::collections::HashMap;
+    use state::STATE_FILE_NAME;
     use std::fs;
-    use std::path::Path;
-
-    struct FakeHerdr {
-        live: HashMap<String, String>,
-        panes: Vec<PaneInfo>,
-        focus_fails: bool,
-        focused: RefCell<Vec<String>>,
-        notifications: RefCell<Vec<(String, Option<String>, String)>>,
-    }
-
-    impl FakeHerdr {
-        fn new(panes: &[(&str, &str)]) -> Self {
-            Self {
-                live: panes
-                    .iter()
-                    .map(|(pane_id, status)| (pane_id.to_string(), status.to_string()))
-                    .collect(),
-                // Mirror `pane list`: derive full PaneInfos so `pane_infos()` and
-                // `pane_status_map()` stay consistent. Workspace is the pane-id prefix (as herdr's
-                // `wS:pN` ids encode it); agent/title are absent unless a test overrides `panes`.
-                panes: panes
-                    .iter()
-                    .map(|(pane_id, status)| PaneInfo {
-                        pane_id: pane_id.to_string(),
-                        workspace_id: pane_id.split(':').next().unwrap_or("").to_string(),
-                        agent_status: status.to_string(),
-                        agent: None,
-                        display_agent: None,
-                        title: None,
-                    })
-                    .collect(),
-                focus_fails: false,
-                focused: RefCell::new(Vec::new()),
-                notifications: RefCell::new(Vec::new()),
-            }
-        }
-
-        fn with_failing_focus(mut self) -> Self {
-            self.focus_fails = true;
-            self
-        }
-
-        /// Override the `pane list` result with hand-built PaneInfos (for field-fidelity tests).
-        fn with_panes(mut self, panes: Vec<PaneInfo>) -> Self {
-            self.panes = panes;
-            self
-        }
-    }
-
-    impl Herdr for FakeHerdr {
-        fn pane_status_map(&self) -> Result<HashMap<String, String>, PluginError> {
-            Ok(self.live.clone())
-        }
-
-        fn pane_infos(&self) -> Result<Vec<PaneInfo>, PluginError> {
-            Ok(self.panes.clone())
-        }
-
-        fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError> {
-            if self.focus_fails {
-                return Err(PluginError::new(format!("focus refused for {pane_id}")));
-            }
-            self.focused.borrow_mut().push(pane_id.to_string());
-            Ok(())
-        }
-
-        fn show_notification(
-            &self,
-            title: &str,
-            body: Option<&str>,
-            sound: &str,
-        ) -> Result<(), PluginError> {
-            self.notifications.borrow_mut().push((
-                title.to_string(),
-                body.map(str::to_owned),
-                sound.to_string(),
-            ));
-            Ok(())
-        }
-    }
-
-    fn runtime(state_dir: PathBuf, now_ms: u64) -> RuntimeEnv {
-        RuntimeEnv {
-            state_dir,
-            event_json: None,
-            now_ms,
-        }
-    }
-
-    fn temp_state_dir(label: &str) -> PathBuf {
-        let path = env::temp_dir().join(format!(
-            "herdr-checkin-{label}-{}-{}",
-            std::process::id(),
-            current_unix_ms()
-        ));
-        fs::create_dir_all(&path).expect("temp state directory should be created");
-        path
-    }
-
-    fn load(state_dir: &Path) -> Vec<QueueEntry> {
-        read_state(&state_dir.join(STATE_FILE_NAME))
-            .expect("state should load")
-            .entries
-    }
-
-    fn status_event_json(pane_id: &str, workspace_id: &str, status: &str, title: &str) -> String {
-        format!(
-            r#"{{"event":"pane_agent_status_changed","data":{{"type":"pane_agent_status_changed","pane_id":"{pane_id}","workspace_id":"{workspace_id}","agent_status":"{status}","agent":"claude","display_agent":"Claude","title":"{title}"}}}}"#
-        )
-    }
-
-    fn pane_event_json(kind: &str, pane_id: &str, workspace_id: &str) -> String {
-        format!(
-            r#"{{"event":"{kind}","data":{{"type":"{kind}","pane_id":"{pane_id}","workspace_id":"{workspace_id}"}}}}"#
-        )
-    }
-
-    fn feed_status(state_dir: &Path, now_ms: u64, pane: &str, ws: &str, status: &str, title: &str) {
-        let mut runtime = runtime(state_dir.to_path_buf(), now_ms);
-        runtime.event_json = Some(status_event_json(pane, ws, status, title));
-        on_status_changed(&runtime).expect("status-changed should succeed");
-    }
+    use test_support::{feed_status, load, pane_event_json, runtime, temp_state_dir, FakeHerdr};
 
     #[test]
     fn blocked_and_done_enqueue_in_fifo_order() {
