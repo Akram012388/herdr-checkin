@@ -237,13 +237,20 @@ existing `pane.rs` test style. No new e2e needed for the model; a `tests/cli.rs`
    `FakeHerdr` recording double. Command-shaping tests live **in `src/herdr.rs`** (not `tests/cli.rs`:
    `CliHerdr` is `pub(crate)` and no subcommand calls it yet) — a real `CliHerdr` against a throwaway
    fake `herdr` asserts the argv (`agent prompt wA:p1 "use option B"`, the reply text as one arg) and
-   Ok/Err on exit status. The trait method carries `#[cfg_attr(not(test), allow(dead_code))]` until
-   slice 3's caller lands. Pure seam, no UI.
-2. **Reply-mode state machine** on `PaneModel` (field + arm/append/backspace/cancel), unit-tested,
-   no herdr call yet - footer renders the buffer. (green)
-3. **Submit wiring**: `on_reply_submit` -> `prompt_agent` -> evict-on-success / keep-on-failure,
-   unit-tested against the fake. (green)
-4. **`space` binding + footer render** in the live loop (thin, like the existing key wiring).
+   Ok/Err on exit status.
+2-4. **DONE (landed together) — the reply input mode.** Model + event-loop wiring + submit, in one
+   coherent commit: a `reply: Option<ReplyDraft>` mode on `PaneModel` mirroring `confirm_clear`
+   (`begin_reply`/`reply_push`/`reply_backspace`/`cancel_reply`), the `space` binding + a top-priority
+   reply-key guard in `event_loop` (chars feed the buffer; Enter submits; Backspace edits; Esc/click
+   cancel; Ctrl-C still quits), the footer renders the draft, and `on_reply_submit` routes via
+   `prompt_agent` then **evicts only on submit success** (invariant #2; a failed submit keeps the
+   entry). `ReplyDraft` captures the **target pane_id + label at arm time**, so a concurrent `sync`
+   that reorders/evicts can't retarget the reply. `agent_label` was extracted (shared by list rows +
+   footer). Empty/whitespace Enter sends nothing and stays in reply mode. Unit-tested: the model
+   machine, target-fixing under eviction, and submit's route/evict/keep-on-failure branches against
+   the fake. _Why merged:_ Rust's `-D warnings` dead-code gate flags a model-only slice with no
+   production caller, and a reply mode whose Enter can't submit isn't worth a standalone commit — so
+   the mechanism lands as one green unit. Slice 1's `allow(dead_code)` came off (the caller landed).
 5. **Grouped agents-view render** (the CC-style look): `draw` renders AWAITING-YOU / DONE sections
    with non-selectable headers; `row_for_click` skips headers (extend its unit tests); `selected`
    stays an index into `entries` (SS4). This is the interface-defining slice.
@@ -253,9 +260,8 @@ existing `pane.rs` test style. No new e2e needed for the model; a `tests/cli.rs`
    Since there is no standalone 0.4.0, this ships the `[Unreleased]` pane features **and** the
    overlay as one release; set the version at cut time.
 
-Each slice keeps `cargo fmt --check && cargo clippy -D warnings && cargo test` green. Slices 1-4 are
-the reply mechanism; slice 5 is the visual identity; do them in that order so the console is proven
-functional before it is restyled.
+Each slice keeps `cargo fmt --check && cargo clippy -D warnings && cargo test` green. The reply
+mechanism (1-4) is proven functional before slice 5 restyles it into the agents-view look.
 
 ---
 

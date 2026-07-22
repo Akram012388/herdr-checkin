@@ -15,6 +15,7 @@ pub(crate) struct FakeHerdr {
     live: HashMap<String, String>,
     panes: Vec<PaneInfo>,
     focus_fails: bool,
+    prompt_fails: bool,
     pub(crate) focused: RefCell<Vec<String>>,
     /// Every `prompt_agent` call, as `(pane_id, text)`, in order.
     pub(crate) prompts: RefCell<Vec<(String, String)>>,
@@ -43,6 +44,7 @@ impl FakeHerdr {
                 })
                 .collect(),
             focus_fails: false,
+            prompt_fails: false,
             focused: RefCell::new(Vec::new()),
             prompts: RefCell::new(Vec::new()),
             notifications: RefCell::new(Vec::new()),
@@ -51,6 +53,11 @@ impl FakeHerdr {
 
     pub(crate) fn with_failing_focus(mut self) -> Self {
         self.focus_fails = true;
+        self
+    }
+
+    pub(crate) fn with_failing_prompt(mut self) -> Self {
+        self.prompt_fails = true;
         self
     }
 
@@ -79,6 +86,9 @@ impl Herdr for FakeHerdr {
     }
 
     fn prompt_agent(&self, pane_id: &str, text: &str) -> Result<(), PluginError> {
+        if self.prompt_fails {
+            return Err(PluginError::new(format!("prompt refused for {pane_id}")));
+        }
         self.prompts
             .borrow_mut()
             .push((pane_id.to_string(), text.to_string()));

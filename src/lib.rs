@@ -25,7 +25,7 @@ use actions::{next, peek, startup};
 use herdr::CliHerdr;
 use queue::{on_closed, on_focused, on_status_changed};
 
-pub(crate) use actions::{clear, describe_entry};
+pub(crate) use actions::{agent_label, clear, describe_entry};
 pub(crate) use herdr::Herdr;
 pub(crate) use queue::evict;
 pub(crate) use state::{current_unix_ms, load_entries, PluginError, QueueEntry, StateStore};

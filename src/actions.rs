@@ -145,13 +145,20 @@ fn peek_body(entries: &[QueueEntry], now_ms: u64) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-pub(crate) fn describe_entry(entry: &QueueEntry, now_ms: u64) -> String {
-    let who = entry
+/// The short display name for an entry: the display agent, else the agent, else the pane id
+/// (skipping empty strings). Shared by the list rows and the reply footer so they always name an
+/// agent the same way.
+pub(crate) fn agent_label(entry: &QueueEntry) -> &str {
+    entry
         .display_agent
         .as_deref()
         .filter(|value| !value.is_empty())
         .or(entry.agent.as_deref().filter(|value| !value.is_empty()))
-        .unwrap_or(&entry.pane_id);
+        .unwrap_or(&entry.pane_id)
+}
+
+pub(crate) fn describe_entry(entry: &QueueEntry, now_ms: u64) -> String {
+    let who = agent_label(entry);
     let waited = format_waited(now_ms.saturating_sub(entry.enqueued_at_ms));
     let status = entry.status.as_str();
     // The bracketed suffix carries the workspace and wait time; omit the workspace when it is

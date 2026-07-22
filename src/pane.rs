@@ -14,8 +14,8 @@
 //!   whether or not that event also fires.
 
 use crate::{
-    clear, current_unix_ms, describe_entry, evict, load_entries, Herdr, PluginError, QueueEntry,
-    RuntimeEnv, StateStore,
+    agent_label, clear, current_unix_ms, describe_entry, evict, load_entries, Herdr, PluginError,
+    QueueEntry, RuntimeEnv, StateStore,
 };
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -34,7 +34,8 @@ use std::time::Duration;
 /// changes and the ticking "waited" column appear promptly without busy-spinning.
 const TICK: Duration = Duration::from_millis(250);
 
-const FOOTER_HINTS: &str = "j/k move  ·  Enter jump  ·  d drop  ·  c clear  ·  q quit";
+const FOOTER_HINTS: &str =
+    "j/k move  ·  Enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit";
 
 /// The label herdr shows for our status pane in `pane list`, used to recognize our own pane for
 /// the idempotent open/focus/close toggle. Must stay in sync with the `[[panes]]` `title` in
@@ -110,7 +111,27 @@ fn event_loop(
             // through to the normal bindings (a click, in particular, must not silently reselect).
             match event {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if model.confirm_clear {
+                    // Reply mode is the top-priority guard: while composing, keys feed the buffer
+                    // and nothing falls through to the normal bindings (so `q`/`d`/`c` are literal
+                    // characters, not commands). Ctrl-C stays the universal escape hatch.
+                    if model.reply.is_some() {
+                        match key.code {
+                            KeyCode::Esc => model.cancel_reply(),
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                return Ok(());
+                            }
+                            KeyCode::Enter => on_reply_submit(model, runtime, herdr),
+                            KeyCode::Backspace => model.reply_backspace(),
+                            KeyCode::Char(ch)
+                                if !key
+                                    .modifiers
+                                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                            {
+                                model.reply_push(ch)
+                            }
+                            _ => {}
+                        }
+                    } else if model.confirm_clear {
                         on_confirm_clear(model, runtime, key.code);
                     } else {
                         match key.code {
@@ -123,12 +144,16 @@ fn event_loop(
                             KeyCode::Enter => on_enter(model, runtime, herdr),
                             KeyCode::Char('d') | KeyCode::Char('x') => on_drop(model, runtime),
                             KeyCode::Char('c') => model.request_clear(),
+                            KeyCode::Char(' ') => model.begin_reply(),
                             _ => {}
                         }
                     }
                 }
                 Event::Mouse(mouse) => {
-                    if model.confirm_clear {
+                    if model.reply.is_some() {
+                        // A click while composing cancels the reply, like any other non-input.
+                        model.cancel_reply();
+                    } else if model.confirm_clear {
                         // A click while a clear-all confirm is pending cancels it, like any other
                         // non-`y` input — never a reselect.
                         model.confirm_clear = false;
@@ -179,6 +204,38 @@ fn on_drop(model: &mut PaneModel, runtime: &RuntimeEnv) {
         Err(error) => Some(format!("drop failed: {error}")),
     };
     model.sync(load_entries(&runtime.state_dir));
+}
+
+/// `Enter` in reply mode: submit the composed reply to the captured target, then — only on a
+/// successful submit — evict it, mirroring `on_enter`'s act-then-evict-on-success discipline
+/// (invariant #2). A failed submit keeps the entry: losing an unanswered waiter is the exact
+/// failure the plugin exists to prevent. An empty/whitespace buffer sends nothing and stays in
+/// reply mode. The reply is fire-and-forget (no `--wait`); "submit accepted" is the success
+/// boundary for eviction — the pane never blocks waiting for the agent's next turn.
+fn on_reply_submit(model: &mut PaneModel, runtime: &RuntimeEnv, herdr: &dyn Herdr) {
+    let has_text = model
+        .reply
+        .as_ref()
+        .is_some_and(|draft| !draft.buffer.trim().is_empty());
+    if !has_text {
+        return;
+    }
+    // `take` leaves reply mode now; the target/label were captured when it was armed.
+    let draft = model.reply.take().expect("reply draft present");
+    let text = draft.buffer.trim();
+
+    match herdr.prompt_agent(&draft.target, text) {
+        Ok(()) => {
+            model.status = match evict_pane(runtime, &draft.target) {
+                Ok(()) => Some(format!("replied to {}", draft.label)),
+                Err(error) => Some(format!("replied, but drop failed: {error}")),
+            };
+            model.sync(load_entries(&runtime.state_dir));
+        }
+        Err(error) => {
+            model.status = Some(format!("reply failed: {error}"));
+        }
+    }
 }
 
 /// Resolve a pending clear-all confirm: `y`/`Y` empties the queue, any other key cancels. Either
@@ -356,6 +413,16 @@ fn parse_panes(json: &str) -> Vec<PaneInfo> {
 
 // --- model (pure) ----------------------------------------------------------
 
+/// An in-progress inline reply. The target `pane_id` and its display `label` are captured when
+/// reply mode is armed — not read from the live selection at submit time — so a concurrent queue
+/// `sync` that reorders or evicts entries while the user is still typing can never retarget the
+/// reply to a different agent. `buffer` is the text composed so far.
+struct ReplyDraft {
+    target: String,
+    label: String,
+    buffer: String,
+}
+
 /// The pane's view state: the queue plus a selection cursor and a transient footer message.
 /// All transitions are pure and unit-tested; the terminal loop above is the only impure part.
 struct PaneModel {
@@ -364,6 +431,9 @@ struct PaneModel {
     status: Option<String>,
     /// True while a clear-all confirm is pending (armed by `c`, resolved by the next key).
     confirm_clear: bool,
+    /// `Some` while composing an inline reply (armed by `space`). Distinct from `confirm_clear` so
+    /// the two modals never overlap — `begin_reply` refuses to arm while a clear-confirm is pending.
+    reply: Option<ReplyDraft>,
 }
 
 impl PaneModel {
@@ -373,6 +443,7 @@ impl PaneModel {
             selected: 0,
             status: None,
             confirm_clear: false,
+            reply: None,
         }
     }
 
@@ -382,6 +453,41 @@ impl PaneModel {
         if !self.entries.is_empty() {
             self.confirm_clear = true;
         }
+    }
+
+    /// `space`: begin an inline reply to the selected agent. No-op on an empty queue (nothing
+    /// selected) or while a clear-all confirm is pending, so the two modals never overlap. Captures
+    /// the target pane id and display label now (see [`ReplyDraft`]).
+    fn begin_reply(&mut self) {
+        if self.confirm_clear {
+            return;
+        }
+        if let Some(entry) = self.entries.get(self.selected) {
+            self.reply = Some(ReplyDraft {
+                target: entry.pane_id.clone(),
+                label: agent_label(entry).to_string(),
+                buffer: String::new(),
+            });
+        }
+    }
+
+    /// Append a typed character to the reply buffer (no-op outside reply mode).
+    fn reply_push(&mut self, ch: char) {
+        if let Some(draft) = self.reply.as_mut() {
+            draft.buffer.push(ch);
+        }
+    }
+
+    /// Delete the last character of the reply buffer (no-op outside reply mode or on an empty one).
+    fn reply_backspace(&mut self) {
+        if let Some(draft) = self.reply.as_mut() {
+            draft.buffer.pop();
+        }
+    }
+
+    /// Leave reply mode, discarding the buffer.
+    fn cancel_reply(&mut self) {
+        self.reply = None;
     }
 
     fn move_up(&mut self) {
@@ -465,12 +571,20 @@ fn draw(
         frame.render_stateful_widget(list, areas[1], list_state);
     }
 
-    let footer = if model.confirm_clear {
+    let footer = if let Some(draft) = &model.reply {
+        reply_prompt(&draft.label, &draft.buffer)
+    } else if model.confirm_clear {
         confirm_prompt(model.entries.len())
     } else {
         model.status.as_deref().unwrap_or(FOOTER_HINTS).to_string()
     };
     frame.render_widget(Paragraph::new(footer).dim(), areas[2]);
+}
+
+/// The footer shown while composing an inline reply: who it goes to, the text so far, and the
+/// keys. A trailing `_` marks the caret (we don't drive the terminal's own cursor in the pane).
+fn reply_prompt(label: &str, buffer: &str) -> String {
+    format!("reply to {label}: {buffer}_   (enter send · esc cancel)")
 }
 
 /// The footer prompt shown while a clear-all confirm is pending. Only armed on a non-empty queue,
@@ -583,6 +697,83 @@ mod tests {
     fn confirm_prompt_pluralizes() {
         assert_eq!(confirm_prompt(1), "clear all 1 entry? y/n");
         assert_eq!(confirm_prompt(3), "clear all 3 entries? y/n");
+    }
+
+    #[test]
+    fn begin_reply_captures_the_selected_target_and_label() {
+        let mut m = model(&["w1:p1", "w2:p1"]);
+        m.move_down(); // select w2:p1
+        m.begin_reply();
+        let draft = m.reply.as_ref().expect("reply should be armed");
+        assert_eq!(draft.target, "w2:p1");
+        assert_eq!(draft.label, "Claude"); // the entry's display_agent
+        assert_eq!(draft.buffer, "");
+    }
+
+    #[test]
+    fn begin_reply_is_a_noop_on_an_empty_queue() {
+        let mut m = model(&[]);
+        m.begin_reply();
+        assert!(m.reply.is_none(), "nothing selected, nothing to reply to");
+    }
+
+    #[test]
+    fn begin_reply_does_not_arm_while_a_clear_confirm_is_pending() {
+        let mut m = model(&["w1:p1"]);
+        m.request_clear();
+        m.begin_reply();
+        assert!(m.reply.is_none(), "the two modals must never overlap");
+        assert!(m.confirm_clear);
+    }
+
+    #[test]
+    fn reply_push_and_backspace_edit_the_buffer() {
+        let mut m = model(&["w1:p1"]);
+        m.begin_reply();
+        m.reply_push('h');
+        m.reply_push('i');
+        assert_eq!(m.reply.as_ref().unwrap().buffer, "hi");
+        m.reply_backspace();
+        assert_eq!(m.reply.as_ref().unwrap().buffer, "h");
+    }
+
+    #[test]
+    fn reply_edits_are_noops_outside_reply_mode() {
+        let mut m = model(&["w1:p1"]);
+        m.reply_push('x');
+        m.reply_backspace();
+        assert!(m.reply.is_none());
+    }
+
+    #[test]
+    fn cancel_reply_discards_the_buffer() {
+        let mut m = model(&["w1:p1"]);
+        m.begin_reply();
+        m.reply_push('x');
+        m.cancel_reply();
+        assert!(m.reply.is_none());
+    }
+
+    #[test]
+    fn the_reply_target_is_fixed_at_arm_time_even_if_the_selection_moves() {
+        // Arm a reply to w1:p1, then let a concurrent sync evict it. The selection clamps onto the
+        // surviving entry, but the reply must stay pointed at the agent it was started for.
+        let mut m = model(&["w1:p1", "w2:p1"]);
+        m.begin_reply();
+        m.sync(vec![entry("w2:p1")]); // w1:p1 evicted; only w2:p1 remains
+        assert_eq!(m.selected_pane_id(), Some("w2:p1"), "selection moved");
+        assert_eq!(
+            m.reply.as_ref().unwrap().target,
+            "w1:p1",
+            "but the reply stays targeted at the agent it was started for"
+        );
+    }
+
+    #[test]
+    fn reply_prompt_names_the_target_and_shows_the_buffer() {
+        let prompt = reply_prompt("Claude", "use option B");
+        assert!(prompt.contains("reply to Claude"));
+        assert!(prompt.contains("use option B"));
     }
 
     // The list rect used across the click tests: starts at row 1 (row 0 is the header), 10 rows
@@ -760,5 +951,77 @@ mod tests {
     fn parse_panes_degrades_on_garbage() {
         assert!(parse_panes("not json").is_empty());
         assert!(parse_panes("{}").is_empty());
+    }
+
+    // --- reply submit (impure: reads/writes state.json, talks to a fake herdr) ---------------
+
+    use crate::test_support::{feed_status, load, runtime, temp_state_dir, FakeHerdr};
+
+    // Seed one blocked waiter and return a model over it, already in reply mode with `text` typed.
+    fn armed_reply(dir: &std::path::Path, text: &str) -> PaneModel {
+        feed_status(dir, 1_000, "w1:p1", "w1", "blocked", "needs input");
+        let mut model = PaneModel::new(load(dir));
+        model.begin_reply();
+        for ch in text.chars() {
+            model.reply_push(ch);
+        }
+        model
+    }
+
+    #[test]
+    fn on_reply_submit_routes_the_reply_then_evicts_on_success() {
+        let dir = temp_state_dir("reply-ok");
+        let mut model = armed_reply(&dir, "yes");
+        let herdr = FakeHerdr::new(&[("w1:p1", "blocked")]);
+
+        on_reply_submit(&mut model, &runtime(dir.clone(), 2_000), &herdr);
+
+        assert_eq!(
+            herdr.prompts.into_inner(),
+            vec![("w1:p1".to_string(), "yes".to_string())],
+            "the reply is routed to the captured target by pane_id"
+        );
+        assert!(load(&dir).is_empty(), "a submitted reply evicts the waiter");
+        assert!(model.reply.is_none(), "reply mode ends after submit");
+        assert_eq!(model.status.as_deref(), Some("replied to Claude"));
+    }
+
+    #[test]
+    fn on_reply_submit_keeps_the_entry_when_the_prompt_fails() {
+        let dir = temp_state_dir("reply-fail");
+        let mut model = armed_reply(&dir, "yes");
+        let herdr = FakeHerdr::new(&[("w1:p1", "blocked")]).with_failing_prompt();
+
+        on_reply_submit(&mut model, &runtime(dir.clone(), 2_000), &herdr);
+
+        assert_eq!(
+            load(&dir).len(),
+            1,
+            "a failed reply must NOT lose the waiter (invariant #2)"
+        );
+        assert!(model.reply.is_none(), "reply mode still ends");
+        assert!(model
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("reply failed")));
+    }
+
+    #[test]
+    fn on_reply_submit_sends_nothing_for_an_empty_buffer_and_stays_in_reply_mode() {
+        let dir = temp_state_dir("reply-empty");
+        let mut model = armed_reply(&dir, "   "); // whitespace only
+        let herdr = FakeHerdr::new(&[("w1:p1", "blocked")]);
+
+        on_reply_submit(&mut model, &runtime(dir.clone(), 2_000), &herdr);
+
+        assert!(
+            herdr.prompts.into_inner().is_empty(),
+            "an empty reply sends nothing"
+        );
+        assert!(
+            model.reply.is_some(),
+            "and stays in reply mode to keep typing"
+        );
+        assert_eq!(load(&dir).len(), 1, "the waiter is untouched");
     }
 }

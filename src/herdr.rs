@@ -33,10 +33,6 @@ pub(crate) trait Herdr {
     /// Submit `text` as a reply into the agent in the given pane (routes into its session).
     /// The target is the stored `pane_id` (verified: the `agent_session` uuid is not accepted).
     /// Fire-and-forget: no `--wait` (its settled-state gate is unreliable from a non-working start).
-    // Seam only in this slice: exercised by tests, no production caller yet — the pane's reply action
-    // calls it next, at which point this attribute comes off. Scoped to `not(test)` so it never
-    // masks a real dead-code regression in the test build (where the unit tests do call it).
-    #[cfg_attr(not(test), allow(dead_code))]
     fn prompt_agent(&self, pane_id: &str, text: &str) -> Result<(), PluginError>;
     /// Show a herdr toast.
     fn show_notification(
