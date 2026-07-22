@@ -4,9 +4,12 @@ Orientation for the next session (human or agent). Read this first, then start o
 User-facing docs: [README.md](README.md). Release log: [CHANGELOG.md](CHANGELOG.md). Working rules
 and the model-tier strategy: [CLAUDE.md](CLAUDE.md).
 
-**Version:** 0.3.0 · **License:** MIT · **Repo:** https://github.com/Akram012388/herdr-checkin
-· **State:** `main` is green (fmt + clippy + test) and pushed at the 0.3.0 release. No open branches,
-no worktrees. 0.3.0 is **not tagged** (the maintainer tags on request).
+**Version:** 0.3.0 (0.4.0 unreleased, pending the maintainer's go) · **License:** MIT · **Repo:**
+https://github.com/Akram012388/herdr-checkin · **State:** `main` is green (fmt + clippy + test) and
+pushed (HEAD `5fecc57`). No open branches, no worktrees. There is an unshipped `[Unreleased]`
+CHANGELOG set (mouse-select, clear-all, README demo, internal module split), and the plugin passed a
+full **manual end-to-end test in real herdr** this session (see §6). Nothing is tagged (maintainer
+tags on request). **START AT §6 — the immediate task is the maintainer's (a)/(b) decision.**
 
 ---
 
@@ -72,8 +75,9 @@ code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still re
 - **`next`** focuses the oldest still-live waiter (`herdr agent focus <pane_id>`, cross-workspace)
   and evicts it **only after** the focus succeeds. **`peek`** shows the queue as a toast.
   **`clear`** empties it. **`startup`** re-seeds the queue from `pane list` after a herdr restart.
-- **Status pane** keys: `j`/`k`/arrows move, `Enter` jump+evict-on-success, `d` drop, `q`/`Esc`
-  close. `open-pane` is a current-tab-scoped toggle (open / focus / close).
+- **Status pane** keys: `j`/`k`/arrows or **left-click** move/select, `Enter` jump+evict-on-success,
+  `d` drop, `c` clear-all (with a `y`/`n` confirm), `q`/`Esc` close. `open-pane` is a
+  current-tab-scoped toggle (open / focus / close).
 
 **Invariants (do not regress — each has a regression test):**
 1. **Mutations are deltas** through `StateStore::update` (read-modify-write under the lock), never a
@@ -101,7 +105,17 @@ code, and `lib.rs` re-exports items as `pub(crate)` so `crate::X` paths still re
   form (`pane.agent_status_changed`, `pane.focused`, `pane.closed`). Fields also accepted at the top
   level if `data` is absent.
 - **Focus an agent pane:** `herdr agent focus <pane_id>` (jumps workspace/tab/pane). The CLI
-  `herdr pane focus` is *directional* only; there is no by-id `pane.focus` CLI.
+  `herdr pane focus` is *directional* only; there is no by-id `pane.focus` CLI. **`agent focus` only
+  accepts real *agent* panes** — targeting a plain shell returns
+  `{"error":{"code":"agent_not_found"}}`. Irrelevant in production (only agent panes ever enqueue),
+  but it surfaced in the E2E test when entries were injected onto non-agent shells; the plugin
+  handled it correctly (kept the entry, showed the error — invariant #2).
+- **Submit input to an agent** (not yet used; enables the §6 triage-overlay idea): `herdr agent
+  prompt <TARGET> <TEXT> [--wait --until <idle|working|blocked|done|unknown>] [--timeout <ms>]` routes
+  a reply into an agent's session and can wait for the resulting state. Handles submitting from a
+  non-working (blocked/idle/done) start. `herdr agent` also exposes `list`/`get`/`read`/`send-keys`/
+  `wait`/`rename`/`start`. `agent list` returns per-agent `agent_status`, `pane_id`, `agent_session`
+  (uuid), `tab_id`, `cwd`, `title`.
 - **Pane info:** `herdr pane list` → `result.panes[]` of `PaneInfo`. Fields we use: `pane_id`,
   `workspace_id`, `agent_status`, `focused`, plus optional `agent`, `display_agent`, `title` — the
   same fields an event carries, so a scan seeds full-fidelity entries. Verified against
@@ -142,53 +156,85 @@ visible`, and drive keys with `herdr pane send-keys <pane_id> <key>`. For the `s
 `prefix+alt+p` peek, `prefix+alt+c` clear, `prefix+alt+q` open-pane. After editing:
 `herdr config check && herdr server reload-config`.
 
-## 6. Next up (start here)
+## 6. Next up (START HERE) — a maintainer decision is pending
 
-### A. Deferred pane features — the ready-to-build lane (`src/pane.rs`)
+At the end of the prior session, Claude asked the maintainer to choose. **Pick up by acting on their
+answer** to:
 
-This lane is already scoped in detail. All work is in `src/pane.rs` (+ `README.md` for the demo);
-it is file-disjoint from the queue/manifest code. **A and B are done — Feature C (README demo) is
-what's left in this lane.**
+> (a) **Prep the 0.4.0 release now**, and park the "triage overlay" idea (below) as the next design
+>     task; or
+> (b) **Verify the two triage-overlay unknowns first**, before deciding.
 
-**Feature B — in-pane `c` = clear-all, with a confirm. DONE (unreleased).** Shipped as scoped:
-`confirm_clear` on `PaneModel`, a `request_clear()` that arms only on a non-empty queue, an
-`on_confirm_clear` intercept (`y`/`Y` confirms, else cancels) that reuses `crate::clear`, footer
-precedence confirm > status > hints via `confirm_prompt(count)` (pluralized), and three unit tests.
+Everything from the prior session is committed and pushed (HEAD `5fecc57`). The prior session:
+shipped the whole `src/pane.rs` lane — **Feature A** (mouse click-to-select), **Feature B** (`c`
+clear-all with confirm), **Feature C** (README demo GIF) — all in the `[Unreleased]` CHANGELOG;
+split the `lib.rs` god-file into modules (§2); verified the install setup against herdr standards;
+and ran a full **manual E2E test in real herdr that passed** (pane launch/render/refresh, live
+enqueue, real event delivery + auto-eviction, mouse-select, clear-all confirm, `Enter` graceful
+focus-failure *and* success, `peek`, plus durability across a ~2.5 h gap). Details live in the
+commit history and `CHANGELOG.md` — not repeated here.
 
-**Feature A — mouse click-to-select. DONE (unreleased).** Shipped as scoped:
-- Mouse capture enabled after `try_init`, disabled before `restore` on both the `Ok` and error
-  returns from `event_loop`, plus a chained panic hook (`install_mouse_panic_hook`) that disables
-  capture then defers to ratatui's restore hook — closing the panic-path gap.
-- `ListState` now persists across frames in `event_loop`; `draw` records the list `Rect` each frame
-  (`None` while the queue is empty) and the mouse handler reads `list_state.offset()` after render.
-- Pure `row_for_click(area, offset, entry_count, col, row) -> Option<usize>` (six unit tests);
-  `on_mouse` handles only `Down(Left)` and is a no-op on an empty queue / out-of-range rows.
-- The confirm guard was hoisted above BOTH the `Event::Key` and `Event::Mouse` branches (the
-  cross-feature trap): a click during a pending confirm cancels it rather than reselecting.
+### If (a) — prep 0.4.0 (mechanical, ~15 min)
+1. In `CHANGELOG.md`, rename `## [Unreleased]` → `## [0.4.0] - <today's date>`.
+2. Bump `version = "0.3.0"` → `"0.4.0"` in **`herdr-plugin.toml`** and **`Cargo.toml`** (keep them in
+   sync; `Cargo.lock` refreshes on the next build).
+3. Update this file's header Version line to 0.4.0.
+4. Run the CI gate (§5), then commit + push. **Do NOT tag** — the maintainer tags on request.
 
-**Feature C — README demo. DONE (unreleased).** Shipped as scoped: `scripts/pane-demo.tape` (VHS)
-drives seeded state through `herdr-checkin pane` and `j`/`k`/`Enter`/`d`/`c`/`y`/`q`, output
-`docs/pane-demo.gif` (112K, ~15s, well under the 2 MB cap) embedded in README's "status pane"
-section above the ASCII fallback. `scripts/pane-demo-setup.sh` seeds a throwaway `state.json` +
-a fake `herdr` (so `Enter`'s `agent focus` succeeds) — sourced by the tape, runnable standalone; no
-real agents needed. Regenerate: `cargo build --release && vhs scripts/pane-demo.tape` from the repo
-root. (First render can hit a transient `ttyd`/`ERR_CONNECTION_REFUSED` port race — just rerun.)
-Also refreshed the README key table / text fallback to list the `c` (clear) and left-click bindings.
+(Commit/push at own discretion is pre-approved for this repo — see the memory index.)
 
-**The `src/pane.rs` ready-to-build lane is now fully done (A, B, C).** No scoped pane work remains.
+### If (b) — verify the two unknowns, then re-decide
+Run the two probes under "unknowns" below, report findings, then re-ask (a) vs. proceed to build.
 
-### B. Parked (needs upstream herdr, do not schedule)
+---
 
-**Idempotent-toggle identity.** The `open-pane` toggle identifies the status pane by `label`
-("Check-in"), which a user could theoretically collide with. If herdr later exposes plugin/
-entrypoint identity in `pane list`, switch `PaneInfo::is_status_pane` to that. Nothing in this repo
-unblocks it — it waits on an upstream feature.
+### The triage-overlay idea (the 0.5.0 direction) — designed, not built
 
-### C. Optional
+The maintainer wants to evolve the status pane from a passive **list + jump** into an active
+**triage console**, modeled on **Claude Code's agents view**: agents grouped by status (awaiting
+input / working / done), and **per row you reply inline** — type an answer that routes straight into
+that agent's session — instead of only jumping to it. Optionally presented as a **popup/overlay**
+summoned like herdr's `prefix+s`, rather than a persistent split.
 
-**Docs note (only if relevant).** herdr 0.7.5 made plugin install/enabled state global-per-user (was
-per-session). The README doesn't describe per-session install, so no change is needed unless that
-section is added.
+**herdr already has every primitive** (verified via CLI this session — see §4):
+- `enter to return` -> `herdr agent focus <target>` (already our `Enter`).
+- **`space to reply` -> `herdr agent prompt <target> <text>`** — the key enabler; a robust CLI (not
+  raw send-keys), with `--wait --until <state>` that maps onto our "act, then evict on success"
+  discipline.
+- `delete` -> our existing `evict` (`d`).
+- group-by-status <- `herdr agent list`.
+
+**Two load-bearing unknowns to verify BEFORE committing (option (b)):**
+1. **Does herdr `placement = "popup"` / `"overlay"` support a persistent, keyboard-interactive TUI
+   pane?** Popups may be built for transient content that dismisses on blur, or may not route full
+   keyboard focus to a plugin process the way a `split` does. If not, keep it a split — the
+   *interaction* is the value; placement is negotiable. **Probe:** a throwaway manifest with
+   `placement="popup"` + `herdr server reload-config`, open it, test typing + persistence-on-blur.
+   This is the gating question for the whole overlay direction.
+2. **`agent prompt` target + blocked behavior:** does `<TARGET>` take the `pane_id` we store
+   (`w4:p1`) or the `agent_session` uuid from `agent list`? And does prompting a *blocked* agent
+   cleanly answer its prompt? **Probe:** one live `herdr agent prompt <a real test agent> "<text>"`.
+
+**Strategic caution (worth a Fable-5 advisor pass):** herdr's *native* `agent list` already renders
+a live status view resembling that Claude Code screenshot. This plugin's differentiator is the
+**durable FIFO queue** (remembers pings across toast-fade, restart, simultaneous blocks). Keep the
+queue as the backbone and layer inline-reply on top — do **not** drift into re-implementing herdr's
+built-in view. Queue-plus-inline-action is additive; a pure live mirror is not. (Reference
+screenshots of the Claude Code agents view were shared in the prior chat; not saved to the repo.)
+
+### Parked / optional (unchanged)
+- **Idempotent-toggle identity** — `open-pane` identifies the status pane by `label` ("Check-in");
+  switch `PaneInfo::is_status_pane` to plugin/entrypoint identity if herdr ever exposes it in
+  `pane list`. Waits on upstream.
+- **Docs note** — herdr 0.7.5 made plugin install/enabled state global-per-user; only relevant if a
+  per-session-install section is ever added to the README.
+
+### Suggested skills for the next session
+- **`/herdr`** — control herdr from inside it (only when `HERDR_ENV=1`): split panes, spawn/read
+  agents, run `herdr agent prompt`/`focus`, drive the option-(b) probes.
+- **A Fable-5 advisor subagent** — for the strategic queue-vs-native-view call, used sparingly for
+  genuine load-bearing doubt (this repo's design-gate pattern; see §7).
+- **`/handoff`** — to snapshot again at the end of the next session.
 
 ## 7. How we work here (see CLAUDE.md for the short version)
 
