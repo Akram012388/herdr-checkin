@@ -10,15 +10,17 @@
 //! herdr invokes this binary once per event and once per action; all state
 //! lives in `state.json` under `HERDR_PLUGIN_STATE_DIR`, guarded by a lockfile.
 
-use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
-use std::process::{Command, Output};
 
+mod herdr;
 mod pane;
 mod state;
 
+use herdr::{parse_event_string, parse_status_event, CliHerdr, StatusEvent};
+
+pub(crate) use herdr::Herdr;
 pub(crate) use state::{
     current_unix_ms, load_entries, PluginError, QueueEntry, StateStore, WaitStatus,
 };
@@ -433,263 +435,11 @@ struct RuntimeEnv {
     now_ms: u64,
 }
 
-// --- herdr interface -------------------------------------------------------
-
-/// A pane as reported by `herdr pane list` — the subset of `PaneInfo` we seed the queue from.
-/// Same fields an event carries, so a scan can build full-fidelity queue entries. We deliberately
-/// do NOT carry `focused`: the seed queues every blocked/done pane regardless of which pane herdr
-/// mechanically restored focus to on restart (that is not a user "I looked at it" action, so it
-/// must not suppress the ping). Focus-based eviction stays where it belongs — the event path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PaneInfo {
-    pane_id: String,
-    workspace_id: String,
-    agent_status: String,
-    agent: Option<String>,
-    display_agent: Option<String>,
-    title: Option<String>,
-}
-
-trait Herdr {
-    /// Map of live `pane_id -> agent_status` from `herdr pane list`.
-    fn pane_status_map(&self) -> Result<HashMap<String, String>, PluginError>;
-    /// Full `pane list` info, used by the startup hook to re-seed the queue.
-    fn pane_infos(&self) -> Result<Vec<PaneInfo>, PluginError>;
-    /// Bring the agent in the given pane into focus (jumps workspace/tab/pane).
-    fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError>;
-    /// Show a herdr toast.
-    fn show_notification(
-        &self,
-        title: &str,
-        body: Option<&str>,
-        sound: &str,
-    ) -> Result<(), PluginError>;
-}
-
-struct CliHerdr {
-    bin_path: PathBuf,
-}
-
-impl CliHerdr {
-    /// Run `herdr pane list` and return its raw stdout, or an error if the command failed.
-    /// Shared by [`pane_status_map`](Self::pane_status_map) and [`pane_infos`](Self::pane_infos)
-    /// so both parse the same response without duplicating the spawn/error handling.
-    fn pane_list_stdout(&self) -> Result<Vec<u8>, PluginError> {
-        let output = Command::new(&self.bin_path)
-            .arg("pane")
-            .arg("list")
-            .output()
-            .map_err(|error| {
-                PluginError::new(format!(
-                    "failed to run HERDR_BIN_PATH pane list ({}): {error}",
-                    self.bin_path.display()
-                ))
-            })?;
-
-        if !output.status.success() {
-            return Err(command_failure("HERDR_BIN_PATH pane list", &output));
-        }
-
-        Ok(output.stdout)
-    }
-}
-
-impl Herdr for CliHerdr {
-    fn pane_status_map(&self) -> Result<HashMap<String, String>, PluginError> {
-        parse_pane_status_map(&self.pane_list_stdout()?)
-    }
-
-    fn pane_infos(&self) -> Result<Vec<PaneInfo>, PluginError> {
-        parse_pane_infos(&self.pane_list_stdout()?)
-    }
-
-    fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError> {
-        let output = Command::new(&self.bin_path)
-            .arg("agent")
-            .arg("focus")
-            .arg(pane_id)
-            .output()
-            .map_err(|error| {
-                PluginError::new(format!(
-                    "failed to run HERDR_BIN_PATH agent focus {pane_id} ({}): {error}",
-                    self.bin_path.display()
-                ))
-            })?;
-
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(command_failure("HERDR_BIN_PATH agent focus", &output))
-        }
-    }
-
-    fn show_notification(
-        &self,
-        title: &str,
-        body: Option<&str>,
-        sound: &str,
-    ) -> Result<(), PluginError> {
-        let mut command = Command::new(&self.bin_path);
-        command.arg("notification").arg("show").arg(title);
-        if let Some(body) = body {
-            command.arg("--body").arg(body);
-        }
-        command.arg("--sound").arg(sound);
-
-        let output = command.output().map_err(|error| {
-            PluginError::new(format!(
-                "failed to run HERDR_BIN_PATH notification show ({}): {error}",
-                self.bin_path.display()
-            ))
-        })?;
-
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(command_failure("HERDR_BIN_PATH notification show", &output))
-        }
-    }
-}
-
-fn command_failure(command: &str, output: &Output) -> PluginError {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if !stderr.is_empty() {
-        stderr
-    } else if !stdout.is_empty() {
-        stdout
-    } else {
-        output.status.to_string()
-    };
-    PluginError::new(format!("{command} failed: {detail}"))
-}
-
-fn parse_pane_status_map(stdout: &[u8]) -> Result<HashMap<String, String>, PluginError> {
-    Ok(parse_pane_infos(stdout)?
-        .into_iter()
-        .map(|pane| (pane.pane_id, pane.agent_status))
-        .collect())
-}
-
-/// Parse `herdr pane list` into the fields the queue needs. Preserves the panes' returned order
-/// (a `Vec`, not a map) so a re-seed is deterministic. Panes without a `pane_id` are skipped;
-/// missing `agent_status` falls back to `"unknown"` (which the seed ignores — not a wait status).
-fn parse_pane_infos(stdout: &[u8]) -> Result<Vec<PaneInfo>, PluginError> {
-    let value: Value = serde_json::from_slice(stdout).map_err(|error| {
-        PluginError::new(format!(
-            "failed to parse HERDR_BIN_PATH pane list JSON: {error}"
-        ))
-    })?;
-
-    if let Some(error) = herdr_error_message(&value) {
-        return Err(PluginError::new(format!(
-            "HERDR_BIN_PATH pane list returned an error: {error}"
-        )));
-    }
-
-    let panes = value
-        .get("result")
-        .and_then(|result| result.get("panes"))
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            PluginError::new("HERDR_BIN_PATH pane list returned an unexpected response".to_string())
-        })?;
-
-    let mut infos = Vec::with_capacity(panes.len());
-    for pane in panes {
-        let Some(pane_id) = non_empty_string(pane, "pane_id") else {
-            continue;
-        };
-        infos.push(PaneInfo {
-            pane_id,
-            workspace_id: non_empty_string(pane, "workspace_id").unwrap_or_default(),
-            agent_status: non_empty_string(pane, "agent_status")
-                .unwrap_or_else(|| "unknown".to_string()),
-            agent: non_empty_string(pane, "agent"),
-            display_agent: non_empty_string(pane, "display_agent"),
-            title: non_empty_string(pane, "title"),
-        });
-    }
-    Ok(infos)
-}
-
-fn herdr_error_message(value: &Value) -> Option<String> {
-    let error = value.get("error")?;
-    // A present-but-null `error` is a success shape, not a failure.
-    if error.is_null() {
-        return None;
-    }
-    let code = error.get("code").and_then(Value::as_str);
-    let message = error.get("message").and_then(Value::as_str);
-
-    match (code, message) {
-        (Some(code), Some(message)) => Some(format!("{code}: {message}")),
-        (Some(code), None) => Some(code.to_string()),
-        (None, Some(message)) => Some(message.to_string()),
-        (None, None) => Some(error.to_string()),
-    }
-}
-
-// --- event parsing ---------------------------------------------------------
-
-struct StatusEvent {
-    pane_id: String,
-    workspace_id: String,
-    agent_status: String,
-    agent: Option<String>,
-    display_agent: Option<String>,
-    title: Option<String>,
-}
-
-impl StatusEvent {
-    fn wait_status(&self) -> Option<WaitStatus> {
-        match self.agent_status.as_str() {
-            "blocked" => Some(WaitStatus::Blocked),
-            "done" => Some(WaitStatus::Done),
-            _ => None,
-        }
-    }
-
-    fn is_working(&self) -> bool {
-        self.agent_status == "working"
-    }
-}
-
-/// The plugin event JSON is `{ "event": ..., "data": { "type": ..., <fields> } }`.
-/// Fields are read from `data`, falling back to the top-level object.
-fn parse_status_event(raw: &str) -> Option<StatusEvent> {
-    let value: Value = serde_json::from_str(raw).ok()?;
-    let data = event_data(&value);
-    Some(StatusEvent {
-        pane_id: non_empty_string(data, "pane_id")?,
-        workspace_id: non_empty_string(data, "workspace_id").unwrap_or_default(),
-        agent_status: non_empty_string(data, "agent_status")?,
-        agent: non_empty_string(data, "agent"),
-        display_agent: non_empty_string(data, "display_agent"),
-        title: non_empty_string(data, "title"),
-    })
-}
-
-fn parse_event_string(raw: &str, key: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(raw).ok()?;
-    non_empty_string(event_data(&value), key)
-}
-
-fn event_data(value: &Value) -> &Value {
-    value.get("data").unwrap_or(value)
-}
-
-fn non_empty_string(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use herdr::{herdr_error_message, parse_pane_infos, PaneInfo};
+    use serde_json::Value;
     use state::{read_state, STATE_FILE_NAME};
     use std::cell::RefCell;
     use std::fs;
