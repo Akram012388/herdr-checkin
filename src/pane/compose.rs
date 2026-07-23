@@ -19,6 +19,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// rows (see [`cursor_move_vertical`]).
 pub(super) const INPUT_ROWS: u16 = 3;
 
+/// Align reply text with the list content and the rule title, both of which begin after a two-cell
+/// structural gutter (`"> "` in a list, `"─ "` in the rule).
+const INPUT_LEFT_INSET: u16 = 2;
+
 /// The dim prompt shown when the input is empty. Rendered here (not by the `TextArea` widget) because
 /// the input paints its own soft-wrapped rows.
 const PLACEHOLDER: &str = "type your reply";
@@ -37,10 +41,11 @@ pub(super) fn draw_compose(
     // so it stays correct even if the queue re-orders under the dimmed list).
     frame.render_widget(reply_rule(&draft.label, rule_area.width), rule_area);
 
-    // 1-col left pad aligns the input under the rule's "Reply" label.
+    // The shared two-column gutter aligns input, reply title, and list content on one edge.
+    let inset = INPUT_LEFT_INSET.min(input_area.width);
     let input_rect = Rect {
-        x: input_area.x + 1,
-        width: input_area.width.saturating_sub(1),
+        x: input_area.x + inset,
+        width: input_area.width - inset,
         ..input_area
     };
     draw_input(frame, draft, input_rect);

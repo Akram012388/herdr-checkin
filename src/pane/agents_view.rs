@@ -11,12 +11,12 @@
 //! ([`agent_destination`]/[`agent_detail`] over a [`RosterAgent`]).
 
 use super::compose::{dim_area, draw_compose};
-use super::queue_view::{render_list_scrollbar, SELECTION_BG};
+use super::queue_view::{render_list_scrollbar, SELECTION_BG, SELECTION_FG};
 use super::{draw_tab_bar, ActiveTab, PaneModel, ReplyDraft};
 use crate::roster::{agent_destination, agent_detail, workspace_display_label, RosterAgent};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{HighlightSpacing, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 const AGENTS_FOOTER_HINTS: &str = "j/k move  ·  enter jump  ·  space reply  ·  q quit";
@@ -168,9 +168,9 @@ fn draw_roster(
             Row::Header(workspace) => ListItem::new(workspace.clone()).bold(),
             Row::Entry(index) => ListItem::new(agent_destination(agents[*index])),
             Row::Detail(index) => {
-                let detail = format!("  {}", agent_detail(agents[*index], now_ms));
+                let detail = agent_detail(agents[*index], now_ms);
                 if highlight_index == Some(*index) {
-                    ListItem::new(detail).bg(SELECTION_BG)
+                    ListItem::new(detail).fg(SELECTION_FG).bg(SELECTION_BG)
                 } else {
                     ListItem::new(detail).dim()
                 }
@@ -185,8 +185,9 @@ fn draw_roster(
     list_state.select(selected_row);
 
     let list = List::new(items)
-        .highlight_style(Style::new().bg(SELECTION_BG))
-        .highlight_symbol("> ");
+        .highlight_style(Style::new().fg(SELECTION_FG).bg(SELECTION_BG))
+        .highlight_symbol("> ")
+        .highlight_spacing(HighlightSpacing::Always);
 
     let viewport = area.height as usize;
     let overflow = rows.len() > viewport;

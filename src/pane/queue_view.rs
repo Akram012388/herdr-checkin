@@ -10,7 +10,7 @@ use super::{PaneModel, ReplyDraft};
 use crate::{entry_destination, entry_detail, QueueEntry, WaitStatus};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style, Stylize};
-use ratatui::widgets::{List, ListItem, ListState};
+use ratatui::widgets::{HighlightSpacing, List, ListItem, ListState};
 use ratatui::Frame;
 
 /// The section header text for each `WaitStatus`, in the order sections are shown: agents that need
@@ -18,10 +18,11 @@ use ratatui::Frame;
 const CHECKIN_HEADER: &str = "CHECKIN";
 const DONE_HEADER: &str = "DONE";
 
-/// The selection band: a soft grey fill behind the selected entry (both its lines), instead of a
-/// full reversed-video swap which reads as a harsh white band on a dark theme. Tunable by eye — a
-/// lighter grey such as `Color::Indexed(244)` for a more visible band, darker for a subtler one.
+/// The selection band: ANSI bright black follows the user's terminal palette instead of optimizing
+/// an indexed grey for one theme. An explicit white foreground keeps the band legible on light
+/// themes without returning to the harsh full reversed-video treatment.
 pub(super) const SELECTION_BG: Color = Color::DarkGray;
+pub(super) const SELECTION_FG: Color = Color::White;
 
 /// One rendered line of the grouped agents-view: a blank spacer, a non-selectable section header,
 /// an entry's **primary** line (the go-to destination, carrying its index into `entries` — the
@@ -92,11 +93,11 @@ pub(super) fn draw_list(
         Some(draft) => model.entries.iter().position(|e| e.pane_id == draft.target),
         None => Some(model.selected),
     };
-    let highlight_style = Style::new().bg(SELECTION_BG);
+    let highlight_style = Style::new().fg(SELECTION_FG).bg(SELECTION_BG);
 
-    // Each entry is two lines: the go-to destination (bright, the selectable/anchored line) and its
-    // detail (indented under it). The detail of the focused entry takes the same band — not dim — so
-    // its two lines read as one highlighted block.
+    // Each entry is two lines on one content edge: List's permanent two-column marker gutter aligns
+    // both the destination and detail. The focused detail takes the same explicit-contrast band —
+    // not dim — so its two lines read as one highlighted block.
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match row {
@@ -115,9 +116,9 @@ pub(super) fn draw_list(
                 if entry_destination(entry).is_none() {
                     ListItem::new("")
                 } else {
-                    let detail = format!("  {}", entry_detail(entry, now_ms));
+                    let detail = entry_detail(entry, now_ms);
                     if highlight_index == Some(*index) {
-                        ListItem::new(detail).bg(SELECTION_BG)
+                        ListItem::new(detail).fg(SELECTION_FG).bg(SELECTION_BG)
                     } else {
                         ListItem::new(detail).dim()
                     }
@@ -134,7 +135,8 @@ pub(super) fn draw_list(
 
     let list = List::new(items)
         .highlight_style(highlight_style)
-        .highlight_symbol("> ");
+        .highlight_symbol("> ")
+        .highlight_spacing(HighlightSpacing::Always);
 
     // Reserve the right-most column for a scrollbar when the grouped rows overflow the viewport, so
     // the list text never collides with the thumb. `List`+`ListState` already scrolls to keep the

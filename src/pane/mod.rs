@@ -859,7 +859,10 @@ fn draw(
 fn draw_tab_bar(frame: &mut Frame, area: Rect, active: ActiveTab) {
     use ratatui::text::{Line, Span};
 
-    let band = Style::new().bold().bg(queue_view::SELECTION_BG);
+    let band = Style::new()
+        .bold()
+        .fg(queue_view::SELECTION_FG)
+        .bg(queue_view::SELECTION_BG);
     let idle = Style::new().dim();
     let (queue_style, agents_style) = match active {
         ActiveTab::Queue => (band, idle),
@@ -960,6 +963,7 @@ mod tests {
     use crate::WaitStatus;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::style::{Color, Modifier};
     use ratatui::Terminal;
 
     fn entry(pane_id: &str) -> QueueEntry {
@@ -1418,6 +1422,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn queue_rows_share_a_content_edge_and_the_selected_block_has_explicit_contrast() {
+        let m = model(&["w1:p1", "w2:p1"]);
+        let buffer = render_buffer(&m, 80, 10);
+
+        assert_eq!(
+            buffer[(2, 4)].symbol(),
+            "w",
+            "destination starts after the gutter"
+        );
+        assert_eq!(
+            buffer[(2, 5)].symbol(),
+            "b",
+            "detail shares the content edge"
+        );
+        for y in [4, 5] {
+            let style = buffer[(2, y)].style();
+            assert_eq!(style.fg, Some(Color::White));
+            assert_eq!(style.bg, Some(Color::DarkGray));
+            assert!(!style.add_modifier.contains(Modifier::DIM));
+        }
+        assert!(
+            buffer[(2, 7)].style().add_modifier.contains(Modifier::DIM),
+            "an unselected detail keeps the primary/detail hierarchy"
+        );
+    }
+
+    #[test]
+    fn compose_input_and_placeholder_use_the_shared_two_column_gutter() {
+        let mut typed = model(&["w1:p1"]);
+        typed.begin_reply();
+        typed.reply.as_mut().unwrap().input.insert_str("hi");
+        let typed_buffer = render_buffer(&typed, 80, 11);
+        assert_eq!(typed_buffer[(2, 7)].symbol(), "h");
+        assert_eq!(typed.reply.as_ref().unwrap().wrap_width.get(), 78);
+
+        let mut empty = model(&["w1:p1"]);
+        empty.begin_reply();
+        let empty_buffer = render_buffer(&empty, 80, 11);
+        assert_eq!(empty_buffer[(2, 7)].symbol(), "t");
+        assert_eq!(empty_buffer[(3, 7)].symbol(), "y");
+        assert_eq!(empty_buffer[(3, 7)].style().fg, Some(Color::DarkGray));
+    }
+
     // --- Agents view: tab toggle + roster render ---------------------------
 
     use crate::roster::{AgentStatus, RosterAgent, RosterSnapshot};
@@ -1580,6 +1628,33 @@ mod tests {
                 "working ~ · herdr-checkin",
                 "j/k move  ·  enter jump  ·  space reply  ·  q quit",
             ]
+        );
+    }
+
+    #[test]
+    fn agent_rows_share_the_queue_content_grid_and_selection_contrast() {
+        let m = agents_model(&[("w4:p1", "w4"), ("w4:p2", "w4")]);
+        let buffer = render_buffer(&m, 80, 9);
+
+        assert_eq!(
+            buffer[(2, 4)].symbol(),
+            "t",
+            "destination starts after the gutter"
+        );
+        assert_eq!(
+            buffer[(2, 5)].symbol(),
+            "w",
+            "detail shares the content edge"
+        );
+        for y in [4, 5] {
+            let style = buffer[(2, y)].style();
+            assert_eq!(style.fg, Some(Color::White));
+            assert_eq!(style.bg, Some(Color::DarkGray));
+            assert!(!style.add_modifier.contains(Modifier::DIM));
+        }
+        assert!(
+            buffer[(2, 7)].style().add_modifier.contains(Modifier::DIM),
+            "an unselected detail stays dim"
         );
     }
 

@@ -6,10 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [0.4.0] - 2026-07-22
 
-The triage-popup release: the status pane becomes an agents-view console you can **reply into**,
-rendered as a centered popup modal. Bundles the previously-unreleased pane features (clear-all,
-mouse-select, module split) with the popup, inline reply, and grouped render as one interface
-release.
+The triage-popup release: the status pane becomes a two-tab attention console you can **reply into**,
+rendered as a centered popup modal. A durable Queue sits beside a live Agents roster, combining the
+previously-unreleased pane features (clear-all, mouse-select, module split) with the popup, inline
+reply, and grouped render as one interface release.
 
 ### Added
 - **Triage popup — the status pane is now an agents-view console.** `open-pane` opens the pane as a
@@ -17,18 +17,32 @@ release.
   herdr's own `prefix+s` settings — sized via `width`/`height` percentages and drawn by herdr with a
   border and a "Check-in" title. Enqueued waiters are grouped into **CHECKIN** (`blocked`) and
   **DONE** (`done`) sections, oldest-first within each, each preceded by a blank spacer line so the
-  groups read as distinct blocks. It stays an inbox of what pinged you — only enqueued waiters ever
-  appear, never a live roster of all agents. Section headers are non-selectable; `j`/`k` and click
-  move in on-screen order across the sections, and selection stays anchored to its entry as the
-  queue changes. A popup is a session-level singleton, so the old open/focus/close toggle is gone:
+  groups read as distinct blocks. This durable inbox is the **Queue** tab; the adjacent **Agents**
+  tab shows every running agent. Section headers are non-selectable; `j`/`k` and click move in
+  on-screen order across the sections, and selection stays anchored to its entry as the queue
+  changes. A popup is a session-level singleton, so the old open/focus/close toggle is gone:
   `q`/`Esc` dismisses it, and a successful `Enter` jump closes it too (the pane calls the
   `popup.close` socket method on exit).
-- **Inline reply (`space`).** Reply to the selected waiter without leaving the pane: `space` opens a
-  compose strip, you type an answer, and `Enter` routes it into that agent's session via
-  `herdr agent prompt <pane_id>`, then drops the entry. Fire-and-forget — the entry leaves the queue
-  the instant the send is accepted (reply *is* acknowledgment of the debt); if that agent finishes
-  again it re-enqueues at the tail as a fresh waiter. A failed send **keeps** the entry (act, then
-  evict on success only — the same discipline as `Enter`/jump); `Esc` cancels; an empty/whitespace
+- **Live Agents roster beside the durable Queue.** `Tab` or `Ctrl+S` switches between two persistent
+  tabs in the same popup. Agents are grouped by workspace and shown with human workspace, tab, and
+  pane names. The popup opens on Agents when the Queue is empty and on Queue when waiters exist; each
+  tab preserves its own selection. The roster refreshes in the background without running herdr CLI
+  calls on the render tick, and selection remains anchored by `pane_id` across refreshes. `j`/`k`,
+  arrows, and click select an agent; `space` replies and `Enter` jumps through the same act-first,
+  evict-on-success handlers as the Queue. Queue-only mutations (`d` and `c`) remain unavailable on
+  the roster.
+- **Live status context for every agent.** Agent rows include time in the current state and the last
+  meaningful terminal output line. Transition times are event-stamped in a separate, prunable
+  `roster.json` observation cache; unknown times are shown honestly as `~`, and deleting the cache
+  cannot lose a queued ping. Terminal tails are sampled on the worker with a bounded, status-first
+  round-robin budget and skip rendered agent UI chrome; read failures retain the last known line and
+  the terminal title remains the fallback.
+- **Inline reply (`space`).** Reply to the selected agent without leaving the pane: `space` opens a
+  compose strip from either tab, you type an answer, and `Enter` routes it into that agent's session
+  via `herdr agent prompt <pane_id>`, then drops any queued entry. Fire-and-forget — the entry leaves
+  the queue the instant the send is accepted (reply *is* acknowledgment of the debt); if that agent
+  finishes again it re-enqueues at the tail as a fresh waiter. A failed send **keeps** the entry
+  (act, then evict on success only — the same discipline as `Enter`/jump); `Esc` cancels; an empty/whitespace
   reply sends nothing and stays in reply mode. The reply target is captured when reply mode is armed,
   so a concurrent queue refresh can't retarget it. Composing darkens the queue as one veil so the
   strip is the only lit surface (and the answered agent keeps a soft grey band so it stays obvious
@@ -66,9 +80,15 @@ release.
   terminal editing: `ctrl+a`/`ctrl+e` (line start/end), `←`/`→`/word-jumps (mid-line cursor),
   `ctrl+w` (delete word), `ctrl+k` (delete to end), correct on wide/combining characters. `Enter`
   still submits and `Esc` cancels (both intercepted before the widget, so it stays single-line). It
-  scrolls horizontally instead of wrapping across rows. **Bracketed paste** is now enabled and a
-  paste is inserted as one edit with newlines/tabs flattened to spaces — closing a footgun where a
-  pasted newline used to fire a half-written reply into the agent.
+  soft-wraps across three display rows, with `Up`/`Down` moving between wrapped rows while preserving
+  the visual column; this does not add multiline send semantics. **Bracketed paste** is now enabled
+  and a paste is inserted as one edit with newlines/tabs flattened to spaces — closing a footgun
+  where a pasted newline used to fire a half-written reply into the agent.
+- **Agents view now paints with the popup and samples cheaply.** On an Agents-first open, the pane
+  waits at most 200ms for the worker's immediate first snapshot before entering the event loop, so
+  rows appear with the popup instead of a tick later. Human-name maps are cached on the sampler
+  thread and refreshed when membership changes or approximately every 15 seconds, reducing the
+  steady-state roster path from four herdr subprocesses per second to one.
 - **Softer, more legible highlights.** The selection is a soft grey band
   (`Color::DarkGray` background) instead of full reversed video, which read as a harsh white bar on a
   dark theme; the same band marks the agent being replied to while composing. The footer hint bar is
@@ -86,10 +106,9 @@ release.
   convention every other cursor key in the bar already follows.
 
 ### Docs
-- README now documents the popup-modal agents-view console, the grouped **CHECKIN** / **DONE**
-  sections, and the `space` inline-reply key, with a refreshed animated demo (`docs/pane-demo.gif`)
-  — still regenerable offline with no real agents via `scripts/pane-demo.tape` +
-  `scripts/pane-demo-setup.sh` (VHS).
+- README now documents the popup-modal console, its Queue and Agents tabs, the grouped **CHECKIN** /
+  **DONE** queue sections, and the `space` inline-reply key. The animated demo remains regenerable
+  offline with no real agents via `scripts/pane-demo.tape` + `scripts/pane-demo-setup.sh` (VHS).
 
 ## [0.3.0] - 2026-07-22
 
