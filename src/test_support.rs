@@ -93,6 +93,13 @@ impl FakeHerdr {
             .collect();
         self
     }
+
+    /// Seed the raw `agent list` roster (un-enriched) returned by `agent_roster`, for the cached
+    /// `sample_roster` path.
+    pub(crate) fn with_agents(mut self, agents: Vec<RosterAgent>) -> Self {
+        self.agents = agents;
+        self
+    }
 }
 
 impl Herdr for FakeHerdr {
@@ -110,6 +117,10 @@ impl Herdr for FakeHerdr {
 
     fn tab_labels(&self) -> Result<HashMap<String, String>, PluginError> {
         Ok(self.tab_labels.clone())
+    }
+
+    fn agent_roster(&self) -> Result<Vec<RosterAgent>, PluginError> {
+        Ok(self.agents.clone())
     }
 
     fn agent_list(&self) -> Result<Vec<RosterAgent>, PluginError> {

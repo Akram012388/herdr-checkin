@@ -5,7 +5,7 @@
 use crate::roster::{AgentStatus, RosterAgent};
 use crate::state::{PluginError, WaitStatus};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -41,10 +41,14 @@ pub(crate) trait Herdr {
     /// Map of `tab_id -> label` from `herdr tab list` (e.g. `w4:t2 -> "claude"`). The tab label is
     /// usually the running program, exactly what herdr's go-to picker shows for the tab.
     fn tab_labels(&self) -> Result<HashMap<String, String>, PluginError>;
-    /// The live roster from `herdr agent list` — every detected agent pane, all states. Backs the
-    /// Agents view (design doc §3). Distinct from `pane_infos`: it carries the `agent_session` uuid
-    /// and `focused` flag the queue path deliberately ignores, and its status is the full agent
-    /// vocabulary, not just the wait states.
+    /// The raw roster from `herdr agent list` (one spawn, no enrichment): every detected agent pane,
+    /// all states, carrying the `agent_session` uuid and `focused` flag the queue path ignores. The
+    /// location labels (`workspace_label`/`tab_label`/`pane_label`) are left `None` — callers fill
+    /// them via [`enrich_roster_labels`] or the cached [`sample_roster`].
+    fn agent_roster(&self) -> Result<Vec<RosterAgent>, PluginError>;
+    /// The live roster, enriched with herdr's human names in one shot (four spawns: `agent list` plus
+    /// `workspace`/`tab`/`pane list`). For a one-off dump; the sampler uses [`sample_roster`], which
+    /// caches the label maps instead of refetching them every sample.
     fn agent_list(&self) -> Result<Vec<RosterAgent>, PluginError>;
     /// Bring the agent in the given pane into focus (jumps workspace/tab/pane).
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError>;
@@ -172,8 +176,12 @@ impl Herdr for CliHerdr {
         parse_tab_labels(&self.tab_list_stdout()?)
     }
 
+    fn agent_roster(&self) -> Result<Vec<RosterAgent>, PluginError> {
+        parse_agent_list(&self.agent_list_stdout()?)
+    }
+
     fn agent_list(&self) -> Result<Vec<RosterAgent>, PluginError> {
-        let mut roster = parse_agent_list(&self.agent_list_stdout()?)?;
+        let mut roster = self.agent_roster()?;
         enrich_roster_labels(self, &mut roster);
         Ok(roster)
     }
@@ -410,26 +418,101 @@ fn parse_agent_list(stdout: &[u8]) -> Result<Vec<RosterAgent>, PluginError> {
 fn enrich_roster_labels(herdr: &dyn Herdr, roster: &mut [RosterAgent]) {
     let workspaces = herdr.workspace_labels().unwrap_or_default();
     let tabs = herdr.tab_labels().unwrap_or_default();
-    let panes = herdr.pane_infos().unwrap_or_default();
-    let pane_labels: HashMap<&str, &str> = panes
-        .iter()
-        .filter_map(|pane| {
-            pane.label
-                .as_deref()
-                .map(|label| (pane.pane_id.as_str(), label))
-        })
-        .collect();
+    let pane_labels = pane_label_map(herdr);
+    apply_labels(&workspaces, &tabs, &pane_labels, roster);
+}
 
+/// Fill each roster agent's human names from the given label maps (`workspace_id -> label`,
+/// `tab_id -> label`, `pane_id -> manual pane label`). Pure: a missing entry leaves that label `None`
+/// and the row falls back to the id. Shared by the one-shot [`enrich_roster_labels`] and the cached
+/// [`sample_roster`], so both render identical names from identical maps.
+fn apply_labels(
+    workspaces: &HashMap<String, String>,
+    tabs: &HashMap<String, String>,
+    pane_labels: &HashMap<String, String>,
+    roster: &mut [RosterAgent],
+) {
     for agent in roster.iter_mut() {
         agent.workspace_label = workspaces.get(&agent.workspace_id).cloned();
         agent.tab_label = agent
             .tab_id
             .as_deref()
             .and_then(|tab_id| tabs.get(tab_id).cloned());
-        agent.pane_label = pane_labels
-            .get(agent.pane_id.as_str())
-            .map(|label| label.to_string());
+        agent.pane_label = pane_labels.get(&agent.pane_id).cloned();
     }
+}
+
+/// The `pane_id -> manual pane label` map from `pane list` (only panes carrying a manual label; most
+/// have none). Best-effort: a failed `pane list` yields an empty map and the rows fall back to ids.
+fn pane_label_map(herdr: &dyn Herdr) -> HashMap<String, String> {
+    herdr
+        .pane_infos()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|pane| pane.label.map(|label| (pane.pane_id, label)))
+        .collect()
+}
+
+/// Refetch the label maps at least this often (in samples) regardless of roster membership, so a
+/// workspace/tab/pane *rename* (which doesn't change the pane-id set) still surfaces. At the ~1s
+/// sample cadence that is ~15s of worst-case rename staleness for a cosmetic label — acceptable.
+const LABEL_REFRESH_EVERY: u32 = 15;
+
+/// The workspace/tab/pane label maps the Agents roster enriches from, cached across samples so the
+/// sampler's hot loop spawns a single `herdr agent list` instead of four processes every second.
+/// The maps change only on a rename or a new workspace/tab/pane, so they are refetched lazily — when
+/// a new agent pane appears (it must get its human name in the sample that first shows it) or on the
+/// [`LABEL_REFRESH_EVERY`] periodic refresh (for renames). Lives on the sampler thread; never shared.
+#[derive(Default)]
+pub(crate) struct LabelCache {
+    workspaces: HashMap<String, String>,
+    tabs: HashMap<String, String>,
+    pane_labels: HashMap<String, String>,
+    /// The agent pane-id set at the last map fetch; a pane outside it means a new agent appeared.
+    known_pane_ids: HashSet<String>,
+    /// Samples enriched since the last fetch, for the periodic refresh.
+    samples_since_refresh: u32,
+}
+
+impl LabelCache {
+    /// Whether the cached maps are stale for `pane_ids`: a pane appeared that wasn't present at the
+    /// last fetch (a new agent needs its name now), or the periodic interval elapsed (to catch
+    /// renames). A pane merely *vanishing* needs no refetch — the remaining names are unchanged.
+    fn needs_refresh(&self, pane_ids: &HashSet<&str>) -> bool {
+        self.samples_since_refresh >= LABEL_REFRESH_EVERY
+            || pane_ids.iter().any(|id| !self.known_pane_ids.contains(*id))
+    }
+}
+
+/// Sample the live roster for the Agents view, enriching from `cache` and refetching the label maps
+/// only when [`LabelCache::needs_refresh`] says so. Steady state is one `agent list` spawn per call;
+/// the three label-map spawns happen only on a membership change or the periodic refresh. Best-effort
+/// enrichment, exactly like [`enrich_roster_labels`] — a failed map fetch degrades names, never the
+/// roster.
+pub(crate) fn sample_roster(
+    herdr: &dyn Herdr,
+    cache: &mut LabelCache,
+) -> Result<Vec<RosterAgent>, PluginError> {
+    let mut roster = herdr.agent_roster()?;
+    let pane_ids: HashSet<&str> = roster.iter().map(|agent| agent.pane_id.as_str()).collect();
+
+    if cache.needs_refresh(&pane_ids) {
+        cache.workspaces = herdr.workspace_labels().unwrap_or_default();
+        cache.tabs = herdr.tab_labels().unwrap_or_default();
+        cache.pane_labels = pane_label_map(herdr);
+        cache.known_pane_ids = pane_ids.iter().map(|id| id.to_string()).collect();
+        cache.samples_since_refresh = 0;
+    } else {
+        cache.samples_since_refresh += 1;
+    }
+
+    apply_labels(
+        &cache.workspaces,
+        &cache.tabs,
+        &cache.pane_labels,
+        &mut roster,
+    );
+    Ok(roster)
 }
 
 /// The session uuid from an agent's nested `agent_session.value`, or `None` when the object (or the
@@ -781,6 +864,82 @@ mod tests {
         assert_eq!(roster[0].workspace_label, None);
         assert_eq!(roster[0].tab_label, None);
         assert_eq!(roster[0].pane_label, None);
+    }
+
+    #[test]
+    fn sample_roster_enriches_from_the_cache_and_only_refetches_on_a_membership_change() {
+        use crate::test_support::FakeHerdr;
+
+        let herdr = FakeHerdr::new(&[])
+            .with_agents(vec![RosterAgent {
+                pane_id: "w4:p1".to_string(),
+                workspace_id: "w4".to_string(),
+                tab_id: Some("w4:t1".to_string()),
+                agent: Some("codex".to_string()),
+                agent_status: AgentStatus::Idle,
+                agent_session: None,
+                cwd: None,
+                focused: false,
+                terminal_title: None,
+                workspace_label: None,
+                tab_label: None,
+                pane_label: None,
+            }])
+            .with_workspace_labels(&[("w4", "home")])
+            .with_tab_labels(&[("w4:t1", "~")])
+            .with_panes(vec![PaneInfo {
+                pane_id: "w4:p1".to_string(),
+                workspace_id: "w4".to_string(),
+                tab_id: Some("w4:t1".to_string()),
+                label: Some("editor".to_string()),
+                agent_status: "idle".to_string(),
+                agent: Some("codex".to_string()),
+                display_agent: None,
+                title: None,
+            }]);
+
+        let mut cache = LabelCache::default();
+        // First sample: the fresh cache is a miss, so it fetches the maps and enriches human names.
+        let roster = sample_roster(&herdr, &mut cache).expect("first sample succeeds");
+        assert_eq!(roster[0].workspace_label.as_deref(), Some("home"));
+        assert_eq!(roster[0].tab_label.as_deref(), Some("~"));
+        assert_eq!(roster[0].pane_label.as_deref(), Some("editor"));
+        assert!(cache.known_pane_ids.contains("w4:p1"));
+        assert_eq!(cache.samples_since_refresh, 0);
+
+        // Second sample, identical roster: no membership change -> cache-only, still enriched.
+        let roster = sample_roster(&herdr, &mut cache).expect("second sample succeeds");
+        assert_eq!(roster[0].workspace_label.as_deref(), Some("home"));
+        assert_eq!(
+            cache.samples_since_refresh, 1,
+            "a stable roster does not refetch the label maps"
+        );
+    }
+
+    #[test]
+    fn label_cache_refreshes_on_a_new_pane_and_periodically_but_not_on_a_stable_or_shrinking_roster(
+    ) {
+        let mut cache = LabelCache::default();
+
+        // A fresh cache has seen nothing, so any pane is new -> refresh.
+        let one: HashSet<&str> = ["w1:p1"].into_iter().collect();
+        assert!(cache.needs_refresh(&one));
+
+        // Record that membership as fetched; the same roster is now cache-only.
+        cache.known_pane_ids = ["w1:p1"].into_iter().map(String::from).collect();
+        cache.samples_since_refresh = 0;
+        assert!(!cache.needs_refresh(&one));
+
+        // A newly appeared pane forces a refetch (it must get its human name at once)...
+        let grown: HashSet<&str> = ["w1:p1", "w2:p1"].into_iter().collect();
+        assert!(cache.needs_refresh(&grown));
+
+        // ...but a pane merely vanishing does not (the remaining names are unchanged).
+        assert!(!cache.needs_refresh(&one));
+
+        // The periodic refresh fires regardless of membership, to catch renames.
+        cache.samples_since_refresh = LABEL_REFRESH_EVERY;
+        assert!(cache.needs_refresh(&one));
     }
 
     #[test]

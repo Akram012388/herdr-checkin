@@ -19,7 +19,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
-const AGENTS_FOOTER_HINTS: &str = "j/k move  ·  Enter jump  ·  space reply  ·  q quit";
+const AGENTS_FOOTER_HINTS: &str = "j/k move  ·  enter jump  ·  space reply  ·  q quit";
 
 /// One rendered line of the grouped roster: a blank spacer, a non-selectable workspace header, an
 /// agent's **primary** line (the destination, carrying its index into the display-order agent list —
@@ -69,12 +69,12 @@ pub(super) fn draw_agents(
 
     let areas = match compose {
         Some(_) => Layout::vertical([
-            Constraint::Length(1), // tab bar
-            Constraint::Length(1), // count header
-            Constraint::Min(0),    // the roster (dimmed while composing)
-            Constraint::Length(1), // titled rule
-            Constraint::Length(1), // input
-            Constraint::Length(1), // hint
+            Constraint::Length(1),                          // tab bar
+            Constraint::Length(1),                          // count header
+            Constraint::Min(0),                             // the roster (dimmed while composing)
+            Constraint::Length(1),                          // titled rule
+            Constraint::Length(super::compose::INPUT_ROWS), // input
+            Constraint::Length(1),                          // hint
         ])
         .split(interior),
         None => Layout::vertical([

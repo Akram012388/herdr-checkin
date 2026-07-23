@@ -22,7 +22,7 @@ mod agents_view;
 mod compose;
 mod queue_view;
 
-use crate::herdr::CliHerdr;
+use crate::herdr::{sample_roster, CliHerdr, LabelCache};
 use crate::roster::{agents_in_display_order, roster_reply_label, RosterAgent, RosterSnapshot};
 use crate::{
     agent_label, clear, current_unix_ms, evict, load_entries, Herdr, PluginError, QueueEntry,
@@ -36,14 +36,15 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Style, Stylize};
+use ratatui::style::{Style, Stylize};
 use ratatui::widgets::{ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use tui_textarea::TextArea;
+use tui_textarea::{CursorMove, TextArea};
 
 /// How long the input poll blocks each tick before we re-read the queue and repaint, so queue
 /// changes and the ticking "waited" column appear promptly without busy-spinning.
@@ -53,8 +54,14 @@ const TICK: Duration = Duration::from_millis(250);
 /// drains the delivered snapshots, so a status flip surfaces within about one cadence plus one tick.
 const ROSTER_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How long the pane blocks once at open, waiting for the sampler's first snapshot, so the Agents
+/// view paints rows with the popup instead of a "Sampling agents..." placeholder that lingers a
+/// render tick (or ~1s under load). Bounded: a slow or dead sampler delays the popup no longer than
+/// this, then the normal async path takes over (see [`RosterSampler::recv_latest_within`]).
+const FIRST_SAMPLE_WAIT: Duration = Duration::from_millis(200);
+
 const FOOTER_HINTS: &str =
-    "j/k move  ·  Enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit";
+    "j/k move  ·  enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit";
 
 /// Entry point for the `pane` subcommand: run the TUI until the user closes it. The terminal is
 /// restored on every exit path (including a panic, via the hook `ratatui::try_init` installs).
@@ -131,6 +138,31 @@ fn event_loop(
     // tears it down cleanly.
     let sampler = RosterSampler::spawn(runtime.herdr_bin_path.clone());
 
+    // Frame 1: paint the popup shell immediately (it appears instantly, never hostage to a slow
+    // `agent list`). Then, when the Agents view is what's showing, block briefly for the sampler's
+    // immediate first snapshot (it samples once on spawn, ~20ms) so rows appear almost at once
+    // instead of after a render-tick round-trip. Bounded by `FIRST_SAMPLE_WAIT`; on the Queue tab the
+    // roster is off-screen, so skip the wait and go straight to input handling.
+    {
+        let mut list_area = None;
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    model,
+                    current_unix_ms(),
+                    &mut list_state,
+                    &mut list_area,
+                )
+            })
+            .map_err(|error| PluginError::new(format!("failed to draw: {error}")))?;
+    }
+    if model.tab == ActiveTab::Agents {
+        if let Some(snapshot) = sampler.recv_latest_within(FIRST_SAMPLE_WAIT) {
+            model.apply_roster(snapshot);
+        }
+    }
+
     loop {
         let now_ms = current_unix_ms();
         let mut list_area = None;
@@ -168,6 +200,10 @@ fn event_loop(
                             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 model.reply_delete_to_line_start()
                             }
+                            // Up/Down walk the soft-wrapped rows of the single logical line rather
+                            // than feeding the TextArea (which has only one line to move within).
+                            KeyCode::Up => model.reply_cursor_vertical(false),
+                            KeyCode::Down => model.reply_cursor_vertical(true),
                             _ => model.reply_input(key),
                         }
                     } else if model.confirm_clear {
@@ -424,6 +460,24 @@ impl RosterSampler {
         }
         latest
     }
+
+    /// Block up to `bound` for the first snapshot, then sweep up any already queued behind it
+    /// (newest wins). Returns `None` on timeout or if the worker is gone — the caller keeps the
+    /// placeholder and the async path recovers. Used once at open to seed the Agents view promptly
+    /// without ever running the CLI on the render thread (invariant: the worker still samples).
+    fn recv_latest_within(&self, bound: Duration) -> Option<RosterSnapshot> {
+        match self.rx.recv_timeout(bound) {
+            Ok(first) => {
+                let mut latest = first;
+                while let Ok(snapshot) = self.rx.try_recv() {
+                    latest = snapshot;
+                }
+                Some(latest)
+            }
+            // Timeout (no sample yet) or Disconnected (worker died at spawn): keep the placeholder.
+            Err(_) => None,
+        }
+    }
 }
 
 impl Drop for RosterSampler {
@@ -441,9 +495,14 @@ impl Drop for RosterSampler {
 /// interruptible `recv_timeout` (rather than `thread::sleep`) means a stop wakes it immediately.
 /// Exits when the shell drops the receiver (the pane is closing) or signals stop; an `agent list`
 /// error is skipped so a transient failure never blanks the view — the next sample recovers.
+///
+/// The thread owns a [`LabelCache`], so the steady-state sample is a single `agent list` spawn: the
+/// workspace/tab/pane label maps are refetched only when a new agent pane appears or on a slow
+/// periodic refresh (see [`sample_roster`]), not every second.
 fn sampler_loop(herdr: &CliHerdr, snapshot_tx: &Sender<RosterSnapshot>, stop_rx: &Receiver<()>) {
+    let mut labels = LabelCache::default();
     loop {
-        if let Ok(agents) = herdr.agent_list() {
+        if let Ok(agents) = sample_roster(herdr, &mut labels) {
             let snapshot = RosterSnapshot {
                 sampled_at_ms: current_unix_ms(),
                 agents,
@@ -485,6 +544,10 @@ struct ReplyDraft {
     target: String,
     label: String,
     input: TextArea<'static>,
+    /// The width the input last rendered at, recorded by `draw_compose` each frame. The Up/Down
+    /// handlers read it so they wrap the logical line exactly as the render did — otherwise the
+    /// caret could jump to a wrapped row that isn't on screen.
+    wrap_width: Cell<u16>,
 }
 
 /// The pane's view state: the queue plus a selection cursor and a transient footer message.
@@ -610,14 +673,14 @@ impl PaneModel {
         if self.confirm_clear {
             return;
         }
-        let mut input = TextArea::default();
-        input.set_placeholder_text("type your reply");
-        input.set_placeholder_style(Style::new().fg(Color::DarkGray));
-        input.set_cursor_line_style(Style::default()); // no full-line underline; keep the strip clean
+        // The `TextArea` is only the text model now — `compose::draw_input` paints the soft-wrapped
+        // rows, placeholder, and block caret itself, so the widget's own render styling is unused.
+        let input = TextArea::default();
         self.reply = Some(ReplyDraft {
             target,
             label,
             input,
+            wrap_width: Cell::new(0),
         });
     }
 
@@ -626,6 +689,23 @@ impl PaneModel {
     fn reply_input(&mut self, key: KeyEvent) {
         if let Some(draft) = self.reply.as_mut() {
             draft.input.input(key);
+        }
+    }
+
+    /// Up/Down in reply mode: move the caret one wrapped display row within the single logical line,
+    /// keeping its visual column. Wraps at the width `draw_input` last rendered at (recorded on the
+    /// draft) so navigation matches the screen exactly. No-op before the first render or outside
+    /// reply mode.
+    fn reply_cursor_vertical(&mut self, down: bool) {
+        if let Some(draft) = self.reply.as_mut() {
+            let width = draft.wrap_width.get() as usize;
+            if width == 0 {
+                return;
+            }
+            let line = draft.input.lines()[0].clone();
+            let (_, col) = draft.input.cursor();
+            let target = compose::cursor_move_vertical(&line, width, col, down);
+            draft.input.move_cursor(CursorMove::Jump(0, target as u16));
         }
     }
 
@@ -783,18 +863,18 @@ fn draw_queue(
     let interior = frame.area();
 
     // In reply mode the single footer line expands into a compose strip docked below the list: a
-    // titled rule, a fixed 1-row input (the TextArea scrolls horizontally; no wrapping/height
-    // calc), and a hint row.
+    // titled rule, a soft-wrapping input (`compose::INPUT_ROWS` rows; one logical line wrapped for
+    // display), and a hint row.
     let compose = model.reply.as_ref();
 
     let areas = match &compose {
         Some(_) => Layout::vertical([
-            Constraint::Length(1), // tab bar
-            Constraint::Length(1), // count header
-            Constraint::Min(0),    // the queue (dimmed while composing)
-            Constraint::Length(1), // titled rule
-            Constraint::Length(1), // input
-            Constraint::Length(1), // hint
+            Constraint::Length(1),                   // tab bar
+            Constraint::Length(1),                   // count header
+            Constraint::Min(0),                      // the queue (dimmed while composing)
+            Constraint::Length(1),                   // titled rule
+            Constraint::Length(compose::INPUT_ROWS), // input
+            Constraint::Length(1),                   // hint
         ])
         .split(interior),
         None => Layout::vertical([
@@ -1241,7 +1321,7 @@ mod tests {
                 "No agents waiting — you're all caught up.",
                 "",
                 "",
-                "j/k move  ·  Enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit",
+                "j/k move  ·  enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit",
             ]
         );
     }
@@ -1268,7 +1348,7 @@ mod tests {
                 "DONE",
                 "w3 · pane 1",
                 "done · t · just now",
-                "j/k move  ·  Enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit",
+                "j/k move  ·  enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit",
             ]
         );
     }
@@ -1278,8 +1358,10 @@ mod tests {
         let mut m = model(&["w1:p1"]);
         m.begin_reply();
         m.reply.as_mut().unwrap().input.insert_str("hi");
+        // The input is now `compose::INPUT_ROWS` tall (a single logical line wrapped for display), so
+        // "hi" sits on the first input row with two blank rows beneath it before the hint.
         assert_eq!(
-            content_lines(&render_buffer(&m, 80, 9)),
+            content_lines(&render_buffer(&m, 80, 11)),
             vec![
                 "Queue     Agents      tab · switch".to_string(),
                 "1 agent waiting".to_string(),
@@ -1289,6 +1371,8 @@ mod tests {
                 "blocked · t · just now".to_string(),
                 format!("─ Reply to Claude {}", "─".repeat(62)),
                 "hi".to_string(),
+                "".to_string(),
+                "".to_string(),
                 "enter send · esc cancel".to_string(),
             ]
         );
@@ -1466,7 +1550,7 @@ mod tests {
                 "wN",
                 "t1 · pane 1",
                 "working · herdr-checkin",
-                "j/k move  ·  Enter jump  ·  space reply  ·  q quit",
+                "j/k move  ·  enter jump  ·  space reply  ·  q quit",
             ]
         );
     }
@@ -1483,7 +1567,7 @@ mod tests {
                 "no agents",
                 "Sampling agents...",
                 "",
-                "j/k move  ·  Enter jump  ·  space reply  ·  q quit",
+                "j/k move  ·  enter jump  ·  space reply  ·  q quit",
             ]
         );
     }
@@ -1505,7 +1589,7 @@ mod tests {
                 "no agents",
                 "No agents running.",
                 "",
-                "j/k move  ·  Enter jump  ·  space reply  ·  q quit",
+                "j/k move  ·  enter jump  ·  space reply  ·  q quit",
             ]
         );
     }
