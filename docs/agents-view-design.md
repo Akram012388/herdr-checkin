@@ -139,18 +139,20 @@ this doc is the durable design, the issues are the per-slice work tracker.
     pane id across the 1s refresh so the cursor never jumps); `space` reply through the shared
     compose target (`arm_reply(pane_id, label)`, the design's "not a faked QueueEntry" seam); `Enter`
     jump via the one shared `on_enter` dispatch — focus then act-then-evict-on-success (idempotent, a
-    no-op when the agent wasn't queued). Rows: destination (`{tab} · pane {n}`, workspace is the group
-    header) + `{status} · {title}`, grouped by workspace, with the same selection band + `> ` cursor +
-    overflow scrollbar as the Queue (scrollbar helpers reused from `queue_view`).
+    no-op when the agent wasn't queued). Rows: identity + destination
+    (`{agent} · {distinct tab} · pane {n}`, workspace is the group header) +
+    `{status} · {title}`, grouped by workspace, with the same selection band + `> ` cursor + overflow
+    scrollbar as the Queue (scrollbar helpers reused from `queue_view`).
   - **Consistent affordances (reversing the earlier call):** a **persistent tab bar** now tops both
     views (active tab carries the selection band), so `Tab` is discoverable and identical on each;
     both footers show `space reply`. This deliberately drops the "Queue byte-identical" stance —
     superseded by the maintainer's request for a clear, consistent indicator.
-  - **Human names, not ids:** the roster is enriched (`herdr::enrich_roster_labels`, best-effort) from
-    `workspace list`/`tab list`/`pane list`, so a row reads `home / ~ · pane 1` like herdr's own
-    sidebar rather than `w4 / t1 · pane 1`. `RosterAgent` gained `workspace_label`/`tab_label`/
-    `pane_label`; `agent_destination` + `workspace_display_label` prefer them with id fallback (the
-    Queue's `entry_destination` idiom). A missed lookup degrades to ids — never fails the roster.
+  - **Agent identity + human destinations:** the roster is enriched
+    (`herdr::enrich_roster_labels`, best-effort) from `workspace list`/`tab list`/`pane list`, so a
+    Codex row reads `home / codex · ~ · pane 1` rather than `w4 / codex · t1 · pane 1`.
+    `RosterAgent` carries `workspace_label`/`tab_label`/`pane_label`; `agent_destination` prepends the
+    authoritative agent type and omits only a human tab label that repeats it (`amp · pane 4`, not
+    `amp · amp · pane 4`). A missed lookup degrades to ids — never fails the roster.
   - **Tab-bar tooltip:** a dim `tab · switch` hint sits beside the two tabs on both views.
   - `pane/agents_view.rs` render sibling; `TestBackend` snapshots for the grouped roster (with cursor),
     the placeholder, the empty-roster wording, the toggle, plus model tests for agents selection/clamp,

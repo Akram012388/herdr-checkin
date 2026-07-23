@@ -1618,13 +1618,13 @@ mod tests {
                 "3 agents",
                 "",
                 "w4",                      // workspace group header
-                "> t1 · pane 1",           // the selection cursor sits on the first agent
+                "> claude · t1 · pane 1",  // identity is explicit; the cursor marks this agent
                 "idle 1s · herdr-checkin", // time-in-state from the registry
-                "t1 · pane 2",
+                "claude · t1 · pane 2",
                 "blocked ~ · herdr-checkin", // no registry entry -> honest `~`
                 "",
                 "wN",
-                "t1 · pane 1",
+                "claude · t1 · pane 1",
                 "working ~ · herdr-checkin",
                 "j/k move  ·  enter jump  ·  space reply  ·  q quit",
             ]
@@ -1638,7 +1638,7 @@ mod tests {
 
         assert_eq!(
             buffer[(2, 4)].symbol(),
-            "t",
+            "c",
             "destination starts after the gutter"
         );
         assert_eq!(

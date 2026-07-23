@@ -182,7 +182,8 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
   (now carries `workspace_label`/`tab_label`/`pane_label` — the enriched human names), `RosterSnapshot`,
   `WorkspaceGroup`. Functions: `group_by_workspace` + **`agents_in_display_order`** (the flattened
   grouped order the live view's selection cursor + click hit-testing both index into — they can't
-  drift); the per-row formatters **`agent_destination`** (`{tab} · {pane}`, name-with-id fallback),
+  drift); the per-row formatters **`agent_destination`** (`{agent} · {distinct tab} · {pane}`,
+  identity plus name-with-id destination fallback),
   **`agent_detail`** (`{status} · {title}`), **`workspace_display_label`** (the group header name),
   **`roster_reply_label`** (capitalized agent name for the reply footer); and `render_roster_text` (the
   hidden `roster` debug dump). `herdr.rs` parses + enriches into these; this module never touches the
@@ -258,7 +259,8 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
   `Enter` jump+evict-on-success (**and closes the popup**), **`space` reply inline**, `d` drop, `c`
   clear-all (`y`/`n` confirm), `q`/`Esc` close.
 - **Agents-view keys (full parity, Slice 3):** live roster of **every** agent pane (all states),
-  grouped by workspace with herdr's **human names** (`home / ~ · pane 1`), refreshed ~1s by the
+  grouped by workspace with explicit agent identity and herdr's **human names**
+  (`home / codex · ~ · pane 1`), refreshed ~1s by the
   sampler thread. `j`/`k`/click select (**selection anchored by `pane_id`** so the 1s refresh never
   yanks the cursor); `space` reply and `Enter` jump target the selected roster agent through the SAME
   handlers as the Queue (`arm_reply`, `on_enter` — focus then evict-on-success, idempotent since the

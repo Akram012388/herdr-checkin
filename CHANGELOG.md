@@ -24,9 +24,10 @@ reply, and grouped render as one interface release.
   `q`/`Esc` dismisses it, and a successful `Enter` jump closes it too (the pane calls the
   `popup.close` socket method on exit).
 - **Live Agents roster beside the durable Queue.** `Tab` or `Ctrl+S` switches between two persistent
-  tabs in the same popup. Agents are grouped by workspace and shown with human workspace, tab, and
-  pane names. The popup opens on Agents when the Queue is empty and on Queue when waiters exist; each
-  tab preserves its own selection. The roster refreshes in the background without running herdr CLI
+  tabs in the same popup. Agents are grouped by workspace; each primary row identifies the agent
+  type plus its human tab and pane destination, omitting a tab label only when it repeats the agent
+  type. The popup opens on Agents when the Queue is empty and on Queue when waiters exist; each tab
+  preserves its own selection. The roster refreshes in the background without running herdr CLI
   calls on the render tick, and selection remains anchored by `pane_id` across refreshes. `j`/`k`,
   arrows, and click select an agent; `space` replies and `Enter` jumps through the same act-first,
   evict-on-success handlers as the Queue. Queue-only mutations (`d` and `c`) remain unavailable on

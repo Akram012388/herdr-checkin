@@ -171,28 +171,48 @@ pub(crate) fn workspace_display_label(agent: &RosterAgent) -> &str {
         .unwrap_or(&agent.workspace_id)
 }
 
-/// The primary (destination) line for an Agents-view row: `{tab} · {pane}` within the workspace
-/// group. The workspace is the group header (agents are grouped by workspace), so it is not repeated
-/// per row — this is the queue's `entry_destination` idiom minus the leading workspace. Each segment
-/// prefers herdr's human name (`~`, a pane label) and falls back to the positional id (`t1`, `pane 1`),
-/// so it reads the same as the Queue and herdr's own sidebar once the roster is enriched.
+/// The primary line for an Agents-view row: `{agent} · {tab} · {pane}` within the workspace group.
+/// The workspace is already the group header. Agent identity is authoritative from `agent list`; a
+/// human tab label that repeats it (case-insensitively) is omitted, so an Amp tab reads
+/// `amp · pane 4` while a Codex agent on the generic home tab reads `codex · ~ · pane 1`. Distinct
+/// tab labels remain visible as navigation context. Missing names fall back to positional ids, and
+/// the pane segment is never blank.
 pub(crate) fn agent_destination(agent: &RosterAgent) -> String {
-    let mut parts: Vec<String> = Vec::with_capacity(2);
+    let mut parts: Vec<String> = Vec::with_capacity(3);
 
-    // Tab: its label, else the `tN` segment of the tab id.
-    if let Some(tab) = agent
+    let agent_name = agent
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    if let Some(name) = agent_name {
+        parts.push(name.to_string());
+    }
+
+    // Tab: keep a distinct human label, else the `tN` segment of the tab id. Deduplicate only a
+    // human label that repeats the authoritative agent name; positional ids remain navigation data.
+    let tab_label = agent
         .tab_label
         .as_deref()
-        .filter(|label| !label.is_empty())
-        .or_else(|| agent.tab_id.as_deref().and_then(id_segment))
-    {
-        parts.push(tab.to_string());
+        .map(str::trim)
+        .filter(|label| !label.is_empty());
+    match tab_label {
+        Some(label) if agent_name.is_none_or(|name| !name.eq_ignore_ascii_case(label)) => {
+            parts.push(label.to_string());
+        }
+        Some(_) => {}
+        None => {
+            if let Some(tab) = agent.tab_id.as_deref().and_then(id_segment) {
+                parts.push(tab.to_string());
+            }
+        }
     }
 
     // Pane: its label, else `pane N` from the `pN` segment, else the raw pane id — never blank.
     if let Some(pane) = agent
         .pane_label
         .as_deref()
+        .map(str::trim)
         .filter(|label| !label.is_empty())
     {
         parts.push(pane.to_string());
@@ -604,27 +624,56 @@ mod tests {
 
     #[test]
     fn agent_destination_shows_tab_and_pane_number_within_the_group() {
-        // The workspace is the group header, so the row destination is `{tab} · pane {n}`.
+        // The workspace is the group header; agent identity precedes the tab + pane destination.
         let a = agent("w4:p2", "w4", AgentStatus::Idle); // tab_id defaults to "w4:t1"
-        assert_eq!(agent_destination(&a), "t1 · pane 2");
+        assert_eq!(agent_destination(&a), "claude · t1 · pane 2");
+    }
+
+    #[test]
+    fn agent_destination_identifies_codex_when_the_tab_label_is_generic() {
+        // Live repro: herdr identifies this pane as Codex, but its home tab is labelled `~`.
+        // The agent identity must not disappear merely because Amp's tabs happen to be named `amp`.
+        let codex = RosterAgent {
+            agent: Some("codex".to_string()),
+            tab_label: Some("~".to_string()),
+            ..agent("w4:p1", "w4", AgentStatus::Idle)
+        };
+        assert_eq!(agent_destination(&codex), "codex · ~ · pane 1");
     }
 
     #[test]
     fn agent_destination_prefers_human_names_over_ids() {
-        // Enriched with herdr's names: the row reads `{tab-label} · {pane-label}`, not `t1 · pane 2`.
+        // Enriched with herdr's names: identity precedes human tab/pane navigation labels.
         let a = RosterAgent {
             tab_label: Some("herdr-config".to_string()),
             pane_label: Some("editor".to_string()),
             ..agent("w4:p2", "w4", AgentStatus::Idle)
         };
-        assert_eq!(agent_destination(&a), "herdr-config · editor");
+        assert_eq!(agent_destination(&a), "claude · herdr-config · editor");
         // A pane with only a tab name falls back to `pane N` for the pane segment.
         let tab_only = RosterAgent {
             tab_label: Some("~".to_string()),
             ..agent("w4:p3", "w4", AgentStatus::Idle)
         };
         assert_eq!(tab_only.pane_label, None);
-        assert_eq!(agent_destination(&tab_only), "~ · pane 3");
+        assert_eq!(agent_destination(&tab_only), "claude · ~ · pane 3");
+    }
+
+    #[test]
+    fn agent_destination_deduplicates_an_agent_named_tab() {
+        let amp = RosterAgent {
+            agent: Some("amp".to_string()),
+            tab_label: Some("Amp".to_string()),
+            ..agent("wN:p4", "wN", AgentStatus::Idle)
+        };
+        assert_eq!(agent_destination(&amp), "amp · pane 4");
+
+        let nameless = RosterAgent {
+            agent: None,
+            tab_label: Some("~".to_string()),
+            ..agent("w4:p1", "w4", AgentStatus::Idle)
+        };
+        assert_eq!(agent_destination(&nameless), "~ · pane 1");
     }
 
     #[test]
@@ -643,6 +692,7 @@ mod tests {
     fn agent_destination_falls_back_when_ids_do_not_parse() {
         // No tab id and a non-`pN` pane id: the raw pane id keeps the row identifiable, never blank.
         let a = RosterAgent {
+            agent: None,
             tab_id: None,
             ..agent("weird-pane", "wX", AgentStatus::Working)
         };

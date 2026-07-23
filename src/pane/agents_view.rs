@@ -22,8 +22,8 @@ use ratatui::Frame;
 const AGENTS_FOOTER_HINTS: &str = "j/k move  ·  enter jump  ·  space reply  ·  q quit";
 
 /// One rendered line of the grouped roster: a blank spacer, a non-selectable workspace header, an
-/// agent's **primary** line (the destination, carrying its index into the display-order agent list —
-/// the selection source of truth), or that agent's dim **detail** line. Built per-frame by
+/// agent's **primary** line (agent identity + destination, carrying its index into the display-order
+/// agent list — the selection source of truth), or that agent's dim **detail** line. Built per-frame by
 /// [`layout_rows`], the roster analogue of [`queue_view::Row`](super::queue_view). `Detail` clicks
 /// map back to the same agent; the cursor and highlight anchor on `Entry`.
 pub(super) enum Row {
@@ -34,10 +34,10 @@ pub(super) enum Row {
 }
 
 /// Lay the display-order agents out into rows: a blank spacer + a bold workspace header each time the
-/// workspace changes, then two lines per agent (its destination, then its dim detail). `agents` must
-/// be in display order (grouped by workspace, from `roster::agents_in_display_order`), so a workspace
-/// change delimits each section and every `Entry`/`Detail` index is a position in that same slice —
-/// the paint and the click hit-testing therefore always agree.
+/// workspace changes, then two lines per agent (its identity + destination, then its dim detail).
+/// `agents` must be in display order (grouped by workspace, from
+/// `roster::agents_in_display_order`), so a workspace change delimits each section and every
+/// `Entry`/`Detail` index is a position in that same slice — the paint and click hit-testing agree.
 pub(super) fn layout_rows(agents: &[&RosterAgent]) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut current: Option<&str> = None;

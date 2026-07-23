@@ -38,8 +38,9 @@ pub(crate) trait Herdr {
     /// Map of `workspace_id -> human label` from `herdr workspace list` (e.g. `w4 -> "home"`). Used
     /// to render a readable workspace name on each row instead of the raw positional id.
     fn workspace_labels(&self) -> Result<HashMap<String, String>, PluginError>;
-    /// Map of `tab_id -> label` from `herdr tab list` (e.g. `w4:t2 -> "claude"`). The tab label is
-    /// usually the running program, exactly what herdr's go-to picker shows for the tab.
+    /// Map of `tab_id -> label` from `herdr tab list` (e.g. `w4:t2 -> "claude"`). This is navigation
+    /// metadata and may be generic (for example `~`); `RosterAgent::agent` remains the authoritative
+    /// agent type shown by the Agents view.
     fn tab_labels(&self) -> Result<HashMap<String, String>, PluginError>;
     /// The raw roster from `herdr agent list` (one spawn, no enrichment): every detected agent pane,
     /// all states, carrying the `agent_session` uuid and `focused` flag the queue path ignores. The
@@ -450,10 +451,10 @@ fn parse_agent_list(stdout: &[u8]) -> Result<Vec<RosterAgent>, PluginError> {
 
 /// Enrich a parsed roster with herdr's human names for each pane's workspace/tab/pane. `agent list`
 /// carries only positional ids (`w4`, `w4:t1`), so we resolve labels from `workspace list`/`tab
-/// list`/`pane list` — the same sources the Queue enriches from — so the Agents view reads like
-/// herdr's own sidebar (`home · ~`) rather than raw ids. **Best-effort:** a lookup that fails leaves
-/// that label `None` and the view falls back to the id; cosmetic enrichment must never fail the
-/// roster (losing a name degrades the display, never a waiter).
+/// list`/`pane list` — the same sources the Queue enriches from — so the Agents view retains herdr's
+/// navigation context (`home · ~`) beside the authoritative agent type rather than showing raw ids.
+/// **Best-effort:** a lookup that fails leaves that label `None` and the view falls back to the id;
+/// cosmetic enrichment must never fail the roster (losing a name degrades the display, never a waiter).
 fn enrich_roster_labels(herdr: &dyn Herdr, roster: &mut [RosterAgent]) {
     let workspaces = herdr.workspace_labels().unwrap_or_default();
     let tabs = herdr.tab_labels().unwrap_or_default();
