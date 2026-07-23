@@ -443,7 +443,6 @@ fn parse_agent_list(stdout: &[u8]) -> Result<Vec<RosterAgent>, PluginError> {
             // Terminal contents are not in `agent list`; the sampler's tail sweep fills this from
             // `agent read` after parse (see `TailCache::refresh`).
             last_line: None,
-            pin_rank: None,
         });
     }
     Ok(roster)
@@ -974,7 +973,6 @@ mod tests {
             tab_label: None,
             pane_label: None,
             last_line: None,
-            pin_rank: None,
         }];
         let herdr = FakeHerdr::new(&[])
             .with_workspace_labels(&[("w4", "home")])
@@ -1018,7 +1016,6 @@ mod tests {
             tab_label: None,
             pane_label: None,
             last_line: None,
-            pin_rank: None,
         }];
 
         enrich_roster_labels(&FakeHerdr::new(&[]), &mut roster);
@@ -1048,7 +1045,6 @@ mod tests {
                 tab_label: None,
                 pane_label: None,
                 last_line: None,
-                pin_rank: None,
             }])
             .with_workspace_labels(&[("w4", "home")])
             .with_tab_labels(&[("w4:t1", "~")])
@@ -1098,7 +1094,6 @@ mod tests {
             tab_label: None,
             pane_label: None,
             last_line: None,
-            pin_rank: None,
         }
     }
 

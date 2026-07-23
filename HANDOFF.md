@@ -10,45 +10,13 @@ later pivoted to a popup: [docs/triage-overlay-design.md](docs/triage-overlay-de
 on request. **All the Agents-view work below is post-0.4.0 internal feature work — NOT in the
 CHANGELOG.** · **License:** MIT · **Repo:** https://github.com/Akram012388/herdr-checkin · **State:**
 `main` is green (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` =
-**166 lib + 6 CLI tests**), pushed, tip **`c2fc363`** (Slice 6). Working tree clean.
+**154 lib + 6 CLI tests**), pushed, tip **`771c3e9`** (Slice 4). Working tree clean.
 
 **START HERE (§6): the popup is TWO tabs — the durable Queue + a live Agents roster, `Tab`/`Ctrl+S` to
-toggle. ALL SIX SLICES ARE BUILT (0-6). Slice 6 / issue #7 (pin-to-top) is code-complete + green but
-**HITL-outstanding** (#7 stays open until the maintainer eyeballs pins live — the gate is in §6). No
-build is queued after that — the remaining work is polish + an optional Slice 7 (see §6).**
+toggle. Slices 0-3 + Slice 4 + Slice 5 are DONE (#2/#3/#4/#5/#6 CLOSED). The one remaining build is
+Slice 6 / issue #7 (pin-to-top, HITL) — full plan in §6.**
 
-**What shipped THIS session (Slice 6 / issue #7 — pin-to-top; code-complete + green, HITL-outstanding):**
-- **Pin an agent to the top of its workspace group with `Ctrl+T`**, keyed by **`agent_session` uuid**
-  (never the positional/reusable `pane_id`), persisted in `roster.json`, surviving popup reopen.
-- **`roster_state.rs`:** `RosterStore::update` now carries the whole **`RosterState` (registry + pins)**
-  under one lock (the change closure takes `RosterState`, not `Registry`). New **`Pin`
-  {agent_session, pinned_at_ms, last_seen_ms}** (list order = pin order) + pure **`toggle_pin`** /
-  **`pin_rank`** / **`reconcile_pins`** (bump `last_seen` for live pins, then GC) / **`gc_pins`**
-  (tombstone GC: **7-day TTL** then a **50 cap**, dropping oldest-seen; a live pin's `last_seen`=now so
-  it never GCs). Runtime bridge **`toggle_pin_persist`** (best-effort, returns the new pins list).
-  **`ROSTER_VERSION` bumped 1→2** — a stored v1 file loads unchanged (`pins` `#[serde(default)]`) and
-  is rewritten at v2 on its next update. **`reconcile_roster`** now fills each row's `pin_rank`
-  alongside `status_since_ms`, and (uuid-keyed) a **new session in a reused pane slot never inherits
-  the old pin** — the old pin lingers as a tombstone until GC.
-- **`roster.rs`:** `RosterAgent` gains **`pin_rank: Option<usize>`** (filled post-parse like the timer/
-  labels). **`group_by_workspace`** + **`agents_in_display_order`** now **stable-sort pins to the top of
-  each workspace group** in pin order (`pin_sort_key`) — the single ordering seam; unpinned rows keep
-  encounter order. No global "Pinned" section (that would fight grouped-by-workspace, design §6).
-- **`pane`:** `Ctrl+T` → **`on_toggle_pin`** (Agents view only; a **session-less agent can't be
-  pinned** — a no-op, not a crash — matching the amp fixture). **`PaneModel::apply_pins`** re-derives
-  every visible row's rank from the just-written pins list for an **instant float**, keeping the cursor
-  anchored to the pinned agent. The render marks pinned rows with a `* ` slot **only when something is
-  pinned** (the no-pin render is byte-identical to before Slice 6; marker glyph is tunable). Footer
-  gained `ctrl+t pin`.
-- **Tests:** 12 new (166 lib + 6 CLI): pin float within/across groups, toggle add/remove, `last_seen`
-  bump + TTL + cap GC, the **uuid-keyed reused-slot non-misapplication** (acceptance), reopen
-  persistence, invariant-#7 delete-`roster.json`-only-drops-pins, v1→v2 compat, and the `apply_pins`
-  instant-float + pin-marker snapshot. **No CLI/E2E test** — pinning is pane-internal (`Ctrl+T`), and a
-  popup can't be pane-read; the data path is fully unit-covered. **HITL gate (do this next):** eyeball
-  live — pin floats to the group top with the marker, survives popup reopen, and killing an agent +
-  respawning a different one in the same pane slot does NOT misapply the pin.
-
-**What shipped a PRIOR session (Slice 4 / issue #5 — last-line status column; DONE + HITL-eyeballed):**
+**What shipped THIS session (Slice 4 / issue #5 — last-line status column; DONE + HITL-eyeballed):**
 - **`roster::last_terminal_line`** (pure, Herdr-free) — an agent's last output line from a `herdr
   agent read --source recent --format text` snapshot, read **bottom-up, skipping the rendered UI
   chrome block**: box borders (incl. embedded-title rules like `── slice-4 ──`), padded box sides
@@ -330,13 +298,11 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
    when `HERDR_CHECKIN_POPUP` is set.
 6. **`queue.rs` never depends on the `Herdr` trait** — identity resolution reaches it as an injected
    closure (`enrich`), not a `Herdr` call. The module boundary enforces it.
-7. **`roster.json` is a prunable observation cache** (Slice 5+6) — nothing correctness-critical may
-   live *only* there; deleting it must merely degrade timers **and pins**, never lose a ping.
-   `RosterStore` (`roster_state.rs`) is a **separate store** from `state.json` with its own lock,
-   holding the time-in-state registry **and the pins list** (both in one `RosterState`, one locked
-   read-modify-write). Every writer is best-effort (the `status-changed` stamp, the `startup` seed,
-   the pane sampler's reconcile, and the `Ctrl+T` pin toggle all swallow their own errors). Tests:
-   delete `roster.json` → timers degrade to `~` and pins vanish but everything still works; the pane's
+7. **`roster.json` is a prunable observation cache** (Slice 5) — nothing correctness-critical may
+   live *only* there; deleting it must merely degrade timers/pins, never lose a ping. `RosterStore`
+   (`roster_state.rs`) is a **separate store** from `state.json` with its own lock, and every writer
+   is best-effort (the `status-changed` stamp, the `startup` seed, and the pane sampler's reconcile
+   all swallow their own errors). Tests: delete `roster.json` → everything still works; the pane's
    roster path writes **zero** `state.json`.
 
 ## 4. herdr API facts (0.7.5, protocol 17)
@@ -423,11 +389,11 @@ key. After editing: `herdr config check && herdr server reload-config`.
 
 ## 6. Next up (START HERE)
 
-### The Agents view — ALL SIX SLICES BUILT (0-6). #2/#3/#4/#5/#6 CLOSED; #7 code-complete, HITL-open. See [docs/agents-view-design.md](docs/agents-view-design.md).
+### The Agents view — Slices 0-5 DONE (#2/#3/#4/#5/#6 CLOSED), next is Slice 6. See [docs/agents-view-design.md](docs/agents-view-design.md).
 The live **Agents view** roster sits beside the durable Queue in the popup (`Tab`/`Ctrl+S`), loads
-instantly, has full jump/reply parity, shows time-in-state + each agent's **last terminal line**, and
-now supports **`Ctrl+T` pin-to-top** (uuid-keyed, persisted). See the header for the commit summary and
-`agents-view-design.md` §8 for the full slice table. **Remaining work:**
+instantly, has full jump/reply parity, shows time-in-state, and now shows each agent's **last terminal
+line**. See the header for the commit summary and `agents-view-design.md` §8 for the full slice table.
+**Remaining work:**
 
 1. **Slice 4 / issue [#5](https://github.com/Akram012388/herdr-checkin/issues/5) — DONE (this
    session), #5 CLOSED.** The last-line status column: `roster::last_terminal_line` (pure chrome-
@@ -441,24 +407,21 @@ now supports **`Ctrl+T` pin-to-top** (uuid-keyed, persisted). See the header for
    `roster.json` + `RosterStore` (separate prunable store = **invariant #7**); `status-changed` event
    binary stamps `status_since_ms`; startup seeds additively; pane sampler reads + back-fills the uuid,
    resets on a reused slot; rows show `blocked 4m` / honest `~`.
-3. **Slice 6 / issue [#7](https://github.com/Akram012388/herdr-checkin/issues/7) — CODE-COMPLETE +
-   GREEN, HITL-OUTSTANDING (tip `c2fc363`).** Pin-to-top with `Ctrl+T`, keyed by **`agent_session`
-   uuid** (not the positional/reusable `pane_id`), with tombstone GC (7d TTL + 50 cap). Pins float to
-   the top **of their workspace group** via `roster::group_by_workspace` / `agents_in_display_order`
-   (the single ordering seam, now stable-sorting on `RosterAgent::pin_rank`). Stored in `roster.json`
-   as `pins: [{agent_session, pinned_at_ms, last_seen_ms}]` (`#[serde(default)]`, store bumped to v2),
-   via `RosterStore::update` deltas over the whole `RosterState`. A session-less agent (the `amp`
-   fixture) simply can't be pinned — a no-op, not a crash. `apply_pins` gives an instant float with the
-   cursor anchored; pinned rows carry a `* ` marker (tunable). See the header block for the full
-   summary. **#7 stays OPEN until the HITL gate is met:** eyeball live — pin floats to the group top,
-   survives popup reopen, and killing an agent + respawning a different one in the same pane slot does
-   NOT misapply the pin (uuid-keyed). Then close #7. **This is the only outstanding gate.**
+3. **Slice 6 / issue [#7](https://github.com/Akram012388/herdr-checkin/issues/7) — THE NEXT BUILD.**
+   Pin-to-top, persisted by **`agent_session` uuid, not `pane_id`** (positional/reusable), with
+   tombstone GC. Pins float to the top **of their workspace group** (hook into `roster::group_by_
+   workspace` / `agents_in_display_order` — the single ordering seam). Stored in `roster.json` as a
+   `pins: [{agent_session, pinned_at_ms, last_seen_ms}]` field (`#[serde(default)]`, the store is
+   versioned), via `RosterStore::update` deltas. A keybind (e.g. `Ctrl+T`) toggles pin/unpin on the
+   selected row. **Gotcha:** the `amp` fixture has no `agent_session` — a session-less agent simply
+   can't be pinned (don't crash); mirror the "reconcile trusts a sessionless agent" honesty test.
+   **Gate (HITL):** pin survives popup reopen; killing an agent + respawning a different one in the
+   same pane slot does NOT misapply the pin (uuid-keyed).
 
 - **Tracker: GitHub issues [#1–#7](https://github.com/Akram012388/herdr-checkin/issues)** (Slice 0→#1
   … Slice 6→#7). **#1 (Slice 0)** stays open pending the maintainer's pixel-identical popup eyeball.
-  **#2/#3/#4/#5/#6 done + closed.** **#7 (Slice 6) is code-complete + green but stays open until the
-  live HITL eyeball** (the gate above). This doc + the design doc are the durable in-repo tracker; the
-  issues are the work queue.
+  **#2/#3/#4/#5/#6 done + closed.** **#7 (Slice 6) is the next build.** This doc + the design doc are
+  the durable in-repo tracker; the issues are the work queue.
 
 ### PARKED architectural fork — "dissolve the Queue view into the roster" (do NOT start without a re-decision)
 The maintainer mused whether the Queue is still needed now the Agents view is dominant. Explored +

@@ -232,12 +232,6 @@ fn event_loop(
                                     return Ok(());
                                 }
                             }
-                            // Ctrl+T pins/unpins the selected roster agent (Agents view only —
-                            // `on_toggle_pin` no-ops elsewhere). A pin floats it to the top of its
-                            // workspace group and persists across popup reopen (Slice 6 / issue #7).
-                            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                on_toggle_pin(model, runtime);
-                            }
                             // Drop and clear are durable-queue operations — Queue view only.
                             _ if model.tab == ActiveTab::Queue => match key.code {
                                 KeyCode::Char('d') | KeyCode::Char('x') => on_drop(model, runtime),
@@ -314,29 +308,6 @@ fn on_enter(model: &mut PaneModel, runtime: &RuntimeEnv, herdr: &dyn Herdr) -> b
             model.status = Some(format!("focus failed: {error}"));
             false
         }
-    }
-}
-
-/// `Ctrl+T`: pin or unpin the selected Agents-view row (Slice 6 / issue #7). Keyed by the agent's
-/// `agent_session` uuid (positional pane ids are reused), so a session-less agent simply can't be
-/// pinned — a no-op, never a crash. Persists to `roster.json` and, on success, re-derives every
-/// visible row's pin rank so the float happens instantly rather than a sample later. A no-op outside
-/// the Agents view (the Queue keeps its own FIFO order).
-fn on_toggle_pin(model: &mut PaneModel, runtime: &RuntimeEnv) {
-    if model.tab != ActiveTab::Agents {
-        return;
-    }
-    let Some(session) = model
-        .roster_selected_agent()
-        .and_then(|agent| agent.agent_session.clone())
-    else {
-        // No selection, or a session-less agent (e.g. the amp fixture): nothing to key a pin on.
-        return;
-    };
-    if let Some(pins) =
-        crate::roster_state::toggle_pin_persist(&runtime.state_dir, &session, current_unix_ms())
-    {
-        model.apply_pins(&pins);
     }
 }
 
@@ -662,33 +633,6 @@ impl PaneModel {
             Some(position) => position,
             None => self.roster_selected.min(len.saturating_sub(1)),
         };
-    }
-
-    /// Re-derive every visible agent's [`RosterAgent::pin_rank`] from a just-written pins list, so a
-    /// `Ctrl+T` toggle floats (or drops) the row immediately instead of a sample later. Keeps the
-    /// cursor anchored to the same agent across the reorder (as [`apply_roster`](Self::apply_roster)
-    /// does), so the selection follows the pinned agent up. A no-op if the first sample hasn't landed.
-    fn apply_pins(&mut self, pins: &[crate::roster_state::Pin]) {
-        let anchor = self
-            .roster_selected_agent()
-            .map(|agent| agent.pane_id.clone());
-        if let Some(snapshot) = self.roster.as_mut() {
-            for agent in &mut snapshot.agents {
-                agent.pin_rank = agent
-                    .agent_session
-                    .as_deref()
-                    .and_then(|session| crate::roster_state::pin_rank(pins, session));
-            }
-        }
-        if let Some(id) = anchor {
-            if let Some(position) = self
-                .roster_display_agents()
-                .iter()
-                .position(|agent| agent.pane_id == id)
-            {
-                self.roster_selected = position;
-            }
-        }
     }
 
     /// The Agents-view agents in on-screen (grouped-by-workspace) order — the sequence `j`/`k`,
@@ -1494,7 +1438,6 @@ mod tests {
             tab_label: None,
             pane_label: None,
             last_line: None,
-            pin_rank: None,
         }
     }
 
@@ -1635,7 +1578,7 @@ mod tests {
                 "wN",
                 "t1 · pane 1",
                 "working ~ · herdr-checkin",
-                "j/k move  ·  enter jump  ·  space reply  ·  ctrl+t pin  ·  q quit",
+                "j/k move  ·  enter jump  ·  space reply  ·  q quit",
             ]
         );
     }
@@ -1662,76 +1605,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_pins_floats_the_pinned_agent_and_keeps_the_cursor_on_it() {
-        // A Ctrl+T pin re-derives ranks in place (instant float) and the cursor follows the pinned
-        // agent up, so the row you pinned stays selected rather than the toggle yanking the cursor.
-        let mut m = model(&[]);
-        m.tab = ActiveTab::Agents;
-        m.roster = Some(RosterSnapshot {
-            sampled_at_ms: 0,
-            agents: vec![
-                RosterAgent {
-                    agent_session: Some("uuid-A".to_string()),
-                    ..roster_agent("w4:p1", "w4", AgentStatus::Idle)
-                },
-                RosterAgent {
-                    agent_session: Some("uuid-B".to_string()),
-                    ..roster_agent("w4:p2", "w4", AgentStatus::Blocked)
-                },
-            ],
-        });
-        m.roster_selected = 1; // the cursor is on uuid-B (w4:p2)
-        m.apply_pins(&[crate::roster_state::Pin {
-            agent_session: "uuid-B".to_string(),
-            pinned_at_ms: 1,
-            last_seen_ms: 1,
-        }]);
-        assert_eq!(
-            m.roster_selected, 0,
-            "the cursor follows the pinned agent up"
-        );
-        let selected = m.roster_selected_agent().expect("a selected agent");
-        assert_eq!(selected.pane_id, "w4:p2");
-        assert_eq!(selected.pin_rank, Some(0), "and it now carries a pin rank");
-    }
-
-    #[test]
-    fn snapshot_agents_view_floats_a_pinned_row_with_a_marker() {
-        // A pinned agent (pin_rank Some) floats to the top of its workspace group and carries the
-        // `* ` marker; the unpinned row reserves the aligned slot beneath it (Slice 6).
-        let mut m = model(&[]);
-        m.tab = ActiveTab::Agents;
-        m.roster = Some(RosterSnapshot {
-            sampled_at_ms: 1_000,
-            agents: vec![
-                RosterAgent {
-                    status_since_ms: Some(0),
-                    ..roster_agent("w4:p1", "w4", AgentStatus::Idle)
-                },
-                RosterAgent {
-                    status_since_ms: Some(0),
-                    pin_rank: Some(0),
-                    ..roster_agent("w4:p2", "w4", AgentStatus::Blocked)
-                },
-            ],
-        });
-        assert_eq!(
-            content_lines(&render_buffer(&m, 80, 9)),
-            vec![
-                "Queue     Agents      tab · switch",
-                "2 agents",
-                "",
-                "w4",
-                "> * t1 · pane 2", // the pinned agent floats to the top, marked, and stays selected
-                "blocked 1s · herdr-checkin",
-                "t1 · pane 1", // the unpinned agent sits below (its aligned marker slot trims away)
-                "idle 1s · herdr-checkin",
-                "j/k move  ·  enter jump  ·  space reply  ·  ctrl+t pin  ·  q quit",
-            ]
-        );
-    }
-
-    #[test]
     fn snapshot_agents_view_shows_the_sampling_placeholder_before_the_first_sample() {
         // `roster` is None until the sampler delivers: the view says it is sampling, not "no agents".
         let mut m = model(&[]);
@@ -1743,7 +1616,7 @@ mod tests {
                 "no agents",
                 "Sampling agents...",
                 "",
-                "j/k move  ·  enter jump  ·  space reply  ·  ctrl+t pin  ·  q quit",
+                "j/k move  ·  enter jump  ·  space reply  ·  q quit",
             ]
         );
     }
@@ -1765,7 +1638,7 @@ mod tests {
                 "no agents",
                 "No agents running.",
                 "",
-                "j/k move  ·  enter jump  ·  space reply  ·  ctrl+t pin  ·  q quit",
+                "j/k move  ·  enter jump  ·  space reply  ·  q quit",
             ]
         );
     }

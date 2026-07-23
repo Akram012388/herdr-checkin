@@ -83,23 +83,6 @@ pub(crate) struct RosterAgent {
     /// UI chrome is on screen — the row then falls back to the terminal title. Not from `agent list`
     /// (it carries no terminal contents); filled after parse like the label and timer fields above.
     pub(crate) last_line: Option<String>,
-    /// This agent's **pin rank** (Slice 6 / issue #7), or `None` when it is not pinned. A pinned agent
-    /// floats to the top **of its workspace group** in pin order — `Some(0)` is the earliest-pinned,
-    /// higher ranks below it, all above the unpinned rows. Pins are keyed by `agent_session` uuid (not
-    /// the positional `pane_id`), so a session-less agent is never pinnable and always `None`. Not from
-    /// `agent list`; filled after parse by [`crate::roster_state::reconcile_roster`] from the
-    /// `roster.json` pins list (the rank is the session's index in that list), mirroring the timer and
-    /// label fields above. The single input to the pin ordering in [`group_by_workspace`] /
-    /// [`agents_in_display_order`].
-    pub(crate) pin_rank: Option<usize>,
-}
-
-/// The stable within-workspace sort key: pinned agents (a `Some(rank)`) sort before unpinned (`None`),
-/// pinned among themselves by ascending rank (pin order). Unpinned all share `usize::MAX`, so a
-/// **stable** sort keyed on this leaves them in their original encounter order — pins float to the top
-/// of the group without disturbing the order of everything below.
-fn pin_sort_key(agent: &RosterAgent) -> usize {
-    agent.pin_rank.unwrap_or(usize::MAX)
 }
 
 /// A single sampler delivery: the whole roster at one instant. The view replaces this wholesale each
@@ -118,10 +101,10 @@ pub(crate) struct WorkspaceGroup {
     pub(crate) agents: Vec<RosterAgent>,
 }
 
-/// Group agents by `workspace_id`, preserving the order workspaces are first seen. Within each group,
-/// **pinned agents float to the top in pin order** ([`pin_sort_key`]) and the rest keep their
-/// encounter order — this is the single place that ordering hooks in (the view never re-sorts). Pure:
-/// clones its input into the groups.
+/// Group agents by `workspace_id`, preserving the order workspaces are first seen and the order of
+/// agents within each. Pins float to the top of their workspace group in Slice 6; until then the
+/// within-group order is plain encounter order, so this is the single place that ordering will hook
+/// in (the view never re-sorts). Pure: clones its input into the groups.
 pub(crate) fn group_by_workspace(agents: &[RosterAgent]) -> Vec<WorkspaceGroup> {
     let mut groups: Vec<WorkspaceGroup> = Vec::new();
     for agent in agents {
@@ -136,18 +119,13 @@ pub(crate) fn group_by_workspace(agents: &[RosterAgent]) -> Vec<WorkspaceGroup> 
             }),
         }
     }
-    // Stable sort keeps unpinned agents in encounter order while pins rise to the top of the group.
-    for group in &mut groups {
-        group.agents.sort_by_key(pin_sort_key);
-    }
     groups
 }
 
-/// The agents in on-screen order — grouped by workspace (first-seen workspace order), pins floated to
-/// the top of each group in pin order and the rest in encounter order — the exact order
-/// [`group_by_workspace`] paints. Returns borrows (no clone) so the view's selection cursor and its
-/// click hit-testing index into the same sequence the rows are laid out from, and the two can never
-/// drift.
+/// The agents in on-screen order — grouped by workspace, first-seen workspace order, encounter order
+/// within — the exact order [`group_by_workspace`] paints. Returns borrows (no clone) so the view's
+/// selection cursor and its click hit-testing index into the same sequence the rows are laid out
+/// from, and the two can never drift.
 pub(crate) fn agents_in_display_order(agents: &[RosterAgent]) -> Vec<&RosterAgent> {
     let mut order: Vec<&RosterAgent> = Vec::with_capacity(agents.len());
     let mut seen: Vec<&str> = Vec::new();
@@ -158,14 +136,11 @@ pub(crate) fn agents_in_display_order(agents: &[RosterAgent]) -> Vec<&RosterAgen
             continue;
         }
         seen.push(agent.workspace_id.as_str());
-        let mut group: Vec<&RosterAgent> = agents
-            .iter()
-            .filter(|a| a.workspace_id == agent.workspace_id)
-            .collect();
-        // Same stable pin-float as `group_by_workspace`, so the flat order and the grouped render
-        // agree row-for-row (a test asserts they do).
-        group.sort_by_key(|a| pin_sort_key(a));
-        order.extend(group);
+        order.extend(
+            agents
+                .iter()
+                .filter(|a| a.workspace_id == agent.workspace_id),
+        );
     }
     order
 }
@@ -499,7 +474,6 @@ mod tests {
             tab_label: None,
             pane_label: None,
             last_line: None,
-            pin_rank: None,
         }
     }
 
@@ -605,58 +579,6 @@ mod tests {
             .flat_map(|g| g.agents.iter().map(|a| a.pane_id.as_str()))
             .collect();
         assert_eq!(order, grouped);
-    }
-
-    #[test]
-    fn pins_float_to_the_top_of_their_workspace_group_in_pin_order() {
-        // Two pinned agents in w4 (ranks 1 then 0) plus an unpinned one, interleaved on input. The
-        // group renders the pins first in ascending rank (p3 rank 0, then p1 rank 1), unpinned below.
-        let a0 = RosterAgent {
-            pin_rank: Some(1),
-            ..agent("w4:p1", "w4", AgentStatus::Idle)
-        };
-        let a1 = agent("w4:p2", "w4", AgentStatus::Working); // unpinned
-        let a2 = RosterAgent {
-            pin_rank: Some(0),
-            ..agent("w4:p3", "w4", AgentStatus::Blocked)
-        };
-        let agents = vec![a0, a1, a2];
-        let order: Vec<&str> = agents_in_display_order(&agents)
-            .iter()
-            .map(|a| a.pane_id.as_str())
-            .collect();
-        assert_eq!(
-            order,
-            vec!["w4:p3", "w4:p1", "w4:p2"],
-            "pins rise in ascending rank, the unpinned agent stays below"
-        );
-        // group_by_workspace floats them identically (same stable pin sort).
-        let groups = group_by_workspace(&agents);
-        let grouped: Vec<&str> = groups[0]
-            .agents
-            .iter()
-            .map(|a| a.pane_id.as_str())
-            .collect();
-        assert_eq!(order, grouped);
-    }
-
-    #[test]
-    fn pins_only_float_within_their_own_workspace_group() {
-        // A pin in wN must not hoist that agent above w4's group — workspaces never interleave, so
-        // the pin only reorders within wN. (No global "Pinned" section — design §6.)
-        let a0 = agent("w4:p1", "w4", AgentStatus::Idle);
-        let a1 = agent("wN:p1", "wN", AgentStatus::Working);
-        let a2 = RosterAgent {
-            pin_rank: Some(0),
-            ..agent("wN:p2", "wN", AgentStatus::Blocked)
-        };
-        let agents = [a0, a1, a2];
-        let order: Vec<&str> = agents_in_display_order(&agents)
-            .iter()
-            .map(|a| a.pane_id.as_str())
-            .collect();
-        // w4 stays first (first-seen workspace); within wN the pinned p2 rises above p1.
-        assert_eq!(order, vec!["w4:p1", "wN:p2", "wN:p1"]);
     }
 
     #[test]
