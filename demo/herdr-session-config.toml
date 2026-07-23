@@ -1,0 +1,26 @@
+onboarding = false
+
+[theme]
+name = "one-dark"
+
+[update]
+version_check = false
+manifest_check = false
+
+[terminal]
+new_cwd = "current"
+shell_mode = "non_login"
+
+[keys]
+prefix = "ctrl+b"
+
+[[keys.command]]
+key = "ctrl+g"
+type = "plugin_action"
+command = "Akram012388.checkin-demo.open-pane"
+description = "check-in: open popup"
+
+[ui]
+sidebar_start_collapsed = false
+sidebar_width = 22
+hide_tab_bar_when_single_tab = false

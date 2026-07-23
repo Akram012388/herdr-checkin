@@ -1,0 +1,20 @@
+id = "Akram012388.checkin-demo"
+name = "Check-in Demo"
+version = "0.4.0"
+min_herdr_version = "0.7.5"
+description = "Isolated VHS fixture for the centered Check-in popup."
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "open-pane"
+title = "Check-in: open popup"
+contexts = ["global", "workspace"]
+command = ["/bin/sh", "open-pane.sh"]
+
+[[panes]]
+id = "queue"
+title = "Check-in"
+placement = "popup"
+width = "50%"
+height = "50%"
+command = ["/bin/sh", "run-pane.sh"]
