@@ -21,6 +21,7 @@
 mod agents_view;
 mod compose;
 mod queue_view;
+mod theme;
 
 use crate::herdr::{sample_roster, CliHerdr, LabelCache, TailCache, TAIL_READ_BUDGET};
 use crate::roster::{agents_in_display_order, roster_reply_label, RosterAgent, RosterSnapshot};
@@ -36,7 +37,6 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Style, Stylize};
 use ratatui::widgets::{ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use std::cell::Cell;
@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use theme::PaneTheme;
 use tui_textarea::{CursorMove, TextArea};
 
 /// How long the input poll blocks each tick before we re-read the queue and repaint, so queue
@@ -72,6 +73,10 @@ const FOOTER_HINTS: &str =
 /// panic hook restores the terminal but leaves capture on, which would otherwise flood the shell
 /// with mouse escape sequences until the user ran `reset`.
 pub fn run(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
+    // Theme resolution is Herdr-owned. Parse its immutable pane-launch snapshot before entering raw
+    // terminal mode, so an unsupported/malformed contract fails without disturbing the terminal.
+    let theme = PaneTheme::from_env()?;
+    theme.configure_terminal_output();
     let mut model = PaneModel::new(load_entries(&runtime.state_dir));
     let mut terminal = ratatui::try_init()
         .map_err(|error| PluginError::new(format!("failed to initialize terminal: {error}")))?;
@@ -91,7 +96,7 @@ pub fn run(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
     }
     install_mouse_panic_hook();
 
-    let result = event_loop(&mut terminal, &mut model, runtime, herdr);
+    let result = event_loop(&mut terminal, &theme, &mut model, runtime, herdr);
 
     // Disable capture/paste before restore, and on every non-panic exit path (event_loop's `?`
     // errors land here too). Best-effort: if this fails we're already tearing down.
@@ -122,6 +127,7 @@ fn install_mouse_panic_hook() {
 
 fn event_loop(
     terminal: &mut DefaultTerminal,
+    theme: &PaneTheme,
     model: &mut PaneModel,
     runtime: &RuntimeEnv,
     herdr: &dyn Herdr,
@@ -149,6 +155,7 @@ fn event_loop(
             .draw(|frame| {
                 draw(
                     frame,
+                    theme,
                     model,
                     current_unix_ms(),
                     &mut list_state,
@@ -167,7 +174,7 @@ fn event_loop(
         let now_ms = current_unix_ms();
         let mut list_area = None;
         terminal
-            .draw(|frame| draw(frame, model, now_ms, &mut list_state, &mut list_area))
+            .draw(|frame| draw(frame, theme, model, now_ms, &mut list_state, &mut list_area))
             .map_err(|error| PluginError::new(format!("failed to draw: {error}")))?;
 
         if event::poll(TICK)
@@ -841,44 +848,49 @@ impl PaneModel {
 /// durable view is unaffected by the Agents-view work); the Agents view is a sibling render module.
 fn draw(
     frame: &mut Frame,
+    theme: &PaneTheme,
     model: &PaneModel,
     now_ms: u64,
     list_state: &mut ListState,
     list_area: &mut Option<Rect>,
 ) {
+    // Establish the themed surface first. Widget styles then patch semantic roles over this base,
+    // while untouched cells retain Herdr's panel background instead of terminal defaults.
+    let area = frame.area();
+    frame.buffer_mut().set_style(area, theme.base());
     match model.tab {
-        ActiveTab::Queue => draw_queue(frame, model, now_ms, list_state, list_area),
-        ActiveTab::Agents => agents_view::draw_agents(frame, model, now_ms, list_state, list_area),
+        ActiveTab::Queue => draw_queue(frame, theme, model, now_ms, list_state, list_area),
+        ActiveTab::Agents => {
+            agents_view::draw_agents(frame, theme, model, now_ms, list_state, list_area)
+        }
     }
 }
 
 /// The tab bar shown as the top row of both views: the two tabs side by side (the active one carrying
-/// the same soft grey band the selected row uses, bold and undimmed; the inactive one dim), followed
-/// by a dim `tab · switch` tooltip. It is the consistent, always-visible affordance for the
+/// Herdr's accent treatment; the inactive one uses secondary text), followed by
+/// a subdued `tab · switch` tooltip. It is the consistent, always-visible affordance for the
 /// `Tab`/`Ctrl+S` toggle — identical on both surfaces.
-fn draw_tab_bar(frame: &mut Frame, area: Rect, active: ActiveTab) {
+fn draw_tab_bar(frame: &mut Frame, theme: &PaneTheme, area: Rect, active: ActiveTab) {
     use ratatui::text::{Line, Span};
 
-    let band = Style::new()
-        .bold()
-        .fg(queue_view::SELECTION_FG)
-        .bg(queue_view::SELECTION_BG);
-    let idle = Style::new().dim();
+    let band = theme.tab_selection();
+    let idle = theme.base().fg(theme.overlay1);
     let (queue_style, agents_style) = match active {
         ActiveTab::Queue => (band, idle),
         ActiveTab::Agents => (idle, band),
     };
     let line = Line::from(vec![
         Span::styled(" Queue ", queue_style),
-        Span::raw("   "),
+        Span::styled("   ", theme.base()),
         Span::styled(" Agents ", agents_style),
-        Span::styled("     tab · switch", idle),
+        Span::styled("     tab · switch", theme.subtle()),
     ]);
     frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
 
 fn draw_queue(
     frame: &mut Frame,
+    theme: &PaneTheme,
     model: &PaneModel,
     now_ms: u64,
     list_state: &mut ListState,
@@ -910,24 +922,22 @@ fn draw_queue(
         .split(interior),
     };
 
-    draw_tab_bar(frame, areas[0], ActiveTab::Queue);
+    draw_tab_bar(frame, theme, areas[0], ActiveTab::Queue);
 
     frame.render_widget(
-        Paragraph::new(header_text(model.entries.len())).bold(),
+        Paragraph::new(header_text(model.entries.len())).style(theme.heading()),
         areas[1],
     );
 
     if model.entries.is_empty() {
         frame.render_widget(
             Paragraph::new("No agents waiting — you're all caught up.")
-                .dim()
+                .style(theme.subtle())
                 .alignment(Alignment::Center),
             areas[2],
         );
     } else {
-        draw_list(
-            frame, model, now_ms, list_state, list_area, areas[2], compose,
-        );
+        draw_list(frame, theme, model, now_ms, list_state, list_area, areas[2]);
     }
 
     match compose {
@@ -939,7 +949,7 @@ fn draw_queue(
                 ..areas[0]
             };
             dim_area(frame, veil);
-            draw_compose(frame, draft, areas[3], areas[4], areas[5]);
+            draw_compose(frame, theme, draft, areas[3], areas[4], areas[5]);
         }
         // Navigating: the one-line footer carries the clear-confirm, a transient status, or hints.
         None => {
@@ -949,8 +959,20 @@ fn draw_queue(
                 model.status.as_deref().unwrap_or(FOOTER_HINTS).to_string()
             };
             // Centered so the left/right margins stay balanced regardless of the hint string's width.
+            let footer_style = if model.confirm_clear {
+                theme
+                    .base()
+                    .fg(theme.yellow)
+                    .add_modifier(ratatui::style::Modifier::BOLD)
+            } else if model.status.is_some() {
+                theme.base()
+            } else {
+                theme.secondary()
+            };
             frame.render_widget(
-                Paragraph::new(footer).dim().alignment(Alignment::Center),
+                Paragraph::new(footer)
+                    .style(footer_style)
+                    .alignment(Alignment::Center),
                 areas[3],
             );
         }
@@ -1302,17 +1324,18 @@ mod tests {
     //
     // These lock the pane's rendered *content* and vertical layout in CI with no herdr: they draw
     // the real `draw` into an off-screen `TestBackend` and compare the text of each row. Horizontal
-    // styling (centering, the grey selection band, dim/bold) is deliberately not asserted here —
-    // it stays under live tuning (HANDOFF §6) and the maintainer confirms it at the terminal — so
-    // `content_lines` trims each row to its text. One extra test locks the `> ` selection marker.
+    // text snapshots trim horizontal styling; focused tests below separately assert semantic
+    // palette roles for selection, details, and compose input. The `> ` selection marker is also
+    // locked explicitly.
 
     fn render_buffer(model: &PaneModel, width: u16, height: u16) -> Buffer {
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("test terminal builds");
         let mut list_state = ListState::default();
         let mut list_area = None;
+        let theme = theme::tests::synthetic();
         terminal
-            .draw(|frame| draw(frame, model, 1_000, &mut list_state, &mut list_area))
+            .draw(|frame| draw(frame, &theme, model, 1_000, &mut list_state, &mut list_area))
             .expect("draw succeeds");
         terminal.backend().buffer().clone()
     }
@@ -1439,14 +1462,35 @@ mod tests {
         );
         for y in [4, 5] {
             let style = buffer[(2, y)].style();
-            assert_eq!(style.fg, Some(Color::White));
-            assert_eq!(style.bg, Some(Color::DarkGray));
+            assert_eq!(style.fg, Some(Color::Rgb(60, 61, 62)));
+            assert_eq!(style.bg, Some(Color::Rgb(30, 31, 32)));
+            assert!(style.add_modifier.contains(Modifier::BOLD));
             assert!(!style.add_modifier.contains(Modifier::DIM));
         }
-        assert!(
-            buffer[(2, 7)].style().add_modifier.contains(Modifier::DIM),
-            "an unselected detail keeps the primary/detail hierarchy"
-        );
+        let detail_style = buffer[(2, 7)].style();
+        assert_eq!(detail_style.fg, Some(Color::Rgb(70, 71, 72)));
+        assert_eq!(detail_style.bg, Some(Color::Rgb(10, 11, 12)));
+        assert!(!detail_style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn popup_surface_and_tabs_use_the_resolved_palette_roles() {
+        let buffer = render_buffer(&model(&["w1:p1"]), 80, 10);
+
+        // An untouched cell still carries the full-frame panel surface established before widgets.
+        let base = buffer[(79, 2)].style();
+        assert_eq!(base.fg, Some(Color::Rgb(60, 61, 62)));
+        assert_eq!(base.bg, Some(Color::Rgb(10, 11, 12)));
+
+        let tab_row = (0..80).map(|x| buffer[(x, 0)].style());
+        assert!(tab_row.clone().any(|style| {
+            style.bg == Some(Color::Rgb(1, 2, 3))
+                && style.fg == Some(Color::Rgb(10, 11, 12))
+                && style.add_modifier.contains(Modifier::BOLD)
+        }));
+        assert!(tab_row.into_iter().any(|style| {
+            style.bg == Some(Color::Rgb(10, 11, 12)) && style.fg == Some(Color::Rgb(50, 51, 52))
+        }));
     }
 
     #[test]
@@ -1457,13 +1501,60 @@ mod tests {
         let typed_buffer = render_buffer(&typed, 80, 11);
         assert_eq!(typed_buffer[(2, 7)].symbol(), "h");
         assert_eq!(typed.reply.as_ref().unwrap().wrap_width.get(), 78);
+        assert_eq!(
+            typed_buffer[(79, 9)].style().bg,
+            Some(Color::Rgb(20, 21, 22)),
+            "unused compose cells retain Herdr's input surface"
+        );
+
+        let mut mid_line = model(&["w1:p1"]);
+        mid_line.begin_reply();
+        let input = &mut mid_line.reply.as_mut().unwrap().input;
+        input.insert_str("abc");
+        input.move_cursor(CursorMove::Jump(0, 1));
+        let mid_line_buffer = render_buffer(&mid_line, 80, 11);
+        assert_eq!(mid_line_buffer[(2, 7)].symbol(), "a");
+        assert_eq!(mid_line_buffer[(3, 7)].symbol(), "b");
+        assert_eq!(mid_line_buffer[(4, 7)].symbol(), "c");
+        assert!(
+            mid_line_buffer[(3, 7)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED),
+            "a mid-line caret styles rather than replaces the glyph"
+        );
+
+        let mut exact_width = model(&["w1:p1"]);
+        exact_width.begin_reply();
+        exact_width
+            .reply
+            .as_mut()
+            .unwrap()
+            .input
+            .insert_str("abcdefgh");
+        let exact_width_buffer = render_buffer(&exact_width, 10, 11);
+        assert_eq!(exact_width_buffer[(9, 7)].symbol(), "h");
+        assert!(
+            exact_width_buffer[(2, 8)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED),
+            "an exact-width trailing caret moves onto the next wrapped row"
+        );
 
         let mut empty = model(&["w1:p1"]);
         empty.begin_reply();
         let empty_buffer = render_buffer(&empty, 80, 11);
         assert_eq!(empty_buffer[(2, 7)].symbol(), "t");
         assert_eq!(empty_buffer[(3, 7)].symbol(), "y");
-        assert_eq!(empty_buffer[(3, 7)].style().fg, Some(Color::DarkGray));
+        assert_eq!(
+            empty_buffer[(3, 7)].style().fg,
+            Some(Color::Rgb(40, 41, 42))
+        );
+        assert_eq!(
+            empty_buffer[(3, 7)].style().bg,
+            Some(Color::Rgb(20, 21, 22))
+        );
     }
 
     // --- Agents view: tab toggle + roster render ---------------------------
@@ -1617,9 +1708,9 @@ mod tests {
                 "Queue     Agents      tab · switch", // the tab bar, Agents active
                 "3 agents",
                 "",
-                "w4",                      // workspace group header
-                "> claude · t1 · pane 1",  // identity is explicit; the cursor marks this agent
-                "idle 1s · herdr-checkin", // time-in-state from the registry
+                "w4",                       // workspace group header
+                ">   claude · t1 · pane 1", // cursor gutter + child indent mark this agent
+                "idle 1s · herdr-checkin",  // time-in-state from the registry
                 "claude · t1 · pane 2",
                 "blocked ~ · herdr-checkin", // no registry entry -> honest `~`
                 "",
@@ -1632,30 +1723,72 @@ mod tests {
     }
 
     #[test]
-    fn agent_rows_share_the_queue_content_grid_and_selection_contrast() {
+    fn agent_rows_are_nested_and_use_the_resolved_sidebar_hierarchy() {
         let m = agents_model(&[("w4:p1", "w4"), ("w4:p2", "w4")]);
         let buffer = render_buffer(&m, 80, 9);
 
         assert_eq!(
-            buffer[(2, 4)].symbol(),
-            "c",
-            "destination starts after the gutter"
+            buffer[(2, 3)].symbol(),
+            "w",
+            "workspace header owns the parent content edge"
         );
         assert_eq!(
-            buffer[(2, 5)].symbol(),
-            "w",
-            "detail shares the content edge"
+            buffer[(4, 4)].symbol(),
+            "c",
+            "agent identity is indented two cells beneath the workspace"
         );
-        for y in [4, 5] {
-            let style = buffer[(2, y)].style();
-            assert_eq!(style.fg, Some(Color::White));
-            assert_eq!(style.bg, Some(Color::DarkGray));
+        assert_eq!(
+            buffer[(4, 5)].symbol(),
+            "w",
+            "status and terminal tail share the agent identity's child edge"
+        );
+        // Selection is one coherent dim-background band, but — unlike plain Queue rows — its
+        // semantic foreground hierarchy remains visible instead of collapsing to one text color.
+        for (x, y, foreground) in [
+            (2, 4, Color::Rgb(60, 61, 62)),    // child indent: base text
+            (4, 4, Color::Rgb(120, 121, 122)), // agent identity: teal
+            (2, 5, Color::Rgb(60, 61, 62)),    // child indent: base text
+            (4, 5, Color::Rgb(80, 81, 82)),    // working status: yellow
+        ] {
+            let style = buffer[(x, y)].style();
+            assert_eq!(style.fg, Some(foreground));
+            assert_eq!(style.bg, Some(Color::Rgb(30, 31, 32)));
+            assert!(style.add_modifier.contains(Modifier::BOLD));
             assert!(!style.add_modifier.contains(Modifier::DIM));
         }
-        assert!(
-            buffer[(2, 7)].style().add_modifier.contains(Modifier::DIM),
-            "an unselected detail stays dim"
-        );
+        let selected_tail = buffer[(16, 5)].style();
+        assert_eq!(selected_tail.fg, Some(Color::Rgb(40, 41, 42)));
+        assert_eq!(selected_tail.bg, Some(Color::Rgb(30, 31, 32)));
+        assert!(selected_tail.add_modifier.contains(Modifier::BOLD));
+        assert!(selected_tail.add_modifier.contains(Modifier::DIM));
+
+        // The unselected row mirrors Herdr's restrained sidebar hierarchy: identity and tab get
+        // quiet semantic colors, navigation metadata recedes, and terminal content is dimmest.
+        let agent_style = buffer[(4, 6)].style();
+        assert_eq!(agent_style.fg, Some(Color::Rgb(120, 121, 122)));
+        assert_eq!(agent_style.bg, Some(Color::Rgb(10, 11, 12)));
+        assert!(!agent_style.add_modifier.contains(Modifier::DIM));
+
+        let separator_style = buffer[(11, 6)].style();
+        assert_eq!(separator_style.fg, Some(Color::Rgb(40, 41, 42)));
+        assert!(separator_style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(buffer[(13, 6)].style().fg, Some(Color::Rgb(90, 91, 92)));
+        assert_eq!(buffer[(18, 6)].style().fg, Some(Color::Rgb(50, 51, 52)));
+
+        let status_style = buffer[(4, 7)].style();
+        assert_eq!(status_style.fg, Some(Color::Rgb(80, 81, 82)));
+        let age_style = buffer[(12, 7)].style();
+        assert_eq!(age_style.fg, Some(Color::Rgb(70, 71, 72)));
+        let tail_style = buffer[(16, 7)].style();
+        assert_eq!(tail_style.fg, Some(Color::Rgb(40, 41, 42)));
+        assert!(tail_style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(tail_style.bg, Some(Color::Rgb(10, 11, 12)));
+
+        for y in [6, 7] {
+            let indent_style = buffer[(2, y)].style();
+            assert_eq!(indent_style.fg, Some(Color::Rgb(60, 61, 62)));
+            assert_eq!(indent_style.bg, Some(Color::Rgb(10, 11, 12)));
+        }
     }
 
     #[test]

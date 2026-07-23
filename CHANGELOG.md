@@ -46,9 +46,9 @@ reply, and grouped render as one interface release.
   (act, then evict on success only — the same discipline as `Enter`/jump); `Esc` cancels; an empty/whitespace
   reply sends nothing and stays in reply mode. The reply target is captured when reply mode is armed,
   so a concurrent queue refresh can't retarget it. Composing darkens the queue as one veil so the
-  strip is the only lit surface (and the answered agent keeps a soft grey band so it stays obvious
-  which one you're replying to): a titled `Reply to <label>` rule, a single-line input with full
-  cursor editing (see Changed), and a right-aligned `enter send · esc cancel` hint — colorless,
+  strip is the only lit surface (and the answered agent keeps a dim theme-derived band so it stays
+  obvious which one you're replying to): a titled `Reply to <label>` rule, a single-line input with
+  full cursor editing (see Changed), and a right-aligned `enter send · esc cancel` hint,
   matching herdr's restrained modal look.
 - **Scrollbar when the queue overflows the popup.** When the grouped rows exceed the visible height,
   a 1-column scrollbar (dim track, brighter thumb) appears at the right edge so off-screen waiters
@@ -90,11 +90,14 @@ reply, and grouped render as one interface release.
   rows appear with the popup instead of a tick later. Human-name maps are cached on the sampler
   thread and refreshed when membership changes or approximately every 15 seconds, reducing the
   steady-state roster path from four herdr subprocesses per second to one.
-- **Softer, more legible highlights.** The selection is a soft grey band
-  (`Color::DarkGray` background) instead of full reversed video, which read as a harsh white bar on a
-  dark theme; the same band marks the agent being replied to while composing. The footer hint bar is
-  centered so its margins stay balanced. The `type your reply` placeholder is a faint neutral color
-  and no longer italic.
+- **Popup styling now inherits Herdr's resolved theme.** Herdr snapshots its effective pane
+  presentation palette when launching the plugin, and Check-in maps those existing semantic tokens
+  onto the entire popup interior: panel and input surfaces, primary/secondary text, dim selection
+  bands, accent active tabs, placeholders, hints, compose rule, confirmation, and scrollbar. Reset, ANSI,
+  indexed, and RGB colors stay lossless, so the `terminal` theme continues to defer to the user's
+  terminal palette while built-in light/dark and custom themes match Herdr exactly. The snapshot is
+  parsed once before terminal initialization and never queried on a render tick; older Herdr
+  releases without the snapshot retain the popup's established terminal-native styling.
 - **`src/lib.rs` split into cohesive modules** (`state`, `herdr`, `queue`, `actions`, `pane`, and a
   test-only `test_support`), each carrying its own tests; `lib.rs` is now the argv-dispatch
   orientation page that re-wires the pieces. The queue transitions no longer depend on the herdr seam

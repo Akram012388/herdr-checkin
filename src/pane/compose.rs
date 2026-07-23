@@ -5,9 +5,10 @@
 //!
 //! [`ReplyDraft`]: super::ReplyDraft
 
+use super::theme::PaneTheme;
 use super::ReplyDraft;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Stylize};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -32,6 +33,7 @@ const PLACEHOLDER: &str = "type your reply";
 /// block caret, so a long reply wraps at the popup edge instead of scrolling horizontally.
 pub(super) fn draw_compose(
     frame: &mut Frame,
+    theme: &PaneTheme,
     draft: &ReplyDraft,
     rule_area: Rect,
     input_area: Rect,
@@ -39,7 +41,10 @@ pub(super) fn draw_compose(
 ) {
     // The titled rule announces the mode switch and names the captured target (pinned at arm time,
     // so it stays correct even if the queue re-orders under the dimmed list).
-    frame.render_widget(reply_rule(&draft.label, rule_area.width), rule_area);
+    frame.render_widget(reply_rule(theme, &draft.label, rule_area.width), rule_area);
+
+    // Paint the complete input surface, including the structural inset and unused wrapped rows.
+    frame.render_widget(Paragraph::new("").style(theme.input()), input_area);
 
     // The shared two-column gutter aligns input, reply title, and list content on one edge.
     let inset = INPUT_LEFT_INSET.min(input_area.width);
@@ -48,12 +53,12 @@ pub(super) fn draw_compose(
         width: input_area.width - inset,
         ..input_area
     };
-    draw_input(frame, draft, input_rect);
+    draw_input(frame, theme, draft, input_rect);
 
     // The affordances: dim (reference, not the work), right-aligned to keep the typing edge clean.
     frame.render_widget(
         Paragraph::new(reply_hint(hint_area.width))
-            .dim()
+            .style(theme.secondary())
             .alignment(Alignment::Right),
         hint_area,
     );
@@ -61,15 +66,18 @@ pub(super) fn draw_compose(
 
 /// Paint the single logical reply line soft-wrapped across `area`, with a manual block caret. The
 /// wrap width is recorded on the draft so the Up/Down handlers wrap the same way the render does.
-fn draw_input(frame: &mut Frame, draft: &ReplyDraft, area: Rect) {
+fn draw_input(frame: &mut Frame, theme: &PaneTheme, draft: &ReplyDraft, area: Rect) {
     // Record the render width so `cursor_move_vertical` (driven from the event loop) wraps
     // identically — otherwise Up/Down could land the caret on a row the render never drew.
     draft.wrap_width.set(area.width);
 
     let line = &draft.input.lines()[0]; // always exactly one line: nothing inserts a newline.
     if line.is_empty() {
-        frame.render_widget(Paragraph::new(PLACEHOLDER).fg(Color::DarkGray), area);
-        paint_caret(frame, area.x, area.y); // block caret over the placeholder's first cell
+        frame.render_widget(
+            Paragraph::new(PLACEHOLDER).style(theme.input_placeholder()),
+            area,
+        );
+        paint_caret(frame, theme, area.x, area.y); // block caret over the placeholder's first cell
         return;
     }
 
@@ -88,24 +96,21 @@ fn draw_input(frame: &mut Frame, draft: &ReplyDraft, area: Rect) {
         .take(height)
         .map(|(_, text)| Line::from(text.clone()))
         .collect();
-    frame.render_widget(Paragraph::new(visible), area);
+    frame.render_widget(Paragraph::new(visible).style(theme.input()), area);
 
     let cx = area.x + caret_display_col.min(width.saturating_sub(1)) as u16;
     let cy = area.y + (caret_row - scroll) as u16;
-    paint_caret(frame, cx, cy);
+    paint_caret(frame, theme, cx, cy);
 }
 
-/// Invert the cell at `(x, y)` to draw a block caret over whatever glyph (or blank) sits there —
-/// the same reverse-video block the `TextArea` widget drew, but placed by our own wrap math. Guarded
-/// against the buffer bounds so a caret at the very end of a full row can't index out of range.
-fn paint_caret(frame: &mut Frame, x: u16, y: u16) {
+/// Draw a themed reverse-video caret at `(x, y)` without replacing the glyph under it. Guarded
+/// against the buffer bounds so a caret can never index out of range.
+fn paint_caret(frame: &mut Frame, theme: &PaneTheme, x: u16, y: u16) {
     let bounds = frame.area();
     if x >= bounds.right() || y >= bounds.bottom() {
         return;
     }
-    let cell = &mut frame.buffer_mut()[(x, y)];
-    let style = cell.style().add_modifier(Modifier::REVERSED);
-    cell.set_style(style);
+    frame.buffer_mut()[(x, y)].set_style(theme.input().add_modifier(Modifier::REVERSED));
 }
 
 /// Char-wrap `line` into display rows no wider than `width` columns, never splitting a character
@@ -131,6 +136,11 @@ fn wrap_line(line: &str, width: usize) -> Vec<(usize, String)> {
         current_width += w;
     }
     rows.push((current_start, current));
+    // A terminal cursor after a row that exactly fills the width belongs at column zero of the next
+    // display row. Keep an explicit empty row so painting never clamps it onto the final glyph.
+    if current_width >= width {
+        rows.push((line.chars().count(), String::new()));
+    }
     rows
 }
 
@@ -200,7 +210,7 @@ pub(super) fn dim_area(frame: &mut Frame, area: Rect) {
 /// The compose strip's titled rule: `─ Reply to <label> ───`, the "Reply to <label>" bold, the
 /// leading and trailing dashes dim. The label (never the words "Reply to") is ellipsis-truncated on
 /// a narrow popup so the rule keeps a few trailing dashes and always fits one line.
-fn reply_rule(label: &str, width: u16) -> Paragraph<'static> {
+fn reply_rule(theme: &PaneTheme, label: &str, width: u16) -> Paragraph<'static> {
     const PREFIX: &str = "Reply to ";
     const HEAD: usize = 2; // the leading "─ "
     const GAP: usize = 1; // the space before the trailing dashes
@@ -213,10 +223,10 @@ fn reply_rule(label: &str, width: u16) -> Paragraph<'static> {
     let title = format!("{PREFIX}{}", truncate_display(label, label_budget));
     let tail = width.saturating_sub(HEAD + display_width(&title) + GAP);
     Paragraph::new(Line::from(vec![
-        "─ ".dim(),
-        title.bold(),
-        Span::raw(" "),
-        "─".repeat(tail).dim(),
+        Span::styled("─ ", theme.base().fg(theme.surface_dim)),
+        Span::styled(title, theme.heading()),
+        Span::styled(" ", theme.base()),
+        Span::styled("─".repeat(tail), theme.base().fg(theme.surface_dim)),
     ]))
 }
 
@@ -301,6 +311,15 @@ mod tests {
             ]
         );
         assert_eq!(joined(&rows), "abcdefghij");
+
+        assert_eq!(
+            wrap_line("abcdefgh", 4),
+            vec![
+                (0, "abcd".to_string()),
+                (4, "efgh".to_string()),
+                (8, String::new()),
+            ]
+        );
     }
 
     #[test]
@@ -323,7 +342,7 @@ mod tests {
         assert_eq!(caret_row_col(&rows, 0), (0, 0)); // start
         assert_eq!(caret_row_col(&rows, 4), (1, 0)); // boundary -> start of the next row
         assert_eq!(caret_row_col(&rows, 6), (1, 2)); // mid second row
-        assert_eq!(caret_row_col(&rows, 8), (1, 4)); // trailing end of the last row
+        assert_eq!(caret_row_col(&rows, 8), (2, 0)); // exact-width end -> next display row
     }
 
     #[test]
@@ -338,6 +357,6 @@ mod tests {
     #[test]
     fn cursor_move_vertical_is_a_noop_off_the_top_and_bottom() {
         assert_eq!(cursor_move_vertical("abcdefgh", 4, 2, false), 2); // up from the first row
-        assert_eq!(cursor_move_vertical("abcdefgh", 4, 6, true), 6); // down from the last row
+        assert_eq!(cursor_move_vertical("abcdefg", 4, 6, true), 6); // down from a partial last row
     }
 }

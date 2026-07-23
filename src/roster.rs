@@ -173,23 +173,39 @@ pub(crate) fn workspace_display_label(agent: &RosterAgent) -> &str {
         .unwrap_or(&agent.workspace_id)
 }
 
+/// The semantic pieces of an Agents-view destination. The plain-text debug renderer joins these
+/// with ` · `; the live pane keeps them separate so agent identity, tab context, pane location, and
+/// separators can inherit Herdr's quiet sidebar hierarchy without reparsing display text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentDestinationParts {
+    pub(crate) agent: Option<String>,
+    pub(crate) tab: Option<String>,
+    pub(crate) pane: String,
+}
+
 /// The primary line for an Agents-view row: `{agent} · {tab} · {pane}` within the workspace group.
 /// The workspace is already the group header. Agent identity is authoritative from `agent list`; a
 /// human tab label that repeats it (case-insensitively) is omitted, so an Amp tab reads
 /// `amp · pane 4` while a Codex agent on the generic home tab reads `codex · ~ · pane 1`. Distinct
 /// tab labels remain visible as navigation context. Missing names fall back to public navigation
 /// metadata, and the pane segment is never blank.
+#[cfg(test)]
 pub(crate) fn agent_destination(agent: &RosterAgent) -> String {
-    let mut parts: Vec<String> = Vec::with_capacity(3);
+    let parts = agent_destination_parts(agent);
+    [parts.agent, parts.tab, Some(parts.pane)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
 
+pub(crate) fn agent_destination_parts(agent: &RosterAgent) -> AgentDestinationParts {
     let agent_name = agent
         .agent
         .as_deref()
         .map(str::trim)
         .filter(|name| !name.is_empty());
-    if let Some(name) = agent_name {
-        parts.push(name.to_string());
-    }
+    let agent_part = agent_name.map(str::to_string);
 
     // Tab: keep a distinct human label, else the `tN` segment of the tab id. Deduplicate only a
     // human label that repeats the authoritative agent name; public tab ids remain navigation data.
@@ -198,34 +214,48 @@ pub(crate) fn agent_destination(agent: &RosterAgent) -> String {
         .as_deref()
         .map(str::trim)
         .filter(|label| !label.is_empty());
-    match tab_label {
+    let tab_part = match tab_label {
         Some(label) if agent_name.is_none_or(|name| !name.eq_ignore_ascii_case(label)) => {
-            parts.push(label.to_string());
+            Some(label.to_string())
         }
-        Some(_) => {}
-        None => {
-            if let Some(tab) = agent.tab_id.as_deref().and_then(id_segment) {
-                parts.push(tab.to_string());
-            }
-        }
-    }
+        Some(_) => None,
+        None => agent
+            .tab_id
+            .as_deref()
+            .and_then(id_segment)
+            .map(str::to_string),
+    };
 
     // Pane: its label, else Herdr's stable public allocation number, else a neutral fallback. Raw
     // control IDs never belong in the user-facing row.
-    if let Some(pane) = agent
+    let pane_part = if let Some(pane) = agent
         .pane_label
         .as_deref()
         .map(str::trim)
         .filter(|label| !label.is_empty())
     {
-        parts.push(pane.to_string());
+        pane.to_string()
     } else if let Some(number) = pane_public_number(&agent.pane_id) {
-        parts.push(format!("pane {number}"));
+        format!("pane {number}")
     } else {
-        parts.push("pane".to_string());
-    }
+        "pane".to_string()
+    };
 
-    parts.join(" · ")
+    AgentDestinationParts {
+        agent: agent_part,
+        tab: tab_part,
+        pane: pane_part,
+    }
+}
+
+/// The semantic pieces of an Agents-view detail line. Kept separate for the live pane so state,
+/// age, separator, and terminal tail can recede independently; formatter tests also join the same
+/// parts to preserve the established plain-text contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentDetailParts<'a> {
+    pub(crate) status: &'static str,
+    pub(crate) age: String,
+    pub(crate) tail: Option<&'a str>,
 }
 
 /// The detail (second) line for an Agents-view row: the live status **with its time-in-state** then
@@ -234,12 +264,17 @@ pub(crate) fn agent_destination(agent: &RosterAgent) -> String {
 /// falls back to the terminal title, then to nothing (`blocked 4m`). The age comes from the
 /// `roster.json` registry via [`RosterAgent::status_since_ms`]; when unknown it renders as `~` (design
 /// §4), so the status word is always present.
+#[cfg(test)]
 pub(crate) fn agent_detail(agent: &RosterAgent, now_ms: u64) -> String {
-    let head = format!(
-        "{} {}",
-        agent.agent_status.as_str(),
-        time_in_state(now_ms, agent.status_since_ms)
-    );
+    let parts = agent_detail_parts(agent, now_ms);
+    let head = format!("{} {}", parts.status, parts.age);
+    match parts.tail {
+        Some(tail) => format!("{head} · {tail}"),
+        None => head,
+    }
+}
+
+pub(crate) fn agent_detail_parts(agent: &RosterAgent, now_ms: u64) -> AgentDetailParts<'_> {
     // Prefer the agent's live last terminal line — what it is doing, or last said (Slice 4). Before
     // this pane's first `agent read` lands it is `None`, so fall back to the terminal title; the row
     // is never bare.
@@ -253,9 +288,10 @@ pub(crate) fn agent_detail(agent: &RosterAgent, now_ms: u64) -> String {
                 .as_deref()
                 .filter(|title| !title.is_empty())
         });
-    match tail {
-        Some(tail) => format!("{head} · {tail}"),
-        None => head,
+    AgentDetailParts {
+        status: agent.agent_status.as_str(),
+        age: time_in_state(now_ms, agent.status_since_ms),
+        tail,
     }
 }
 

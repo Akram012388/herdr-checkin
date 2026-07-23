@@ -5,27 +5,33 @@
 //! clicks. Pure view — it reads the [`PaneModel`](super::PaneModel) the shell owns and never mutates
 //! state or touches herdr.
 //!
-//! The two-line row idiom, the soft grey selection band, the `> ` cursor, and the overflow
+//! The two-line row idiom, Herdr-themed selection, the `> ` cursor, and the overflow
 //! scrollbar all mirror [`queue_view`](super::queue_view) so the two views read as one surface; the
 //! only differences are the grouping key (workspace, not status) and the row's text source
-//! ([`agent_destination`]/[`agent_detail`] over a [`RosterAgent`]).
+//! (semantic destination/detail parts over a [`RosterAgent`]).
 
 use super::compose::{dim_area, draw_compose};
-use super::queue_view::{render_list_scrollbar, SELECTION_BG, SELECTION_FG};
-use super::{draw_tab_bar, ActiveTab, PaneModel, ReplyDraft};
-use crate::roster::{agent_destination, agent_detail, workspace_display_label, RosterAgent};
+use super::queue_view::render_list_scrollbar;
+use super::theme::PaneTheme;
+use super::{draw_tab_bar, ActiveTab, PaneModel};
+use crate::roster::{
+    agent_destination_parts, agent_detail_parts, workspace_display_label, AgentStatus, RosterAgent,
+};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{HighlightSpacing, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 const AGENTS_FOOTER_HINTS: &str = "j/k move  ·  enter jump  ·  space reply  ·  q quit";
+const CHILD_INDENT: &str = "  ";
 
 /// One rendered line of the grouped roster: a blank spacer, a non-selectable workspace header, an
 /// agent's **primary** line (agent identity + destination, carrying its index into the display-order
-/// agent list — the selection source of truth), or that agent's dim **detail** line. Built per-frame by
-/// [`layout_rows`], the roster analogue of [`queue_view::Row`](super::queue_view). `Detail` clicks
-/// map back to the same agent; the cursor and highlight anchor on `Entry`.
+/// agent list — the selection source of truth), or that agent's secondary **detail** line. Both
+/// agent lines are indented under the workspace header. Built per-frame by [`layout_rows`], the
+/// roster analogue of [`queue_view::Row`](super::queue_view). `Detail` clicks map back to the same
+/// agent; the cursor and highlight anchor on `Entry`.
 pub(super) enum Row {
     Spacer,
     Header(String),
@@ -34,7 +40,7 @@ pub(super) enum Row {
 }
 
 /// Lay the display-order agents out into rows: a blank spacer + a bold workspace header each time the
-/// workspace changes, then two lines per agent (its identity + destination, then its dim detail).
+/// workspace changes, then two lines per agent (its identity + destination, then its detail).
 /// `agents` must be in display order (grouped by workspace, from
 /// `roster::agents_in_display_order`), so a workspace change delimits each section and every
 /// `Entry`/`Detail` index is a position in that same slice — the paint and click hit-testing agree.
@@ -60,6 +66,7 @@ pub(super) fn layout_rows(agents: &[&RosterAgent]) -> Vec<Row> {
 /// rect into `list_area` for click hit-testing (`None` when there is nothing to click).
 pub(super) fn draw_agents(
     frame: &mut Frame,
+    theme: &PaneTheme,
     model: &PaneModel,
     now_ms: u64,
     list_state: &mut ListState,
@@ -87,11 +94,11 @@ pub(super) fn draw_agents(
         .split(interior),
     };
 
-    draw_tab_bar(frame, areas[0], ActiveTab::Agents);
+    draw_tab_bar(frame, theme, areas[0], ActiveTab::Agents);
 
     let agents = model.roster_display_agents();
     frame.render_widget(
-        Paragraph::new(roster_header_text(agents.len())).bold(),
+        Paragraph::new(roster_header_text(agents.len())).style(theme.heading()),
         areas[1],
     );
 
@@ -104,13 +111,13 @@ pub(super) fn draw_agents(
             Some(_) => "No agents running.",
         };
         frame.render_widget(
-            Paragraph::new(message).dim().alignment(Alignment::Center),
+            Paragraph::new(message)
+                .style(theme.subtle())
+                .alignment(Alignment::Center),
             areas[2],
         );
     } else {
-        draw_roster(
-            frame, model, now_ms, list_state, list_area, areas[2], compose,
-        );
+        draw_roster(frame, theme, model, now_ms, list_state, list_area, areas[2]);
     }
 
     match compose {
@@ -122,12 +129,12 @@ pub(super) fn draw_agents(
                 ..areas[0]
             };
             dim_area(frame, veil);
-            draw_compose(frame, draft, areas[3], areas[4], areas[5]);
+            draw_compose(frame, theme, draft, areas[3], areas[4], areas[5]);
         }
         None => {
             frame.render_widget(
                 Paragraph::new(AGENTS_FOOTER_HINTS)
-                    .dim()
+                    .style(theme.secondary())
                     .alignment(Alignment::Center),
                 areas[3],
             );
@@ -137,17 +144,18 @@ pub(super) fn draw_agents(
 
 /// Paint the grouped roster into `area`, recording the painted rect into `list_area` and drawing a
 /// scrollbar when the rows overflow — the roster twin of [`queue_view::draw_list`](super::queue_view).
-/// The focused agent gets the soft grey band in both modes: the live selection while navigating, the
-/// captured reply target while composing (so the answered agent stays obvious under the dim veil).
+/// The focused agent gets Herdr's accent selection treatment in both modes: the live selection while
+/// navigating, the captured reply target while composing (so it stays obvious under the dim veil).
 fn draw_roster(
     frame: &mut Frame,
+    theme: &PaneTheme,
     model: &PaneModel,
     now_ms: u64,
     list_state: &mut ListState,
     list_area: &mut Option<Rect>,
     area: Rect,
-    compose: Option<&ReplyDraft>,
 ) {
+    let compose = model.reply.as_ref();
     // Recomputed from the model (the same display order `draw_agents` already checked was non-empty)
     // rather than threaded in as a ninth argument.
     let agents = model.roster_display_agents();
@@ -164,16 +172,17 @@ fn draw_roster(
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match row {
-            Row::Spacer => ListItem::new(""),
-            Row::Header(workspace) => ListItem::new(workspace.clone()).bold(),
-            Row::Entry(index) => ListItem::new(agent_destination(agents[*index])),
+            Row::Spacer => ListItem::new("").style(theme.base()),
+            Row::Header(workspace) => ListItem::new(workspace.clone()).style(theme.heading()),
+            Row::Entry(index) => {
+                let selected = highlight_index == Some(*index);
+                ListItem::new(agent_destination_line(theme, agents[*index], selected))
+                    .style(row_style(theme, selected, theme.base()))
+            }
             Row::Detail(index) => {
-                let detail = agent_detail(agents[*index], now_ms);
-                if highlight_index == Some(*index) {
-                    ListItem::new(detail).fg(SELECTION_FG).bg(SELECTION_BG)
-                } else {
-                    ListItem::new(detail).dim()
-                }
+                let selected = highlight_index == Some(*index);
+                ListItem::new(agent_detail_line(theme, agents[*index], now_ms, selected))
+                    .style(row_style(theme, selected, theme.base()))
             }
         })
         .collect();
@@ -185,7 +194,7 @@ fn draw_roster(
     list_state.select(selected_row);
 
     let list = List::new(items)
-        .highlight_style(Style::new().fg(SELECTION_FG).bg(SELECTION_BG))
+        .highlight_style(theme.selection_band())
         .highlight_symbol("> ")
         .highlight_spacing(HighlightSpacing::Always);
 
@@ -207,7 +216,90 @@ fn draw_roster(
             width: 1,
             ..area
         };
-        render_list_scrollbar(frame, track, rows.len(), viewport, list_state.offset());
+        render_list_scrollbar(
+            frame,
+            theme,
+            track,
+            rows.len(),
+            viewport,
+            list_state.offset(),
+        );
+    }
+}
+
+/// Mirror Herdr's own dense-sidebar hierarchy without turning the row into a rainbow: agent
+/// identity gets the quiet identity color, tab context the special-label color, pane location a
+/// softer overlay, and separators recede. Selection adds one coherent two-line background band
+/// without discarding those subtle foreground distinctions.
+fn agent_destination_line(theme: &PaneTheme, agent: &RosterAgent, selected: bool) -> Line<'static> {
+    let parts = agent_destination_parts(agent);
+    let mut spans = vec![Span::styled(
+        CHILD_INDENT,
+        row_style(theme, selected, theme.base()),
+    )];
+    let mut has_part = false;
+
+    let mut push_part = |value: String, style: Style| {
+        if has_part {
+            spans.push(Span::styled(
+                " · ",
+                row_style(theme, selected, theme.separator()),
+            ));
+        }
+        spans.push(Span::styled(value, row_style(theme, selected, style)));
+        has_part = true;
+    };
+
+    if let Some(agent) = parts.agent {
+        push_part(agent, theme.agent_identity());
+    }
+    if let Some(tab) = parts.tab {
+        push_part(tab, theme.tab_label());
+    }
+    push_part(parts.pane, theme.pane_label());
+
+    Line::from(spans)
+}
+
+/// The status remains quickly scannable, while age and terminal content step down through the same
+/// secondary/overlay ladder Herdr uses for dense sidebar metadata. The detail uses the exact same
+/// child indent as the identity line, making each workspace section read as a small tree.
+fn agent_detail_line(
+    theme: &PaneTheme,
+    agent: &RosterAgent,
+    now_ms: u64,
+    selected: bool,
+) -> Line<'static> {
+    let parts = agent_detail_parts(agent, now_ms);
+    let state_color = match agent.agent_status {
+        AgentStatus::Idle => theme.green,
+        AgentStatus::Working => theme.yellow,
+        AgentStatus::Blocked => theme.red,
+        AgentStatus::Done => theme.teal,
+        AgentStatus::Unknown => theme.overlay0,
+    };
+    let selected_or = |style| row_style(theme, selected, style);
+    let mut spans = vec![
+        Span::styled(CHILD_INDENT, selected_or(theme.base())),
+        Span::styled(parts.status, selected_or(theme.status(state_color))),
+        Span::styled(" ", selected_or(theme.base())),
+        Span::styled(parts.age, selected_or(theme.secondary())),
+    ];
+    if let Some(tail) = parts.tail {
+        spans.push(Span::styled(" · ", selected_or(theme.separator())));
+        spans.push(Span::styled(
+            tail.to_string(),
+            selected_or(theme.terminal_tail()),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn row_style(theme: &PaneTheme, selected: bool, normal: Style) -> Style {
+    if selected {
+        normal.patch(theme.selection_band())
+    } else {
+        normal
     }
 }
 

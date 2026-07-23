@@ -1,15 +1,15 @@
 //! The Queue view — the durable FIFO attention inbox rendered as grouped status sections
-//! (`CHECKIN` then `DONE`), with the soft grey selection band, two-line rows, and the overflow
+//! (`CHECKIN` then `DONE`), with Herdr-themed selection, two-line rows, and the overflow
 //! scrollbar. Split out of the pane shell (Slice 0) so the coming Agents view is a sibling render
 //! module, not more weight in the loop. Pure view: it reads the [`PaneModel`] the shell owns and
 //! never mutates state.
 //!
 //! [`PaneModel`]: super::PaneModel
 
-use super::{PaneModel, ReplyDraft};
+use super::theme::PaneTheme;
+use super::PaneModel;
 use crate::{entry_destination, entry_detail, QueueEntry, WaitStatus};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style, Stylize};
 use ratatui::widgets::{HighlightSpacing, List, ListItem, ListState};
 use ratatui::Frame;
 
@@ -18,15 +18,9 @@ use ratatui::Frame;
 const CHECKIN_HEADER: &str = "CHECKIN";
 const DONE_HEADER: &str = "DONE";
 
-/// The selection band: ANSI bright black follows the user's terminal palette instead of optimizing
-/// an indexed grey for one theme. An explicit white foreground keeps the band legible on light
-/// themes without returning to the harsh full reversed-video treatment.
-pub(super) const SELECTION_BG: Color = Color::DarkGray;
-pub(super) const SELECTION_FG: Color = Color::White;
-
 /// One rendered line of the grouped agents-view: a blank spacer, a non-selectable section header,
 /// an entry's **primary** line (the go-to destination, carrying its index into `entries` — the
-/// selection source of truth), or that entry's **detail** line (the dim second line beneath it).
+/// selection source of truth), or that entry's secondary **detail** line beneath it.
 /// Built per-frame by [`layout_rows`]. Keeping one `Row` per painted line preserves the invariant
 /// the click hit-testing and scrollbar math rely on. `Entry` is the selectable/clickable line;
 /// `Detail` clicks map back to the same entry, but the cursor and highlight anchor on `Entry`.
@@ -55,7 +49,7 @@ pub(super) fn layout_rows(entries: &[QueueEntry]) -> Vec<Row> {
             .iter()
             .enumerate()
             .filter(|(_, entry)| entry.status == status)
-            // Each entry paints as two lines: its destination (Entry) then its dim detail (Detail).
+            // Each entry paints as two lines: its destination (Entry) then its detail (Detail).
             .flat_map(|(index, _)| [Row::Entry(index), Row::Detail(index)])
             .collect();
         if !section.is_empty() {
@@ -68,24 +62,25 @@ pub(super) fn layout_rows(entries: &[QueueEntry]) -> Vec<Row> {
 }
 
 /// Render the grouped queue into `area`, recording the painted rect into `list_area` for click
-/// hit-testing and drawing a scrollbar when the rows overflow. The focused entry gets a soft grey
-/// band ([`SELECTION_BG`]) in both modes: the live selection while navigating, the captured reply
-/// target while composing (so the answered agent stays obvious under the dim veil the caller adds).
+/// hit-testing and drawing a scrollbar when the rows overflow. The focused entry gets Herdr's
+/// accent selection treatment in both modes: the live selection while navigating, the captured
+/// reply target while composing (so the answered agent stays obvious under the caller's dim veil).
 pub(super) fn draw_list(
     frame: &mut Frame,
+    theme: &PaneTheme,
     model: &PaneModel,
     now_ms: u64,
     list_state: &mut ListState,
     list_area: &mut Option<Rect>,
     area: Rect,
-    compose: Option<&ReplyDraft>,
 ) {
+    let compose = model.reply.as_ref();
     // The CC-agents-view look: entries grouped into status sections with non-selectable headers.
     // `layout_rows` is a pure view over the FIFO queue — it never reorders `entries`, so `selected`
     // stays an index into `entries` and we translate it to its on-screen row here.
     let rows = layout_rows(&model.entries);
 
-    // The soft grey band marks the focused entry in BOTH modes: while navigating it's the selection;
+    // A restrained grey band marks the focused entry in BOTH modes: while navigating it's the selection;
     // while composing it's the reply target (so it's obvious which agent you're answering, on top of
     // the `> ` marker). In compose mode the whole list is then veiled dim by the caller, but the
     // band's background survives the DIM (which only mutes the foreground), so the target still reads.
@@ -93,39 +88,40 @@ pub(super) fn draw_list(
         Some(draft) => model.entries.iter().position(|e| e.pane_id == draft.target),
         None => Some(model.selected),
     };
-    let highlight_style = Style::new().fg(SELECTION_FG).bg(SELECTION_BG);
+    let highlight_style = theme.row_selection();
 
     // Each entry is two lines on one content edge: List's permanent two-column marker gutter aligns
     // both the destination and detail. The focused detail takes the same explicit-contrast band —
     // not dim — so its two lines read as one highlighted block.
-    let items: Vec<ListItem> = rows
-        .iter()
-        .map(|row| match row {
-            Row::Spacer => ListItem::new(""),
-            Row::Header(title) => ListItem::new(*title).bold(),
-            Row::Entry(index) => match entry_destination(&model.entries[*index]) {
-                Some(destination) => ListItem::new(destination),
-                // No destination resolved yet (un-enriched/legacy row): fall back to the detail so
-                // the row is never blank.
-                None => ListItem::new(entry_detail(&model.entries[*index], now_ms)),
-            },
-            Row::Detail(index) => {
-                let entry = &model.entries[*index];
-                // The primary line already carries the detail when no destination resolved, so this
-                // line stays blank rather than repeat it.
-                if entry_destination(entry).is_none() {
-                    ListItem::new("")
-                } else {
-                    let detail = entry_detail(entry, now_ms);
-                    if highlight_index == Some(*index) {
-                        ListItem::new(detail).fg(SELECTION_FG).bg(SELECTION_BG)
+    let items: Vec<ListItem> =
+        rows.iter()
+            .map(|row| match row {
+                Row::Spacer => ListItem::new("").style(theme.base()),
+                Row::Header(title) => ListItem::new(*title).style(theme.heading()),
+                Row::Entry(index) => match entry_destination(&model.entries[*index]) {
+                    Some(destination) => ListItem::new(destination).style(theme.base()),
+                    // No destination resolved yet (un-enriched/legacy row): fall back to the detail so
+                    // the row is never blank.
+                    None => ListItem::new(entry_detail(&model.entries[*index], now_ms))
+                        .style(theme.base()),
+                },
+                Row::Detail(index) => {
+                    let entry = &model.entries[*index];
+                    // The primary line already carries the detail when no destination resolved, so this
+                    // line stays blank rather than repeat it.
+                    if entry_destination(entry).is_none() {
+                        ListItem::new("")
                     } else {
-                        ListItem::new(detail).dim()
+                        let detail = entry_detail(entry, now_ms);
+                        if highlight_index == Some(*index) {
+                            ListItem::new(detail).style(theme.row_selection())
+                        } else {
+                            ListItem::new(detail).style(theme.secondary())
+                        }
                     }
                 }
-            }
-        })
-        .collect();
+            })
+            .collect();
     // Highlight the display row that carries the highlighted entry (headers are never selected).
     let selected_row = highlight_index.and_then(|target| {
         rows.iter()
@@ -162,7 +158,14 @@ pub(super) fn draw_list(
             width: 1,
             ..area
         };
-        render_list_scrollbar(frame, track, rows.len(), viewport, list_state.offset());
+        render_list_scrollbar(
+            frame,
+            theme,
+            track,
+            rows.len(),
+            viewport,
+            list_state.offset(),
+        );
     }
 }
 
@@ -219,7 +222,7 @@ pub(super) struct Thumb {
 
 /// Proportional geometry for a vertical scrollbar thumb — the same shape herdr draws for its own
 /// popups (thumb length scaled to the visible fraction, position scaled to the scroll offset),
-/// reduced to integer math and kept colorless. Returns `None` when everything fits (no scrollbar).
+/// reduced to integer math. Returns `None` when everything fits (no scrollbar).
 /// `total` display rows, `viewport` visible rows, `offset` index of the first visible row.
 pub(super) fn scrollbar_thumb(
     total: usize,
@@ -246,10 +249,11 @@ pub(super) fn scrollbar_thumb(
     })
 }
 
-/// Draw a 1-column vertical scrollbar in `track` when the grouped rows overflow the viewport: a dim
-/// track with a brighter thumb, both colorless to match the pane. A no-op when it all fits.
+/// Draw a 1-column vertical scrollbar in `track` when the grouped rows overflow the viewport, using
+/// Herdr's surface and overlay roles for the track and thumb. A no-op when it all fits.
 pub(super) fn render_list_scrollbar(
     frame: &mut Frame,
+    theme: &PaneTheme,
     track: Rect,
     total: usize,
     viewport: usize,
@@ -262,11 +266,13 @@ pub(super) fn render_list_scrollbar(
     for y in track.y..track.y.saturating_add(track.height) {
         buf[(track.x, y)]
             .set_symbol("▕")
-            .set_style(Style::new().dim());
+            .set_style(theme.base().fg(theme.surface_dim));
     }
     let thumb_top = track.y.saturating_add(thumb.top);
     for y in thumb_top..thumb_top.saturating_add(thumb.len) {
-        buf[(track.x, y)].set_symbol("▐");
+        buf[(track.x, y)]
+            .set_symbol("▐")
+            .set_style(theme.base().fg(theme.overlay0));
     }
 }
 
