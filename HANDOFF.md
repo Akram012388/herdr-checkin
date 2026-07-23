@@ -33,7 +33,7 @@ Checkout: `../../herdr`
   - clean, pushed, and synced with `origin/feature/plugin-pane-theme`
   - one upstream-ready commit over `upstream/master`
   - no upstream issue or PR exists
-- `akram` at `f77feba`
+- `akram` at `31afdd0`
   - contains the theme work, full-frame popup presentation, downstream update/install/backup/rollback
     management, and two separately reviewable stream/API test fixes
   - clean, pushed, and synced with `origin/akram`
@@ -66,6 +66,8 @@ Validation on the current Herdr tree:
 - real CLI probes — `herdr update` and `herdr channel set` both reject before changing config
 - managed install/rollback lifecycle — pass in an isolated install root
 - overridden or disposable install paths are proven unable to handoff the unrelated live server
+- an already-current install repairs a stale running server, while a matching live server remains a
+  no-op
 - live switch from official `0.7.5`/protocol 17 — pass; all 30 panes transferred
 - live switch to the modal build — pass; all 30 panes transferred and a rollback snapshot was
   created at `herdr-20260723T160536Z-0.7.5-akram.1`
