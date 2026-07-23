@@ -13,10 +13,12 @@ CHANGELOG.** · **License:** MIT · **Repo:** https://github.com/Akram012388/her
 **154 lib + 6 CLI tests**), pushed, tip **`7c21b1b`**. Working tree clean.
 
 **START HERE (§6): the popup is TWO tabs — the durable Queue + a live Agents roster, `Tab`/`Ctrl+S` to
-toggle. Slices 0-5 are ALL DONE (#2/#3/#4/#5/#6 CLOSED) — that is the whole planned Agents-view build.
-There is NO queued build; the remaining work is small polish (see §6).**
+toggle. Slices 0-5 are ALL DONE (#2/#3/#4/#5/#6 CLOSED) — the whole planned Agents-view build. NO
+feature work is queued. This session's focus is the four wrap-up items in §6's "NEXT SESSION" block:
+(1) eyeball + close #1 (Slice 0), (2) fold the Agents view into the CHANGELOG before tagging v0.4.0;
+then optional polish — (3) tune the shades/indent live, (4) refresh the stale demo gif.**
 
-**What shipped THIS session (Slice 4 / issue #5 — last-line status column; DONE + HITL-eyeballed):**
+**What shipped in a prior session (Slice 4 / issue #5 — last-line status column; DONE + HITL-eyeballed):**
 - **`roster::last_terminal_line`** (pure, Herdr-free) — an agent's last output line from a `herdr
   agent read --source recent --format text` snapshot, read **bottom-up, skipping the rendered UI
   chrome block**: box borders (incl. embedded-title rules like `── slice-4 ──`), padded box sides
@@ -39,7 +41,7 @@ There is NO queued build; the remaining work is small polish (see §6).**
   ("good job"); **#5 closed**. Two live findings folded into the code: amp reads its last message
   cleanly over its empty input box; a working Claude row shows its last settled line, not the spinner.
 
-**What shipped THIS session (2026-07-23; Slice 5 / issue #6 — time-in-state):**
+**What shipped in a prior session (2026-07-23; Slice 5 / issue #6 — time-in-state):**
 - **New `roster_state.rs` = `RosterStore`** — a **separate store from `state.json`** (`roster.json` +
   `roster.lock`, delta-under-lock temp+rename, the `StateStore` twin). Registry keyed by `pane_id`:
   `{agent_session, status, status_since_ms, first_seen_ms, last_seen_ms}` (`BTreeMap`, deterministic).
@@ -58,7 +60,7 @@ There is NO queued build; the remaining work is small polish (see §6).**
   writes tests. **Not yet HITL-eyeballed** — the age numbers want a look with live agents, but the
   data path is fully tested. `cargo build --release` done (the live pane runs the release binary).
 
-**What shipped THIS session (2026-07-23, on `main`, tip `fd92653`; reply-input + load-perf polish):**
+**What shipped in a prior session (2026-07-23, on `main`, tip `fd92653`; reply-input + load-perf polish):**
 - **Closed #3 + #4** — the Agents-view jump+reply E2E was HITL-confirmed live at the terminal (Tab to
   Agents, `Enter` jumps to a real agent + closes the popup, `space` reply routes into its session).
 - **Reply input soft-wraps (`compose::draw_input`)** — the compose input is now **3 rows**
@@ -388,6 +390,31 @@ The close path can be tested over the socket (`{"id":"x","method":"popup.close",
 key. After editing: `herdr config check && herdr server reload-config`.
 
 ## 6. Next up (START HERE)
+
+### NEXT SESSION — focus (start here)
+No feature work is queued. These are wrap-up items to make **0.4.0 tag-ready**, then optional polish.
+All low-risk; each is independent. Pick in order.
+
+**Genuinely open:**
+1. **Close issue [#1](https://github.com/Akram012388/herdr-checkin/issues/1) (Slice 0)** — the last
+   open issue, and a *look-at-it-live* item, not code. Open the popup and confirm the split/render is
+   pixel-identical to before the `pane.rs` split (Slice 0 was pure motion), then close #1. Nothing to
+   build. (Popup E2E is visual-only — see §5.)
+2. **CHANGELOG for the Agents view** — the entire Agents view (Slices 1-5), the reply soft-wrap, and
+   the load-perf work are post-0.4.0 and **NOT yet in `CHANGELOG.md`**. Fold them into the unreleased
+   0.4.0 entry before tagging. **Tagging `v0.4.0` is the maintainer's call — do NOT tag autonomously**
+   (see "Release status" below).
+
+**Optional polish (low-priority, eyeball-driven — only if something reads wrong live):**
+3. **Shade / indent tuning** — the `SELECTION_BG` grey, the reply placeholder shade, the two-line
+   indent (`pane/queue_view.rs` / `pane/compose.rs` / `pane/agents_view.rs`). Change only what looks
+   off at the terminal; snapshot tests trim styling so they won't fight a shade change.
+4. **Refresh `docs/pane-demo.gif`** — badly stale (predates the two-line rows, the grey band, and the
+   entire Agents view / tab bar). Regenerate with the **`demo-gif`** skill; apply the two findings in
+   "Continue polishing" below (seed the four identity fields; the mid-tape `Enter` now exits the pane).
+
+Deeper context on each is in the subsections below (tracker → #1; "Continue polishing" → shades + gif;
+"Release status" → CHANGELOG + tagging). The parked fork and settled decisions are NOT on the list.
 
 ### The Agents view — Slices 0-5 DONE (#2/#3/#4/#5/#6 CLOSED). This is the whole build. See [docs/agents-view-design.md](docs/agents-view-design.md).
 The live **Agents view** roster sits beside the durable Queue in the popup (`Tab`/`Ctrl+S`), loads
