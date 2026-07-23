@@ -10,11 +10,34 @@ later pivoted to a popup: [docs/triage-overlay-design.md](docs/triage-overlay-de
 on request. **All the Agents-view work below is post-0.4.0 internal feature work — NOT in the
 CHANGELOG.** · **License:** MIT · **Repo:** https://github.com/Akram012388/herdr-checkin · **State:**
 `main` is green (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` =
-**142 lib + 6 CLI tests**), pushed, tip **`5805e22`** (Slice 5). Working tree clean.
+**154 lib + 6 CLI tests**), pushed, tip **`771c3e9`** (Slice 4). Working tree clean.
 
 **START HERE (§6): the popup is TWO tabs — the durable Queue + a live Agents roster, `Tab`/`Ctrl+S` to
-toggle. Slices 0-3 + Slice 5 are DONE (#2/#3/#4/#6 CLOSED). The remaining builds are Slice 4 / issue
-#5 (last-line status column, HITL) and Slice 6 / issue #7 (pin-to-top, HITL) — full plan in §6.**
+toggle. Slices 0-3 + Slice 4 + Slice 5 are DONE (#2/#3/#4/#5/#6 CLOSED). The one remaining build is
+Slice 6 / issue #7 (pin-to-top, HITL) — full plan in §6.**
+
+**What shipped THIS session (Slice 4 / issue #5 — last-line status column; DONE + HITL-eyeballed):**
+- **`roster::last_terminal_line`** (pure, Herdr-free) — an agent's last output line from a `herdr
+  agent read --source recent --format text` snapshot, read **bottom-up, skipping the rendered UI
+  chrome block**: box borders (incl. embedded-title rules like `── slice-4 ──`), padded box sides
+  (`│  …  │`), the `❯` prompt, the Claude Code status bar / footer, the running token counter, and
+  **both** spinner frames — `✽ Finagling… (… tokens)` and the token-less `✳ Sautéed for 4m 28s` (every
+  frame opens with a sparkle glyph U+2722..U+2749, **disjoint from** the content markers `✓`/`⏺` a real
+  line carries). Returns `None` when only chrome is visible. Fixture tests over a **real amp capture**
+  + crafted Claude tails (blocked question; spinner-skip). **Best-effort, expected to iterate** on the
+  chrome vocabulary as new agents/frames appear (`src/fixtures/agent_read_*.txt`).
+- **`herdr::TailCache`** — a second cache on the sampler thread beside `LabelCache`: a budgeted
+  (`TAIL_READ_BUDGET=10`) `agent read` sweep, **status-changed panes first then round-robin** (a large
+  fleet can't stall the worker), **never-blank** (a read miss / chrome-only screen keeps the last known
+  line; a vanished pane is pruned) — a prunable observation cache, invariant #7. Reads run **only on
+  the worker**, never the render tick, and are **skipped on the first sample** so the roster still
+  paints instantly (preserves last session's instant-load win).
+- **`RosterAgent.last_line`** carries it; **`agent_detail`** prefers it over the terminal title
+  (`blocked 4m · Good to proceed?`), falling back to the title until the first read lands. **154 lib +
+  6 CLI tests** (12 new). Also **hardened the fake-herdr test** against a Linux `ETXTBSY` flake (a
+  `__warmup__` exec-readiness probe — test-only, no production change). Maintainer eyeballed live
+  ("good job"); **#5 closed**. Two live findings folded into the code: amp reads its last message
+  cleanly over its empty input box; a working Claude row shows its last settled line, not the spinner.
 
 **What shipped THIS session (2026-07-23; Slice 5 / issue #6 — time-in-state):**
 - **New `roster_state.rs` = `RosterStore`** — a **separate store from `state.json`** (`roster.json` +
@@ -366,36 +389,39 @@ key. After editing: `herdr config check && herdr server reload-config`.
 
 ## 6. Next up (START HERE)
 
-### The Agents view — Slices 0-3 DONE (#3/#4 CLOSED), next is Slice 4. See [docs/agents-view-design.md](docs/agents-view-design.md).
+### The Agents view — Slices 0-5 DONE (#2/#3/#4/#5/#6 CLOSED), next is Slice 6. See [docs/agents-view-design.md](docs/agents-view-design.md).
 The live **Agents view** roster sits beside the durable Queue in the popup (`Tab`/`Ctrl+S`), loads
-instantly, and has full jump/reply parity. See the header for the commit summary and `agents-view-
-design.md` §8 for the full slice table. **Remaining work, in order:**
+instantly, has full jump/reply parity, shows time-in-state, and now shows each agent's **last terminal
+line**. See the header for the commit summary and `agents-view-design.md` §8 for the full slice table.
+**Remaining work:**
 
-1. **Slice 4 / issue [#5](https://github.com/Akram012388/herdr-checkin/issues/5) — the next build.**
-   The last-line status column: a **2s** visible-rows `herdr agent read` sweep on the sampler thread,
-   budgeted round-robin (~15 panes/sweep), invalidate-immediately-on-status-change, **never-blank
-   cache** (a row keeps its last known line while a fresh read is in flight). Row becomes
-   `{status} · {title}` → `{status} · {last terminal line}`. Extract "last non-empty line" as a **pure
-   function in `roster.rs`** with fixture tests over real terminal tails. HITL: smooth with 5+ agents,
-   lines track real output. **NB:** the sampler already owns a `LabelCache` + `sample_roster` and does
-   a bounded first paint — the `agent read` sweep is a second cache on the same thread; budget it the
-   same way (never on the render tick; visible-rows only). **The live pane runs
-   `target/release/herdr-checkin`** — `cargo test` (debug) does NOT update it; `cargo build --release`
-   before eyeballing.
-2. **Slice 5 / issue [#6](https://github.com/Akram012388/herdr-checkin/issues/6) — DONE (this
-   session).** `roster.json` + `RosterStore` (separate prunable store = **invariant #7**);
-   `status-changed` event binary stamps `status_since_ms`; startup seeds additively; pane sampler
-   reads + back-fills the uuid, resets on a reused slot; rows show `blocked 4m` / honest `~`. See the
-   header for the summary. **HITL outstanding:** eyeball the ages with live agents (`cargo build
-   --release` first — the live pane runs the release binary), then close #6.
-3. **Slice 6 / issue [#7](https://github.com/Akram012388/herdr-checkin/issues/7)** — pin-to-top,
-   persisted by **`agent_session` uuid, not `pane_id`** (positional/reusable), with tombstone GC. Pins
-   float to the top **of their workspace group**. Survives popup reopen + pane-slot reuse.
+1. **Slice 4 / issue [#5](https://github.com/Akram012388/herdr-checkin/issues/5) — DONE (this
+   session), #5 CLOSED.** The last-line status column: `roster::last_terminal_line` (pure chrome-
+   stripping fn + fixtures) + `herdr::TailCache` (budgeted round-robin `agent read` sweep on the
+   sampler thread, never-blank, first-sample-skipped). Row is `{status} {age} · {last terminal line}`,
+   title fallback. See the header block for the full summary + the two live findings. **The premise
+   shifted during the build:** `agent read` returns the *rendered* terminal whose tail is the agent's
+   own UI chrome, so "last non-empty line" was replaced (with the maintainer) by "skip the chrome
+   block, take the last content line" — see `roster::last_terminal_line`'s doc + the fixtures.
+2. **Slice 5 / issue [#6](https://github.com/Akram012388/herdr-checkin/issues/6) — DONE + CLOSED.**
+   `roster.json` + `RosterStore` (separate prunable store = **invariant #7**); `status-changed` event
+   binary stamps `status_since_ms`; startup seeds additively; pane sampler reads + back-fills the uuid,
+   resets on a reused slot; rows show `blocked 4m` / honest `~`.
+3. **Slice 6 / issue [#7](https://github.com/Akram012388/herdr-checkin/issues/7) — THE NEXT BUILD.**
+   Pin-to-top, persisted by **`agent_session` uuid, not `pane_id`** (positional/reusable), with
+   tombstone GC. Pins float to the top **of their workspace group** (hook into `roster::group_by_
+   workspace` / `agents_in_display_order` — the single ordering seam). Stored in `roster.json` as a
+   `pins: [{agent_session, pinned_at_ms, last_seen_ms}]` field (`#[serde(default)]`, the store is
+   versioned), via `RosterStore::update` deltas. A keybind (e.g. `Ctrl+T`) toggles pin/unpin on the
+   selected row. **Gotcha:** the `amp` fixture has no `agent_session` — a session-less agent simply
+   can't be pinned (don't crash); mirror the "reconcile trusts a sessionless agent" honesty test.
+   **Gate (HITL):** pin survives popup reopen; killing an agent + respawning a different one in the
+   same pane slot does NOT misapply the pin (uuid-keyed).
 
 - **Tracker: GitHub issues [#1–#7](https://github.com/Akram012388/herdr-checkin/issues)** (Slice 0→#1
   … Slice 6→#7). **#1 (Slice 0)** stays open pending the maintainer's pixel-identical popup eyeball.
-  **#2/#3/#4 done + closed.** **#5 is the next build.** This doc + the design doc are the durable
-  in-repo tracker; the issues are the work queue.
+  **#2/#3/#4/#5/#6 done + closed.** **#7 (Slice 6) is the next build.** This doc + the design doc are
+  the durable in-repo tracker; the issues are the work queue.
 
 ### PARKED architectural fork — "dissolve the Queue view into the roster" (do NOT start without a re-decision)
 The maintainer mused whether the Queue is still needed now the Agents view is dominant. Explored +
