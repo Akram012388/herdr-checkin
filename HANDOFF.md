@@ -37,7 +37,8 @@ Latest Check-in changes:
   `demo/herdr-checkin.tape`. It records a real isolated Herdr session—not a standalone plugin
   pane—so the centered modal, full-frame background dimming, bright popup border, and inherited
   theme are represented faithfully. Akram accepted it only as an interim progress checkpoint, not
-  as the final GIF; it will be reworked later and must not replace the README embed yet
+  as the final GIF. High-quality screenshots and a from-scratch GIF are deferred until the relevant
+  upstream work is approved, and the interim candidate must not replace the README embed
 - this handoff replaces the stale pre-theme work queue
 
 ### Herdr
@@ -47,7 +48,8 @@ Checkout: `../../herdr`
 - `feature/plugin-pane-theme` at `768ba00`
   - clean, pushed, and synced with `origin/feature/plugin-pane-theme`
   - one upstream-ready commit over `upstream/master`
-  - no upstream issue or PR exists
+  - upstream [discussion #1796](https://github.com/ogulcancelik/herdr/discussions/1796) is posted
+    and awaiting maintainer direction; no upstream issue or PR exists
 - `akram` at `31afdd0`
   - contains the theme work, full-frame popup presentation, downstream update/install/backup/rollback
     management, and two separately reviewable stream/API test fixes
@@ -98,22 +100,26 @@ Validation on the current Herdr tree:
 1. [#8](https://github.com/Akram012388/herdr-checkin/issues/8) — **closed**. The theme snapshot was
    validated with native Herdr builds and dark, light, and terminal-default themes.
 2. [#9](https://github.com/Akram012388/herdr-checkin/issues/9) — code and downstream candidate are
-   ready locally. **Upstream maintainer approval, issue/PR creation, and official landing are
-   intentionally deferred until the end by Akram.**
+   ready locally. Upstream
+   [discussion #1796](https://github.com/ogulcancelik/herdr/discussions/1796) proposes the pane-only
+   theme contract and is awaiting maintainer direction. **Do not open an upstream issue or PR unless
+   the maintainer accepts the direction, creates or converts an issue, and explicitly approves
+   Akram's PR path (normally with `/approve @Akram012388`).**
 3. [#10](https://github.com/Akram012388/herdr-checkin/issues/10) — consumer implementation and local
    validation are complete. Stock 0.7.5 keeps the legacy fallback; the first named producer is
    `0.7.5-akram.1`. Final official-version wording waits for #9 to land.
-4. [#11](https://github.com/Akram012388/herdr-checkin/issues/11) — this handoff now includes final
-   popup polish commit `c8ac630`, its validation count, the live user confirmation, and the current
-   external-work gates; issue closure remains an explicit maintainer action.
+4. [#11](https://github.com/Akram012388/herdr-checkin/issues/11) — **closed as completed** after this
+   handoff recorded the final popup polish, validation state, live confirmation, posted maintainer
+   discussion, and remaining approval gates.
 5. [#12](https://github.com/Akram012388/herdr-checkin/issues/12) — the existing README GIF predates
    the final row and first-paint polish. The new skill-generated candidate records the actual
    full-frame Herdr popup at `demo/herdr-checkin.gif` and is committed only as an interim progress
-   checkpoint. It is explicitly not the final approved GIF; rework and final approval remain before
-   the README embed changes or the issue closes.
+   checkpoint. It is explicitly not the final approved GIF. Akram will take high-quality screenshots
+   and rebuild the GIF from scratch only after the relevant upstream work is approved; final visual
+   approval remains required before the README embed changes or the issue closes.
 
-Issues #1 through #8 are closed. Pin-to-top (#7) was implemented, reviewed, declined, reverted, and
-scrubbed; it is not a pending feature.
+Issues #1 through #8 and #11 are closed. Pin-to-top (#7) was implemented, reviewed, declined,
+reverted, and scrubbed; it is not a pending feature.
 
 ## What the product does
 
@@ -160,20 +166,25 @@ actual producing candidate explicitly.
 
 ## Next actions
 
-1. Rework `demo/herdr-checkin.gif`; only after Akram explicitly approves a future final candidate,
-   replace the README's existing `docs/pane-demo.gif` embed with the new relative demo path.
-2. Help Akram draft the prose for a new discussion with the Herdr maintainer. Draft only; Akram
-   controls when and where it is posted.
-3. Obtain Herdr maintainer approval through that discussion before opening any upstream issue or PR.
-4. Only after approval, follow the external-contributor gate for the approved scope, beginning with
-   the pane-theme contract tracked by #9; keep full-frame popup behavior separately reviewable if
-   the maintainer requests it.
-5. After an official Herdr version exists, replace candidate wording, update any final version gate,
-   rerun validation, and close #9/#10.
+1. Monitor upstream
+   [discussion #1796](https://github.com/ogulcancelik/herdr/discussions/1796) for maintainer direction
+   on the pane-theme contract tracked by #9.
+2. Keep full-frame popup presentation separately reviewable through existing upstream
+   [discussion #1733](https://github.com/ogulcancelik/herdr/discussions/1733); approval on one
+   discussion does not imply approval on the other.
+3. Only if the maintainer creates or converts an accepted issue and explicitly approves Akram's PR
+   path, prepare the smallest upstream PR for that approved scope. Start with the already-isolated
+   `feature/plugin-pane-theme` branch when #1796 is approved.
+4. After an official Herdr version contains the theme contract, replace downstream-candidate
+   wording, update Check-in's final version gate, rerun validation, and close #9/#10.
+5. Once the relevant upstream work is approved and settled, take high-quality screenshots and
+   rebuild the final demo GIF from scratch. After Akram's visual approval, update the README embed
+   and close #12.
+6. Tag Check-in `v0.4.0` or publish a fork release only with Akram's explicit approval.
 
-Beyond this approved interim-demo checkpoint, do not change the README GIF embed, remove the prior
-artifact, tag Check-in `v0.4.0`, publish a fork release, make another push, post the maintainer
-discussion, or open upstream work without Akram's explicit approval.
+Do not open an upstream issue or PR before Herdr's accepted-issue and contributor-approval gates are
+satisfied. Until the upstream outcome is settled, do not replace the README GIF, remove the prior
+artifact, or treat the interim candidate as final.
 
 ## Downstream modal behavior
 
