@@ -2,7 +2,7 @@
   ⎿  running 42 tests
      test result: ok. 42 passed
 
-· Churning… (1m 7s · ↓ 3.9k tokens)
+✳ Sautéed for 4m 28s
                                                             133659 tokens
 ──────────────────────────────────────────────────────────── slice-4-and-beyond ──
 ❯

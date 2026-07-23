@@ -352,12 +352,34 @@ fn is_status_bar(line: &str) -> bool {
     MARKERS.iter().any(|marker| line.contains(marker))
 }
 
-/// A live-activity row shown only while an agent is generating: the spinner line (`… ↓ 3.9k tokens)`)
-/// or the right-aligned running token counter (`133659 tokens`). Skipped so the column shows the last
+/// A live-activity row shown only while an agent is generating: Claude Code's whimsical spinner line
+/// (`✽ Finagling… (2m 9s · ↓ 6.2k tokens)` or the token-less `✳ Sautéed for 4m 28s`) or the
+/// right-aligned running token counter (`133659 tokens`). Skipped so the column shows the last
 /// *settled* output line instead of a value that churns every refresh (the maintainer's call — the
 /// `working 2m` time-in-state already signals "busy").
 fn is_live_activity(line: &str) -> bool {
-    line.ends_with("tokens)") || is_token_count(line)
+    is_spinner_prefixed(line) || line.ends_with("tokens)") || is_token_count(line)
+}
+
+/// A line that opens with a spinner glyph then a space — Claude Code's activity spinner, whose frames
+/// cycle a sparkle/asterisk glyph (`✳ ✽ ✶ · …`) before a cheeky verb. Those glyphs are distinct from
+/// the content markers agents prefix real output with (`✓`, `⏺`, `●`), so this skips the churning
+/// spinner without ever eating a genuine last line.
+fn is_spinner_prefixed(line: &str) -> bool {
+    let mut chars = line.chars();
+    matches!((chars.next(), chars.next()), (Some(glyph), Some(' ')) if is_spinner_glyph(glyph))
+}
+
+/// A spinner frame glyph: dingbat asterisks/stars (`✢ ✳ ✶ ✽` …), the dot frames (`· ∙ ⋅ ∗`), and
+/// braille spinner cells. Deliberately excludes the content markers `✓`/`✔` (U+2713/4) and `⏺`
+/// (U+23FA), so a completed tool line like `✓ Ran 2 commands` stays content.
+fn is_spinner_glyph(ch: char) -> bool {
+    matches!(ch,
+        '·' | '∙' | '⋅' | '∗'
+        | '\u{2722}'..='\u{2749}'   // dingbat asterisks and stars (✢ … ✽ … ❉)
+        | '\u{2055}'                // ⁕ flower punctuation mark
+        | '\u{2800}'..='\u{28FF}'   // braille patterns (dot-spinner frames)
+    )
 }
 
 /// The bare running-token counter `<digits> tokens` (commas allowed), nothing else on the line.
@@ -758,8 +780,14 @@ mod tests {
         assert!(is_terminal_chrome("│                      │")); // an empty box side
         assert!(is_terminal_chrome("❯"));
         assert!(is_terminal_chrome("133659 tokens")); // the running token counter
-        assert!(is_terminal_chrome("· Churning… (1m 7s · ↓ 3.9k tokens)")); // the spinner
-                                                                            // Real content with a stray box char or the word "tokens" mid-line is NOT chrome.
+                                                      // Both Claude Code spinner frames: the token-tailed one and the "cheeky verb for <time>" one.
+        assert!(is_terminal_chrome("· Churning… (1m 7s · ↓ 3.9k tokens)"));
+        assert!(is_terminal_chrome("✳ Sautéed for 4m 28s"));
+        assert!(is_terminal_chrome("✽ Finagling…"));
+        // Real content is NOT chrome — including a completed tool line (`✓`/`⏺` are content markers,
+        // not spinner glyphs), a stray box char, or the word "tokens" mid-sentence.
+        assert!(!is_terminal_chrome("✓ Ran 2 commands"));
+        assert!(!is_terminal_chrome("⏺ Bash(cargo test)"));
         assert!(!is_terminal_chrome(
             "Then reply “installed and token saved.”"
         ));
