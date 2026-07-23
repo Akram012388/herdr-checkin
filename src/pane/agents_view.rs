@@ -61,6 +61,7 @@ pub(super) fn layout_rows(agents: &[&RosterAgent]) -> Vec<Row> {
 pub(super) fn draw_agents(
     frame: &mut Frame,
     model: &PaneModel,
+    now_ms: u64,
     list_state: &mut ListState,
     list_area: &mut Option<Rect>,
 ) {
@@ -108,7 +109,7 @@ pub(super) fn draw_agents(
         );
     } else {
         draw_roster(
-            frame, model, &agents, list_state, list_area, areas[2], compose,
+            frame, model, now_ms, list_state, list_area, areas[2], compose,
         );
     }
 
@@ -141,12 +142,16 @@ pub(super) fn draw_agents(
 fn draw_roster(
     frame: &mut Frame,
     model: &PaneModel,
-    agents: &[&RosterAgent],
+    now_ms: u64,
     list_state: &mut ListState,
     list_area: &mut Option<Rect>,
     area: Rect,
     compose: Option<&ReplyDraft>,
 ) {
+    // Recomputed from the model (the same display order `draw_agents` already checked was non-empty)
+    // rather than threaded in as a ninth argument.
+    let agents = model.roster_display_agents();
+    let agents = agents.as_slice();
     let rows = layout_rows(agents);
 
     // While navigating, highlight the selected agent; while composing, the reply target by pane id
@@ -163,7 +168,7 @@ fn draw_roster(
             Row::Header(workspace) => ListItem::new(workspace.clone()).bold(),
             Row::Entry(index) => ListItem::new(agent_destination(agents[*index])),
             Row::Detail(index) => {
-                let detail = format!("  {}", agent_detail(agents[*index]));
+                let detail = format!("  {}", agent_detail(agents[*index], now_ms));
                 if highlight_index == Some(*index) {
                     ListItem::new(detail).bg(SELECTION_BG)
                 } else {
@@ -253,6 +258,7 @@ mod tests {
             cwd: None,
             focused: false,
             terminal_title: Some("title".to_string()),
+            status_since_ms: None,
             workspace_label: None,
             tab_label: None,
             pane_label: None,

@@ -40,7 +40,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::widgets::{ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -136,7 +136,7 @@ fn event_loop(
     // tick — invariant that the durable Queue view can't jank). It ships snapshots over an mpsc the
     // tick drains without blocking; it is joined on drop, so every exit path (including a `?` below)
     // tears it down cleanly.
-    let sampler = RosterSampler::spawn(runtime.herdr_bin_path.clone());
+    let sampler = RosterSampler::spawn(runtime.herdr_bin_path.clone(), runtime.state_dir.clone());
 
     // Frame 1: paint the popup shell immediately (it appears instantly, never hostage to a slow
     // `agent list`). Then, when the Agents view is what's showing, block briefly for the sampler's
@@ -436,13 +436,14 @@ impl RosterSampler {
     /// Spawn the sampler over a fresh [`CliHerdr`] built from `bin_path` (the worker owns its own
     /// herdr handle — the borrowed `&dyn Herdr` the pane runs on is neither `Send` nor `'static`).
     /// Samples once immediately so the Agents view has data on its first open, then every
-    /// [`ROSTER_SAMPLE_INTERVAL`].
-    fn spawn(bin_path: PathBuf) -> Self {
+    /// [`ROSTER_SAMPLE_INTERVAL`]. `state_dir` lets the worker reconcile each sample against the
+    /// `roster.json` time-in-state registry off the render tick (see [`sampler_loop`]).
+    fn spawn(bin_path: PathBuf, state_dir: PathBuf) -> Self {
         let (snapshot_tx, rx) = mpsc::channel::<RosterSnapshot>();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let handle = thread::Builder::new()
             .name("checkin-roster-sampler".to_string())
-            .spawn(move || sampler_loop(&CliHerdr { bin_path }, &snapshot_tx, &stop_rx))
+            .spawn(move || sampler_loop(&CliHerdr { bin_path }, &state_dir, &snapshot_tx, &stop_rx))
             .expect("spawning the roster sampler thread should not fail");
         Self {
             rx,
@@ -499,12 +500,21 @@ impl Drop for RosterSampler {
 /// The thread owns a [`LabelCache`], so the steady-state sample is a single `agent list` spawn: the
 /// workspace/tab/pane label maps are refetched only when a new agent pane appears or on a slow
 /// periodic refresh (see [`sample_roster`]), not every second.
-fn sampler_loop(herdr: &CliHerdr, snapshot_tx: &Sender<RosterSnapshot>, stop_rx: &Receiver<()>) {
+fn sampler_loop(
+    herdr: &CliHerdr,
+    state_dir: &Path,
+    snapshot_tx: &Sender<RosterSnapshot>,
+    stop_rx: &Receiver<()>,
+) {
     let mut labels = LabelCache::default();
     loop {
-        if let Ok(agents) = sample_roster(herdr, &mut labels) {
+        if let Ok(mut agents) = sample_roster(herdr, &mut labels) {
+            // Fill each row's time-in-state from the `roster.json` registry (back-filling session
+            // uuids as a delta) here on the worker, so no roster IO ever touches the render tick.
+            let sampled_at_ms = current_unix_ms();
+            crate::roster_state::reconcile_roster(state_dir, &mut agents, sampled_at_ms);
             let snapshot = RosterSnapshot {
-                sampled_at_ms: current_unix_ms(),
+                sampled_at_ms,
                 agents,
             };
             // The receiver is gone -> the pane is closing; stop.
@@ -827,7 +837,7 @@ fn draw(
 ) {
     match model.tab {
         ActiveTab::Queue => draw_queue(frame, model, now_ms, list_state, list_area),
-        ActiveTab::Agents => agents_view::draw_agents(frame, model, list_state, list_area),
+        ActiveTab::Agents => agents_view::draw_agents(frame, model, now_ms, list_state, list_area),
     }
 }
 
@@ -1412,6 +1422,7 @@ mod tests {
             cwd: Some("/tmp".to_string()),
             focused: false,
             terminal_title: Some("herdr-checkin".to_string()),
+            status_since_ms: None,
             workspace_label: None,
             tab_label: None,
             pane_label: None,
@@ -1527,10 +1538,15 @@ mod tests {
     fn snapshot_agents_view_groups_rows_by_workspace() {
         let mut m = model(&[]);
         m.tab = ActiveTab::Agents;
+        // The first agent has a known timer (stamped at 0, rendered at now=1_000 -> "1s"); the other
+        // two have no registry entry, so their age renders as an honest "~" (design §4).
         m.roster = Some(RosterSnapshot {
             sampled_at_ms: 1_000,
             agents: vec![
-                roster_agent("w4:p1", "w4", AgentStatus::Idle),
+                RosterAgent {
+                    status_since_ms: Some(0),
+                    ..roster_agent("w4:p1", "w4", AgentStatus::Idle)
+                },
                 roster_agent("w4:p2", "w4", AgentStatus::Blocked),
                 roster_agent("wN:p1", "wN", AgentStatus::Working),
             ],
@@ -1541,15 +1557,15 @@ mod tests {
                 "Queue     Agents      tab · switch", // the tab bar, Agents active
                 "3 agents",
                 "",
-                "w4",            // workspace group header
-                "> t1 · pane 1", // the selection cursor sits on the first agent
-                "idle · herdr-checkin",
+                "w4",                      // workspace group header
+                "> t1 · pane 1",           // the selection cursor sits on the first agent
+                "idle 1s · herdr-checkin", // time-in-state from the registry
                 "t1 · pane 2",
-                "blocked · herdr-checkin",
+                "blocked ~ · herdr-checkin", // no registry entry -> honest `~`
                 "",
                 "wN",
                 "t1 · pane 1",
-                "working · herdr-checkin",
+                "working ~ · herdr-checkin",
                 "j/k move  ·  enter jump  ·  space reply  ·  q quit",
             ]
         );

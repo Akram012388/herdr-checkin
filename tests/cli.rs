@@ -89,6 +89,56 @@ fn enqueue_via_events_then_next_focuses_oldest() {
 
 #[test]
 #[cfg(unix)]
+fn status_changed_stamps_time_in_state_into_roster_json() {
+    // Slice 5 data path: driving the built binary with a synthetic status-changed event stamps
+    // `status_since_ms` into a `roster.json` that is a *separate* store from the durable `state.json`.
+    let temp = TempDir::new("roster-stamp");
+    let plugin = Plugin::in_dir(&temp);
+
+    plugin
+        .run("status-changed")
+        .env(
+            "HERDR_PLUGIN_EVENT_JSON",
+            status_event("wA:p1", "wA", "blocked", "needs input"),
+        )
+        .assert_success();
+
+    // The transition is stamped in roster.json, keyed by pane id, with a wall-clock `status_since_ms`.
+    let roster = read_roster_json(&plugin.state_dir);
+    let entry = &roster["agents"]["wA:p1"];
+    assert_eq!(entry["status"], "blocked");
+    let first_since = entry["status_since_ms"]
+        .as_u64()
+        .expect("status_since_ms is stamped as a number");
+    assert!(first_since > 0, "the clock is a real wall-clock stamp");
+    // The event carries no session uuid; the pane sampler back-fills it, so it is absent here.
+    assert!(entry.get("agent_session").is_none() || entry["agent_session"].is_null());
+    // And the same event enqueued the durable waiter — the two stores ride together but stay distinct.
+    assert_eq!(
+        read_state_json(&plugin.state_dir)["entries"][0]["pane_id"],
+        "wA:p1"
+    );
+
+    // A genuine transition (blocked -> done) re-stamps the clock forward.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    plugin
+        .run("status-changed")
+        .env(
+            "HERDR_PLUGIN_EVENT_JSON",
+            status_event("wA:p1", "wA", "done", "finished"),
+        )
+        .assert_success();
+    let roster = read_roster_json(&plugin.state_dir);
+    let entry = &roster["agents"]["wA:p1"];
+    assert_eq!(entry["status"], "done");
+    assert!(
+        entry["status_since_ms"].as_u64().unwrap() >= first_since,
+        "a transition moves the clock forward, never backward"
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn focus_event_evicts_before_next() {
     let temp = TempDir::new("evict");
     let plugin = Plugin::in_dir(&temp);
@@ -340,6 +390,11 @@ fn read_lines(path: &Path) -> Vec<String> {
 fn read_state_json(state_dir: &Path) -> Value {
     let contents = fs::read_to_string(state_dir.join("state.json")).expect("state should exist");
     serde_json::from_str(&contents).expect("state should be valid JSON")
+}
+
+fn read_roster_json(state_dir: &Path) -> Value {
+    let contents = fs::read_to_string(state_dir.join("roster.json")).expect("roster should exist");
+    serde_json::from_str(&contents).expect("roster should be valid JSON")
 }
 
 fn status_event(pane_id: &str, workspace_id: &str, status: &str, title: &str) -> String {

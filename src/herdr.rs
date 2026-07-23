@@ -400,6 +400,9 @@ fn parse_agent_list(stdout: &[u8]) -> Result<Vec<RosterAgent>, PluginError> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             terminal_title: non_empty_string(agent, "terminal_title"),
+            // Not in `agent list` (it carries no timestamps, design §4); the roster sampler fills it
+            // from the `roster.json` registry after parse (see `roster_state::reconcile_roster`).
+            status_since_ms: None,
             // Labels are not in `agent list`; the CliHerdr seam enriches them (see `agent_list`).
             workspace_label: None,
             tab_label: None,
@@ -813,6 +816,7 @@ mod tests {
             cwd: None,
             focused: false,
             terminal_title: None,
+            status_since_ms: None,
             workspace_label: None,
             tab_label: None,
             pane_label: None,
@@ -854,6 +858,7 @@ mod tests {
             cwd: None,
             focused: false,
             terminal_title: None,
+            status_since_ms: None,
             workspace_label: None,
             tab_label: None,
             pane_label: None,
@@ -881,6 +886,7 @@ mod tests {
                 cwd: None,
                 focused: false,
                 terminal_title: None,
+                status_since_ms: None,
                 workspace_label: None,
                 tab_label: None,
                 pane_label: None,

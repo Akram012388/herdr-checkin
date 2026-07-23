@@ -10,11 +10,30 @@ later pivoted to a popup: [docs/triage-overlay-design.md](docs/triage-overlay-de
 on request. **All the Agents-view work below is post-0.4.0 internal feature work — NOT in the
 CHANGELOG.** · **License:** MIT · **Repo:** https://github.com/Akram012388/herdr-checkin · **State:**
 `main` is green (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` =
-**126 lib + 5 CLI tests**), pushed, tip **`fd92653`**. Working tree clean, no open branches/worktrees.
+**142 lib + 6 CLI tests**), tip **`fd92653`** + the uncommitted Slice 5 work below.
 
 **START HERE (§6): the popup is TWO tabs — the durable Queue + a live Agents roster, `Tab`/`Ctrl+S` to
-toggle. Slices 0-3 are DONE and #3/#4 are CLOSED. The next build is Slice 4 / issue #5 (last-line
-status column) — full plan in §6.**
+toggle. Slices 0-3 + Slice 5 are DONE (#2/#3/#4/#6 CLOSED). The remaining builds are Slice 4 / issue
+#5 (last-line status column, HITL) and Slice 6 / issue #7 (pin-to-top, HITL) — full plan in §6.**
+
+**What shipped THIS session (2026-07-23; Slice 5 / issue #6 — time-in-state):**
+- **New `roster_state.rs` = `RosterStore`** — a **separate store from `state.json`** (`roster.json` +
+  `roster.lock`, delta-under-lock temp+rename, the `StateStore` twin). Registry keyed by `pane_id`:
+  `{agent_session, status, status_since_ms, first_seen_ms, last_seen_ms}` (`BTreeMap`, deterministic).
+- **Provenance is event-stamped (design §4).** The `status-changed` **event binary** stamps
+  `status_since_ms` on every transition (best-effort, after the queue mutation, wired in `lib.rs`'s
+  dispatch so `queue.rs` never learns roster exists — fires for **every** status, not just waiters).
+  `startup` seeds **additively** (invariant #4 — `or_insert`, idempotent). The **pane sampler only
+  reads + back-fills the session uuid** and resets the timer **only on a reused pane slot** (uuid
+  mismatch), never fabricating a transition time from a status difference (the poll-loop "0s" trap).
+- **Rows now show `blocked 4m`** — `roster.rs` gained `RosterAgent::status_since_ms` (filled by the
+  sampler's `reconcile_roster`), pure `format_age`/`time_in_state` (unknown → honest **`~`**), and
+  `agent_detail` folds the age in. The sampler thread does all `roster.json` IO off the render tick
+  (`state_dir` threaded into `RosterSampler`).
+- **New invariant #7** (see §3) + its delete-`roster.json`-and-everything-works test; a real-binary
+  data-path CLI test (`status-changed` stamps `roster.json`); startup-idempotence + zero-`state.json`-
+  writes tests. **Not yet HITL-eyeballed** — the age numbers want a look with live agents, but the
+  data path is fully tested. `cargo build --release` done (the live pane runs the release binary).
 
 **What shipped THIS session (2026-07-23, on `main`, tip `fd92653`; reply-input + load-perf polish):**
 - **Closed #3 + #4** — the Agents-view jump+reply E2E was HITL-confirmed live at the terminal (Tab to
@@ -105,6 +124,16 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
 - `src/state.rs` (~320) — persisted state: `QueueEntry` (+ the four identity fields), `WaitStatus`,
   `StateStore` (lock + atomic write), `read_state`/`write_state`/`load_entries`, `PluginError`. Owns
   the "all mutations via `StateStore::update`" invariant.
+- `src/roster_state.rs` (~600 incl. tests) — the **Slice 5 registry store**: `RosterStore` (the
+  `StateStore` twin on **`roster.json` + `roster.lock`**, delta-under-lock temp+rename), `RegistryEntry`,
+  `Registry` (`BTreeMap<pane_id, _>`). Pure mutators: **`stamp_status`** (event-binary transition
+  stamp — resets `status_since_ms` only on a real status change), **`seed_status`** (startup, additive
+  `or_insert`), **`reconcile_pane`** (sampler: back-fill uuid, reset only on a reused-slot uuid
+  mismatch, return the trusted since). Runtime bridges (all **best-effort**, invariant #7):
+  **`stamp_status_changed`** (parses the event, called from `lib.rs` after the queue mutation),
+  **`seed_registry`** (from `startup`'s `pane list`), **`reconcile_roster`** (on the sampler thread —
+  fills each `RosterAgent::status_since_ms`, the only production `roster.json` writer). Owns invariant
+  #7. `load_registry` is `#[cfg(test)]` (prod reads happen inside `reconcile_roster`'s locked update).
 - `src/herdr.rs` (~640) — the herdr seam. `Herdr` trait / `CliHerdr` / `PaneInfo` (+ `tab_id`,
   `label`); parsers `parse_pane_infos`, `parse_workspace_labels`/`parse_tab_labels` (shared
   `parse_id_label_map`), `parse_status_event`. Trait methods: `pane_status_map`, `pane_infos`,
@@ -246,6 +275,12 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
    when `HERDR_CHECKIN_POPUP` is set.
 6. **`queue.rs` never depends on the `Herdr` trait** — identity resolution reaches it as an injected
    closure (`enrich`), not a `Herdr` call. The module boundary enforces it.
+7. **`roster.json` is a prunable observation cache** (Slice 5) — nothing correctness-critical may
+   live *only* there; deleting it must merely degrade timers/pins, never lose a ping. `RosterStore`
+   (`roster_state.rs`) is a **separate store** from `state.json` with its own lock, and every writer
+   is best-effort (the `status-changed` stamp, the `startup` seed, and the pane sampler's reconcile
+   all swallow their own errors). Tests: delete `roster.json` → everything still works; the pane's
+   roster path writes **zero** `state.json`.
 
 ## 4. herdr API facts (0.7.5, protocol 17)
 
@@ -347,12 +382,12 @@ design.md` §8 for the full slice table. **Remaining work, in order:**
    same way (never on the render tick; visible-rows only). **The live pane runs
    `target/release/herdr-checkin`** — `cargo test` (debug) does NOT update it; `cargo build --release`
    before eyeballing.
-2. **Slice 5 / issue [#6](https://github.com/Akram012388/herdr-checkin/issues/6)** — `roster.json` +
-   `RosterStore` (a **separate, prunable** store from `state.json` = **new invariant #7**: deleting it
-   only degrades timers/pins, never a ping). Time-in-state is **stamped by the `status-changed` event
-   binary** into the store (the pane isn't running to observe transitions — poll-loop tracking would
-   fabricate `0s`); rows show `blocked 4m` / an honest `~` when unknown. Startup seeds additively
-   (idempotence test). AFK-ish + a data-path test.
+2. **Slice 5 / issue [#6](https://github.com/Akram012388/herdr-checkin/issues/6) — DONE (this
+   session).** `roster.json` + `RosterStore` (separate prunable store = **invariant #7**);
+   `status-changed` event binary stamps `status_since_ms`; startup seeds additively; pane sampler
+   reads + back-fills the uuid, resets on a reused slot; rows show `blocked 4m` / honest `~`. See the
+   header for the summary. **HITL outstanding:** eyeball the ages with live agents (`cargo build
+   --release` first — the live pane runs the release binary), then close #6.
 3. **Slice 6 / issue [#7](https://github.com/Akram012388/herdr-checkin/issues/7)** — pin-to-top,
    persisted by **`agent_session` uuid, not `pane_id`** (positional/reusable), with tombstone GC. Pins
    float to the top **of their workspace group**. Survives popup reopen + pane-slot reuse.

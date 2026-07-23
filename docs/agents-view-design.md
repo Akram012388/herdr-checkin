@@ -119,7 +119,7 @@ this doc is the durable design, the issues are the per-slice work tracker.
 | 2 tab toggle + live roster | [#3](https://github.com/Akram012388/herdr-checkin/issues/3) | HITL |
 | 3 jump + reply parity | [#4](https://github.com/Akram012388/herdr-checkin/issues/4) | HITL |
 | 4 last-line status column | [#5](https://github.com/Akram012388/herdr-checkin/issues/5) | HITL |
-| 5 `roster.json` + time-in-state | [#6](https://github.com/Akram012388/herdr-checkin/issues/6) | AFK |
+| 5 `roster.json` + time-in-state **(DONE)** | [#6](https://github.com/Akram012388/herdr-checkin/issues/6) | AFK |
 | 6 pin-to-top | [#7](https://github.com/Akram012388/herdr-checkin/issues/7) | HITL |
 
 
@@ -171,9 +171,14 @@ this doc is the durable design, the issues are the per-slice work tracker.
     geometry:** the maintainer confirmed 50%×50% reads fine — left as-is.
 - **Slice 4** — Last-line status column: 2s visible-rows `agent read` sweep, budgeted round-robin,
   invalidate-on-status-change, never-blank cache. *Gate:* smooth with 5+ agents; lines track output.
-- **Slice 5** — `roster.json` + `RosterStore`; `status-changed` stamps `status_since_ms`; startup
-  seeds additively; rows show `blocked 4m` / honest `~`. *Gate:* data-path test (drive the binary,
-  inspect the file) + startup-idempotence test.
+- **Slice 5 (DONE)** — `roster.json` + `RosterStore` (`roster_state.rs`, a separate locked store =
+  invariant #7); the `status-changed` event binary stamps `status_since_ms` (wired in `lib.rs`
+  dispatch, best-effort, `queue.rs`-blind); startup seeds additively (`or_insert`, idempotent); the
+  pane sampler reads + back-fills the session uuid and resets the timer only on a reused pane slot;
+  rows show `blocked 4m` / honest `~` (`roster::format_age`/`time_in_state`, `RosterAgent::status_since_ms`
+  filled by `reconcile_roster` on the sampler thread). Gate met: real-binary data-path CLI test +
+  startup-idempotence + delete-`roster.json` (invariant #7) + zero-`state.json`-writes tests; CI green
+  (142 lib + 6 CLI). *HITL outstanding:* eyeball the ages with live agents.
 - **Slice 6** — Pin-to-top persisted by `agent_session` with tombstone GC. *Gate:* survives popup
   reopen and pane-slot reuse.
 - **Slice 7 (optional, only if re-requested after lived experience)** — peek panel and/or arbitrary

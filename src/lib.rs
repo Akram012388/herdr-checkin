@@ -18,6 +18,7 @@ mod herdr;
 mod pane;
 mod queue;
 mod roster;
+mod roster_state;
 mod state;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -81,7 +82,14 @@ pub fn run_from_env() -> i32 {
 fn run(subcommand: Subcommand, runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), PluginError> {
     match subcommand {
         Subcommand::StatusChanged => {
-            on_status_changed(runtime, |event| enrich_location(herdr, event))
+            // Enqueue/evict the durable queue first (the critical path), then best-effort stamp the
+            // roster registry's time-in-state. The stamp is a separate step — not injected into
+            // `on_status_changed` — because it fires for *every* status (`idle`/`working` included,
+            // which the queue ignores) and must never fail the queue mutation: `roster.json` is a
+            // prunable cache (invariant #7), so `stamp_status_changed` swallows its own errors.
+            let result = on_status_changed(runtime, |event| enrich_location(herdr, event));
+            roster_state::stamp_status_changed(runtime);
+            result
         }
         Subcommand::Focused => on_focused(runtime),
         Subcommand::Closed => on_closed(runtime),

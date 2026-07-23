@@ -62,6 +62,13 @@ pub(crate) struct RosterAgent {
     pub(crate) cwd: Option<String>,
     pub(crate) focused: bool,
     pub(crate) terminal_title: Option<String>,
+    /// The wall clock (ms) of this agent's last observed transition into its current status, read
+    /// from the `roster.json` registry by the sampler ([`crate::roster_state::reconcile_roster`]) and
+    /// used to render time-in-state (`blocked 4m`). `None` when there is no honest reading — the pane
+    /// has no registry entry yet, or a reused-slot uuid mismatch invalidated the timer — in which
+    /// case the row shows `~`. Not parsed from `agent list` (it carries no timestamps, design §4);
+    /// filled after parse, mirroring the label fields below.
+    pub(crate) status_since_ms: Option<u64>,
     /// Human names herdr shows for this pane's workspace/tab/pane (`w4` -> `home`, `w4:t1` -> `~`).
     /// `agent list` carries only positional ids, so the herdr seam enriches these from
     /// `workspace list`/`tab list`/`pane list` — `None` when a lookup missed, and the view then falls
@@ -192,18 +199,49 @@ pub(crate) fn agent_destination(agent: &RosterAgent) -> String {
     parts.join(" · ")
 }
 
-/// The detail (second) line for an Agents-view row: the live status then the terminal title, if any
-/// (`{status} · {title}`, or just `{status}` when the pane has no title). Time-in-state (`blocked 4m`)
-/// arrives in Slice 5; Slice 2 shows the instantaneous status only.
-pub(crate) fn agent_detail(agent: &RosterAgent) -> String {
-    let status = agent.agent_status.as_str();
+/// The detail (second) line for an Agents-view row: the live status **with its time-in-state** then
+/// the terminal title, if any (`blocked 4m · title`, or `blocked 4m` when the pane has no title). The
+/// age comes from the `roster.json` registry via [`RosterAgent::status_since_ms`]; when that is
+/// unknown the age renders as `~` (design §4), so the status word is always present.
+pub(crate) fn agent_detail(agent: &RosterAgent, now_ms: u64) -> String {
+    let head = format!(
+        "{} {}",
+        agent.agent_status.as_str(),
+        time_in_state(now_ms, agent.status_since_ms)
+    );
     match agent
         .terminal_title
         .as_deref()
         .filter(|title| !title.is_empty())
     {
-        Some(title) => format!("{status} · {title}"),
-        None => status.to_string(),
+        Some(title) => format!("{head} · {title}"),
+        None => head,
+    }
+}
+
+/// The time-in-state label for a row: the compact age since the last transition (`4m`), or `~` when
+/// there is no honest reading (`None` — no registry entry, or a reused-slot uuid mismatch). Pure and
+/// Herdr-free; the registry lookup + reset logic lives in `roster_state.rs`, which hands the resolved
+/// `since_ms` here.
+pub(crate) fn time_in_state(now_ms: u64, since_ms: Option<u64>) -> String {
+    match since_ms {
+        Some(since) => format_age(now_ms, since),
+        None => "~".to_string(),
+    }
+}
+
+/// A wall-clock span rendered compactly, largest whole unit only: `45s`, `4m`, `2h`, `3d`. A `since`
+/// at or after `now` (clock skew, a just-stamped transition) clamps to `0s` rather than underflowing.
+pub(crate) fn format_age(now_ms: u64, since_ms: u64) -> String {
+    let secs = now_ms.saturating_sub(since_ms) / 1_000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3_600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3_600)
+    } else {
+        format!("{}d", secs / 86_400)
     }
 }
 
@@ -269,6 +307,7 @@ mod tests {
             cwd: Some("/tmp".to_string()),
             focused: false,
             terminal_title: Some("title".to_string()),
+            status_since_ms: None,
             workspace_label: None,
             tab_label: None,
             pane_label: None,
@@ -449,23 +488,54 @@ mod tests {
     }
 
     #[test]
-    fn agent_detail_joins_status_and_title_and_degrades_without_a_title() {
-        let with_title = agent("w4:p1", "w4", AgentStatus::Blocked); // title defaults to "title"
-        assert_eq!(agent_detail(&with_title), "blocked · title");
+    fn agent_detail_joins_status_age_and_title_and_degrades_without_a_title() {
+        // status_since 1_000, now 241_000 -> 240s -> "4m". The age sits between status and title.
+        let with_title = RosterAgent {
+            status_since_ms: Some(1_000),
+            ..agent("w4:p1", "w4", AgentStatus::Blocked) // title defaults to "title"
+        };
+        assert_eq!(agent_detail(&with_title, 241_000), "blocked 4m · title");
         let no_title = RosterAgent {
             terminal_title: None,
+            status_since_ms: Some(1_000),
             ..agent("w4:p1", "w4", AgentStatus::Working)
         };
-        assert_eq!(agent_detail(&no_title), "working");
+        assert_eq!(agent_detail(&no_title, 241_000), "working 4m");
         let empty_title = RosterAgent {
             terminal_title: Some(String::new()),
+            status_since_ms: Some(1_000),
             ..agent("w4:p1", "w4", AgentStatus::Done)
         };
         assert_eq!(
-            agent_detail(&empty_title),
-            "done",
+            agent_detail(&empty_title, 241_000),
+            "done 4m",
             "an empty title is dropped, not shown as a trailing separator"
         );
+    }
+
+    #[test]
+    fn agent_detail_shows_a_tilde_when_the_timer_is_unknown() {
+        // No registry entry (status_since_ms None) renders an honest `~`, never a fake zero.
+        let unknown = agent("w4:p1", "w4", AgentStatus::Blocked);
+        assert_eq!(unknown.status_since_ms, None);
+        assert_eq!(agent_detail(&unknown, 999_000), "blocked ~ · title");
+    }
+
+    #[test]
+    fn format_age_renders_the_largest_whole_unit() {
+        assert_eq!(format_age(0, 0), "0s");
+        assert_eq!(format_age(45_000, 0), "45s");
+        assert_eq!(format_age(240_000, 0), "4m");
+        assert_eq!(format_age(7_200_000, 0), "2h");
+        assert_eq!(format_age(3 * 86_400_000, 0), "3d");
+        // A since after now (clock skew / a just-stamped transition) clamps to 0s, never underflows.
+        assert_eq!(format_age(1_000, 5_000), "0s");
+    }
+
+    #[test]
+    fn time_in_state_is_a_tilde_when_unknown() {
+        assert_eq!(time_in_state(240_000, Some(0)), "4m");
+        assert_eq!(time_in_state(240_000, None), "~");
     }
 
     #[test]
