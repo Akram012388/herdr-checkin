@@ -6,9 +6,8 @@ Herdr's native jump-to-notification only reaches the toast that is currently on 
 Once a toast fades the ping is gone, and if two agents ping at once you can only reach the
 last one. `herdr-checkin` remembers them: every agent that goes **blocked** (needs input) or
 **done** (finished) is queued, and one keypress jumps you to the oldest waiter and pops it —
-so no ping is lost and agents queue instead of racing. A keyboard-driven status pane (styled after
-the Claude Code agents view) groups the waiters and lets you jump to — or reply straight into — the
-one you pick.
+so no ping is lost and agents queue instead of racing. A keyboard-driven popup pairs that durable
+Queue with a live Agents roster, letting you jump to—or reply straight into—any agent.
 
 ## How it works
 
@@ -41,39 +40,27 @@ view, so a single press takes you straight to the waiting agent wherever it live
 ## The status pane
 
 `open-pane` opens a persistent TUI as a centered, session-modal popup — like herdr's own `prefix+s`
-settings — that herdr draws with a border and a "Check-in" title. It's a triage console styled after
-the Claude Code agents view, and a richer alternative to the transient `peek` toast. Waiters are
-grouped by status (**CHECKIN** for `blocked`, **DONE** for `done`, oldest-first within each), and you
-act on them without leaving the keyboard — jump to one, or reply to it inline:
+settings — with two tabs:
 
-![The status pane: grouped waiters, reply inline, jump to an agent, drop entries, and clear the queue](docs/pane-demo.gif)
+- **Queue** is the durable attention inbox. It groups enqueued waiters into **CHECKIN** (`blocked`)
+  and **DONE** (`done`), oldest-first within each section.
+- **Agents** is a live roster grouped by workspace. Each row shows the agent identity, human
+  destination, time in state, and last meaningful terminal line.
 
-The same thing as text, if the GIF doesn't load:
+`Tab` or `Ctrl+S` switches views. The popup opens on Agents when the Queue is empty and on Queue when
+someone is waiting; each view preserves its own selection.
 
-```
-4 agents waiting
-
-  CHECKIN
-> Claude — blocked — migrate auth to JWT [api, 8m]
-  Codex — blocked — review terraform plan [infra, 3m]
-
-  DONE
-  Claude — done — fix flaky snapshot test [web, 5m]
-  Claude — done — rewrite README intro [docs, 1m]
-j/k move  ·  Enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit
-```
-
-Only enqueued waiters ever appear — it is an inbox of what pinged you, not a live roster of every
-agent (that is herdr's own view). Section headers are labels, not rows: they can't be selected.
+![The two-tab Check-in popup: durable Queue, live Agents roster, and inline reply](docs/pane-demo.gif)
 
 | Key | Action |
 | --- | --- |
-| `j` / `k` (or down / up) | Move the selection, in on-screen order across the sections. |
-| Left click | Select the clicked row (a click on a section header selects nothing). |
+| `Tab` / `Ctrl+S` | Switch between Queue and Agents. |
+| `j` / `k` (or down / up) | Move the selection in on-screen order. |
+| Left click | Select the clicked agent or waiter; section headers are not selectable. |
 | `Enter` | Jump to the selected agent (`herdr agent focus`, cross-workspace), drop it from the queue, and close the popup. If the jump fails, the entry stays, the popup stays open, and the error shows in the footer. |
-| `space` | **Reply inline:** open a compose strip for the selected agent (the queue dims behind it), type an answer, and `Enter` routes it into that agent's session (`herdr agent prompt`), then drops the entry. `Esc` cancels. A failed send keeps the entry. |
-| `d` | Drop the selected entry without acting on it. |
-| `c` | Clear the whole queue, after a `y` / `n` confirm in the footer. |
+| `space` | **Reply inline:** open a soft-wrapping compose strip, type an answer, and `Enter` routes it into the selected agent's session. `Esc` cancels; a failed send keeps any queued entry. |
+| `d` | Queue only: drop the selected entry without acting on it. |
+| `c` | Queue only: clear the whole queue after a `y` / `n` confirmation. |
 | `q` / `Esc` | Close the pane, dismissing its popup. |
 
 Reply is fire-and-forget: the answer is delivered into the agent's session and the entry leaves the
@@ -87,10 +74,17 @@ act elsewhere), the list and the waiting-times update on their own.
 The popup is a session-level singleton, so there's no open/focus/close toggle to reason about:
 `open-pane` opens it, and it dismisses itself on `q`/`Esc` (or on a successful `Enter` jump).
 
+The popup consumes Herdr's resolved palette when `HERDR_PLUGIN_PANE_THEME_JSON` is available. The
+current producing build is the `0.7.5-akram.1` downstream candidate. Stock Herdr 0.7.5 does not
+provide that snapshot, but remains supported: Check-in opens with its established terminal-native
+styling. A present but malformed or unsupported snapshot fails with an actionable error before raw
+terminal mode begins.
+
 ## Install
 
-Requires **herdr >= 0.7.5** and a local Rust toolchain (the manifest builds from source with
-Cargo).
+Core functionality requires **Herdr >= 0.7.5** and a local Rust toolchain (the manifest builds from
+source with Cargo). Full theme inheritance currently requires the `0.7.5-akram.1` downstream
+candidate; the minimum remains 0.7.5 because the legacy styling fallback is intentionally supported.
 
 ```sh
 herdr plugin install Akram012388/herdr-checkin

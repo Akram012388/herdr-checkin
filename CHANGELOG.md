@@ -96,8 +96,9 @@ reply, and grouped render as one interface release.
   bands, accent active tabs, placeholders, hints, compose rule, confirmation, and scrollbar. Reset, ANSI,
   indexed, and RGB colors stay lossless, so the `terminal` theme continues to defer to the user's
   terminal palette while built-in light/dark and custom themes match Herdr exactly. The snapshot is
-  parsed once before terminal initialization and never queried on a render tick; older Herdr
-  releases without the snapshot retain the popup's established terminal-native styling.
+  parsed once before terminal initialization and never queried on a render tick. The first producing
+  build is the `0.7.5-akram.1` downstream candidate; stock Herdr 0.7.5 remains supported and retains
+  the popup's established terminal-native styling because it does not provide the snapshot.
 - **`src/lib.rs` split into cohesive modules** (`state`, `herdr`, `queue`, `actions`, `pane`, and a
   test-only `test_support`), each carrying its own tests; `lib.rs` is now the argv-dispatch
   orientation page that re-wires the pieces. The queue transitions no longer depend on the herdr seam

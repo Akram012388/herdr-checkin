@@ -22,36 +22,30 @@ Type "clear" Enter
 Show
 Sleep 500ms
 
-# --- Open the pane: waiters grouped into CHECKIN / DONE sections ----
+# --- Open on Queue: durable waiters grouped into CHECKIN / DONE -------
 Type "herdr-checkin pane" Enter
+Sleep 2.2s
+
+# --- Tab to the live Agents roster -------------------------------------
+Tab
 Sleep 2.5s
 
-# --- Move the selection with j (display order, across the sections) ------
+# --- Move the Agents selection -----------------------------------------
 Type "j"
 Sleep 900ms
 
-# --- space: reply inline — route an answer into the agent, then evict ----
+# --- Reply inline from Agents; show the themed compose surface ----------
 Type " "
 Sleep 1s
-Type "rebase onto main"
+Type "looks good, proceed"
 Sleep 1.2s
 Enter
-Sleep 2.2s
+Sleep 1.8s
 
-# --- Enter: jump to the selected agent and drop it ----------------------
+# --- Return to Queue ----------------------------------------------------
+Tab
+Sleep 1.8s
+
+# --- Final successful jump exits the popup; send no later keys ----------
 Enter
-Sleep 1.8s
-
-# --- d: drop the selected entry without jumping -------------------------
-Type "d"
-Sleep 1.8s
-
-# --- c: clear-all, with a confirm ---------------------------------------
-Type "c"
 Sleep 1.5s
-Type "y"
-Sleep 2s
-
-# --- q: quit back to the shell ------------------------------------------
-Type "q"
-Sleep 1s
