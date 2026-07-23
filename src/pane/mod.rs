@@ -64,6 +64,18 @@ const FIRST_SAMPLE_WAIT: Duration = Duration::from_millis(200);
 const FOOTER_HINTS: &str =
     "j/k move  ·  enter jump  ·  space reply  ·  d drop  ·  c clear  ·  q quit";
 
+/// Keep top labels and list cursors off the popup border by one cell in both views.
+const CONTENT_LEFT_INSET: u16 = 1;
+
+fn content_area(area: Rect) -> Rect {
+    let inset = CONTENT_LEFT_INSET.min(area.width);
+    Rect {
+        x: area.x.saturating_add(inset),
+        width: area.width.saturating_sub(inset),
+        ..area
+    }
+}
+
 /// Entry point for the `pane` subcommand: run the TUI until the user closes it. The terminal is
 /// restored on every exit path (including a panic, via the hook `ratatui::try_init` installs).
 ///
@@ -970,7 +982,7 @@ fn draw_queue(
 
     frame.render_widget(
         Paragraph::new(header_text(model.entries.len())).style(theme.heading()),
-        areas[1],
+        content_area(areas[1]),
     );
 
     if model.entries.is_empty() {
@@ -981,7 +993,15 @@ fn draw_queue(
             areas[2],
         );
     } else {
-        draw_list(frame, theme, model, now_ms, list_state, list_area, areas[2]);
+        draw_list(
+            frame,
+            theme,
+            model,
+            now_ms,
+            list_state,
+            list_area,
+            content_area(areas[2]),
+        );
     }
 
     match compose {
@@ -1473,20 +1493,45 @@ mod tests {
     #[test]
     fn snapshot_marks_the_selected_entry_with_the_cursor() {
         // Rows: [tab bar][count][spacer][CHECKIN][E0][D0][E1][D1]... The selection starts on entry 0,
-        // so its destination row (terminal row 4) carries the "> " marker while the unselected
-        // entry's row (row 6) does not. Both are one row lower than before the tab bar was added.
+        // so its destination row (terminal row 4) carries the "> " marker after the shared one-cell
+        // inset, while the unselected entry's row (row 6) does not.
         let m = model(&["w1:p1", "w2:p1"]);
         let buffer = render_buffer(&m, 80, 10);
         assert_eq!(
-            buffer[(0, 4)].symbol(),
+            buffer[(1, 4)].symbol(),
             ">",
-            "selected entry gets the cursor"
+            "selected entry gets the cursor after the shared left inset"
         );
         assert_eq!(
-            buffer[(0, 6)].symbol(),
+            buffer[(1, 6)].symbol(),
             " ",
             "the unselected entry has no marker"
         );
+    }
+
+    #[test]
+    fn count_headers_and_cursors_share_the_one_cell_left_inset() {
+        let mut empty_queue = model(&[]);
+        empty_queue.tab = ActiveTab::Queue;
+        let empty_queue_buffer = render_buffer(&empty_queue, 80, 6);
+        assert_eq!(empty_queue_buffer[(0, 1)].symbol(), " ");
+        assert_eq!(empty_queue_buffer[(1, 1)].symbol(), "q");
+
+        let queue_buffer = render_buffer(&model(&["w1:p1"]), 80, 8);
+        assert_eq!(queue_buffer[(0, 4)].symbol(), " ");
+        assert_eq!(queue_buffer[(1, 4)].symbol(), ">");
+
+        let agents = agents_model(&[
+            ("w1:p1", "w1"),
+            ("w1:p2", "w1"),
+            ("w1:p3", "w1"),
+            ("w1:p4", "w1"),
+        ]);
+        let agents_buffer = render_buffer(&agents, 80, 14);
+        assert_eq!(agents_buffer[(0, 1)].symbol(), " ");
+        assert_eq!(agents_buffer[(1, 1)].symbol(), "4");
+        assert_eq!(agents_buffer[(0, 4)].symbol(), " ");
+        assert_eq!(agents_buffer[(1, 4)].symbol(), ">");
     }
 
     #[test]
@@ -1495,23 +1540,23 @@ mod tests {
         let buffer = render_buffer(&m, 80, 10);
 
         assert_eq!(
-            buffer[(2, 4)].symbol(),
+            buffer[(3, 4)].symbol(),
             "w",
             "destination starts after the gutter"
         );
         assert_eq!(
-            buffer[(2, 5)].symbol(),
+            buffer[(3, 5)].symbol(),
             "b",
             "detail shares the content edge"
         );
         for y in [4, 5] {
-            let style = buffer[(2, y)].style();
+            let style = buffer[(3, y)].style();
             assert_eq!(style.fg, Some(Color::Rgb(60, 61, 62)));
             assert_eq!(style.bg, Some(Color::Rgb(30, 31, 32)));
             assert!(style.add_modifier.contains(Modifier::BOLD));
             assert!(!style.add_modifier.contains(Modifier::DIM));
         }
-        let detail_style = buffer[(2, 7)].style();
+        let detail_style = buffer[(3, 7)].style();
         assert_eq!(detail_style.fg, Some(Color::Rgb(70, 71, 72)));
         assert_eq!(detail_style.bg, Some(Color::Rgb(10, 11, 12)));
         assert!(!detail_style.add_modifier.contains(Modifier::DIM));
@@ -1772,27 +1817,27 @@ mod tests {
         let buffer = render_buffer(&m, 80, 9);
 
         assert_eq!(
-            buffer[(2, 3)].symbol(),
+            buffer[(3, 3)].symbol(),
             "w",
             "workspace header owns the parent content edge"
         );
         assert_eq!(
-            buffer[(4, 4)].symbol(),
+            buffer[(5, 4)].symbol(),
             "c",
             "agent identity is indented two cells beneath the workspace"
         );
         assert_eq!(
-            buffer[(4, 5)].symbol(),
+            buffer[(5, 5)].symbol(),
             "h",
             "terminal context shares the agent identity's child edge"
         );
         // Selection is one coherent dim-background band, but — unlike plain Queue rows — its
         // semantic foreground hierarchy remains visible instead of collapsing to one text color.
         for (x, y, foreground) in [
-            (2, 4, Color::Rgb(60, 61, 62)),    // child indent: base text
-            (4, 4, Color::Rgb(120, 121, 122)), // agent identity: teal
-            (2, 5, Color::Rgb(60, 61, 62)),    // child indent: base text
-            (27, 4, Color::Rgb(80, 81, 82)),   // working status: yellow
+            (3, 4, Color::Rgb(60, 61, 62)),    // child indent: base text
+            (5, 4, Color::Rgb(120, 121, 122)), // agent identity: teal
+            (3, 5, Color::Rgb(60, 61, 62)),    // child indent: base text
+            (28, 4, Color::Rgb(80, 81, 82)),   // working status: yellow
         ] {
             let style = buffer[(x, y)].style();
             assert_eq!(style.fg, Some(foreground));
@@ -1800,7 +1845,7 @@ mod tests {
             assert!(style.add_modifier.contains(Modifier::BOLD));
             assert!(!style.add_modifier.contains(Modifier::DIM));
         }
-        let selected_tail = buffer[(4, 5)].style();
+        let selected_tail = buffer[(5, 5)].style();
         assert_eq!(selected_tail.fg, Some(Color::Rgb(70, 71, 72)));
         assert_eq!(selected_tail.bg, Some(Color::Rgb(30, 31, 32)));
         assert!(selected_tail.add_modifier.contains(Modifier::BOLD));
@@ -1809,28 +1854,28 @@ mod tests {
         // The unselected row mirrors Herdr's restrained sidebar hierarchy: identity and tab get
         // quiet semantic colors, navigation metadata recedes, status stays scannable on the first
         // line, and the second line is reserved for readable terminal context.
-        let agent_style = buffer[(4, 6)].style();
+        let agent_style = buffer[(5, 6)].style();
         assert_eq!(agent_style.fg, Some(Color::Rgb(120, 121, 122)));
         assert_eq!(agent_style.bg, Some(Color::Rgb(10, 11, 12)));
         assert!(!agent_style.add_modifier.contains(Modifier::DIM));
 
-        let separator_style = buffer[(11, 6)].style();
+        let separator_style = buffer[(12, 6)].style();
         assert_eq!(separator_style.fg, Some(Color::Rgb(40, 41, 42)));
         assert!(separator_style.add_modifier.contains(Modifier::DIM));
-        assert_eq!(buffer[(13, 6)].style().fg, Some(Color::Rgb(90, 91, 92)));
-        assert_eq!(buffer[(18, 6)].style().fg, Some(Color::Rgb(50, 51, 52)));
+        assert_eq!(buffer[(14, 6)].style().fg, Some(Color::Rgb(90, 91, 92)));
+        assert_eq!(buffer[(19, 6)].style().fg, Some(Color::Rgb(50, 51, 52)));
 
-        let status_style = buffer[(27, 6)].style();
+        let status_style = buffer[(28, 6)].style();
         assert_eq!(status_style.fg, Some(Color::Rgb(80, 81, 82)));
-        let age_style = buffer[(35, 6)].style();
+        let age_style = buffer[(36, 6)].style();
         assert_eq!(age_style.fg, Some(Color::Rgb(70, 71, 72)));
-        let tail_style = buffer[(4, 7)].style();
+        let tail_style = buffer[(5, 7)].style();
         assert_eq!(tail_style.fg, Some(Color::Rgb(70, 71, 72)));
         assert!(!tail_style.add_modifier.contains(Modifier::DIM));
         assert_eq!(tail_style.bg, Some(Color::Rgb(10, 11, 12)));
 
         for y in [6, 7] {
-            let indent_style = buffer[(2, y)].style();
+            let indent_style = buffer[(3, y)].style();
             assert_eq!(indent_style.fg, Some(Color::Rgb(60, 61, 62)));
             assert_eq!(indent_style.bg, Some(Color::Rgb(10, 11, 12)));
         }

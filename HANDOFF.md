@@ -7,14 +7,14 @@ Start here for the current state of Check-in and its Herdr pane-theme dependency
 ### Check-in
 
 - Repository: `Akram012388/herdr-checkin`
-- Branch: `main`; popup implementation is anchored at `c8ac630`; the current tip adds only the
-  interim demo/handoff checkpoint and is synced with `origin/main`
+- Branch: `main`; the current tip includes the interim demo checkpoint and the latest popup
+  content-padding polish, and is synced with `origin/main`
 - Version: `0.4.0`, not tagged
 - Release wrap-up and final popup polish: committed and pushed; tagging remains explicitly deferred
 - Validation on the current tree:
   - `cargo fmt --check` — pass
   - `cargo clippy --all-targets -- -D warnings` — pass
-  - `cargo test` — pass: 176 library tests + 6 CLI tests
+  - `cargo test` — pass: 177 library tests + 6 CLI tests
   - `cargo build --release` — pass
 
 Latest Check-in changes:
@@ -23,6 +23,8 @@ Latest Check-in changes:
   `0.7.5-akram.1` downstream candidate
 - README now documents both Queue and Agents tabs
 - the Agents popup is centered against and dims the full Herdr frame
+- Queue and Agents count labels plus their selection chevrons share a one-cell left inset, keeping
+  interactive content off the popup border consistently
 - each agent's status and time-in-state now share the identity row, leaving the second row for a
   brighter, longer terminal-context line
 - Codex terminal-tail parsing now returns the final meaningful response above the input composer

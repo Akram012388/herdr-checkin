@@ -13,7 +13,7 @@
 use super::compose::{dim_area, draw_compose};
 use super::queue_view::render_list_scrollbar;
 use super::theme::PaneTheme;
-use super::{draw_tab_bar, ActiveTab, PaneModel};
+use super::{content_area, draw_tab_bar, ActiveTab, PaneModel};
 use crate::roster::{
     agent_destination_parts, agent_detail_parts, workspace_display_label, AgentStatus, RosterAgent,
 };
@@ -99,7 +99,7 @@ pub(super) fn draw_agents(
     let agents = model.roster_display_agents();
     frame.render_widget(
         Paragraph::new(roster_header_text(agents.len())).style(theme.heading()),
-        areas[1],
+        content_area(areas[1]),
     );
 
     if agents.is_empty() {
@@ -117,7 +117,15 @@ pub(super) fn draw_agents(
             areas[2],
         );
     } else {
-        draw_roster(frame, theme, model, now_ms, list_state, list_area, areas[2]);
+        draw_roster(
+            frame,
+            theme,
+            model,
+            now_ms,
+            list_state,
+            list_area,
+            content_area(areas[2]),
+        );
     }
 
     match compose {
