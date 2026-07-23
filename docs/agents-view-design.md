@@ -21,7 +21,7 @@ The Agents view is the Claude-Code agent-view experience, scoped to what herdr c
 
 | Decision | Choice |
 | --- | --- |
-| Surface | **Popup modal — KEPT** (not a dedicated pane/tab). Fable-ruled under the new premise; see §9. |
+| Surface | **Popup modal — KEPT** (not a dedicated pane/tab). Fable-ruled under the new premise; see §8. |
 | Model | Two views in one popup, `Tab`/`Ctrl+S` toggle. Queue stays durable; Agents is live. |
 | Roster contents | **Every** detected agent pane, all states (`idle`/`working`/`blocked`/`done`/`unknown`). |
 | Row actions | Attach/jump (`Enter`→`focus`, closes popup), inline reply (`space`→`prompt`). |
@@ -29,7 +29,7 @@ The Agents view is the Claude-Code agent-view experience, scoped to what herdr c
 | Row status line | The **last non-empty terminal line** via `herdr agent read` (no Haiku summary exists). |
 | Time column | **Time-in-state**, stamped by the **event binary** (see §4), rendered as `blocked 4m`. |
 | Peek panel | **Deferred** — the last-line column + one-keystroke `Enter` jump already cover it (same reasoning that cut multiline reply). Revisit only after living with v1. |
-| Reorder | **Pin-to-top only** (persisted by session uuid). No arbitrary manual reorder. |
+| Reorder | **None** — grouped-by-workspace order only. (No manual reorder.) |
 
 ## 3. herdr primitives (live-verified 2026-07-22, herdr 0.7.5)
 
@@ -65,35 +65,26 @@ fabricated number exactly when it's read. Instead:
   in the pane model, replaced wholesale each sampler delivery. Never persisted — persisting live-poll
   output would make the pane a writer racing the event binaries.
 - **`roster.json` is a SEPARATE store from `state.json`**, own lock, same temp+rename delta pattern
-  (`RosterStore`, sibling of `StateStore`). It holds only the time-in-state registry + pins. It is a
-  **prunable observation cache**: losing it degrades timers/pins only — never a ping. **This is the
-  new 7th invariant** (see §7).
+  (`RosterStore`, sibling of `StateStore`). It holds only the time-in-state registry. It is a
+  **prunable observation cache**: losing it degrades timers only — never a ping. **This is the
+  new 7th invariant** (see §6).
 - **A worker thread does all CLI**, never the render tick. Sampler cadences: `agent list` ~1s
   (status/grouping/time); `agent read` ~2s on **visible rows only**, budgeted round-robin
   (~15/sweep), invalidate-immediately-on-status-change. Snapshots + last-line cache flow to the tick
   over an mpsc; the 250ms tick only drains the channel and renders cached data (a row never blanks).
-- **Modules:** new `roster.rs` (pure: `RosterAgent`, grouping, sort-with-pins, time math, last-line
+- **Modules:** new `roster.rs` (pure: `RosterAgent`, grouping, time math, last-line
   extraction, registry reconciliation — **Herdr-free, same rule as `queue.rs`**). `herdr.rs` grows
   `agent_list()`/`agent_read()` + parsers. New `roster_state.rs` (`RosterStore`). `pane/` splits into
   `mod.rs` (shell: loop, tick, `ActiveTab`, sampler ownership, channel, one shared exit path),
   `queue_view.rs`, `agents_view.rs`, `compose.rs` (shared by both views via a small
   `pane_id + label` target interface — not a faked `QueueEntry`).
 
-## 6. Pin persistence
-
-Key pins by **`agent_session` uuid, never `pane_id`** (pane ids are positional and reused). Store in
-`roster.json`: `pins: [{ agent_session, pinned_at_ms, last_seen_ms }]` (list order = pin order).
-Vanished uuid → keep as tombstone; reappears → re-applies silently; GC tombstones past ~50 or ~7d
-inside `RosterStore::update` deltas. Render: pinned agents float to the top **of their workspace
-group** (no global Pinned section — that would fight the grouped-by-workspace decision).
-
-## 7. Invariants — guards for this feature
+## 6. Invariants — guards for this feature
 
 The existing six (see HANDOFF §3) plus a new one:
 
 7. **`roster.json` is a prunable observation cache** — nothing correctness-critical may live only in
-   it; deleting it must merely degrade timers/pins. (Test: delete `roster.json`, everything still
-   works.)
+   it; deleting it must merely degrade timers. (Test: delete `roster.json`, everything still works.)
 
 Regression risks to guard while building:
 - **#1 (deltas via `StateStore::update`)** — the registry must NOT land in `state.json`; test that the
@@ -107,7 +98,7 @@ Regression risks to guard while building:
   exits through one shared close function.
 - **#6 (queue.rs Herdr-free)** — extend identically to `roster.rs`.
 
-## 8. Build slices (tracer-bullet; each ends green + eyeballed)
+## 7. Build slices (tracer-bullet; each ends green + eyeballed)
 
 Each slice is tracked as a GitHub issue (dependency-ordered). Repo docs + issues are complementary:
 this doc is the durable design, the issues are the per-slice work tracker.
@@ -120,7 +111,6 @@ this doc is the durable design, the issues are the per-slice work tracker.
 | 3 jump + reply parity | [#4](https://github.com/Akram012388/herdr-checkin/issues/4) | HITL |
 | 4 last-line status column | [#5](https://github.com/Akram012388/herdr-checkin/issues/5) | HITL |
 | 5 `roster.json` + time-in-state **(DONE)** | [#6](https://github.com/Akram012388/herdr-checkin/issues/6) | AFK |
-| 6 pin-to-top (BUILT then REVERTED — declined) | [#7](https://github.com/Akram012388/herdr-checkin/issues/7) | HITL |
 
 
 - **Slice 0 (DONE)** — Split `pane.rs` (1513 lines) into `pane/{mod,queue_view,compose}.rs`. Pure
@@ -179,14 +169,10 @@ this doc is the durable design, the issues are the per-slice work tracker.
   filled by `reconcile_roster` on the sampler thread). Gate met: real-binary data-path CLI test +
   startup-idempotence + delete-`roster.json` (invariant #7) + zero-`state.json`-writes tests; CI green
   (142 lib + 6 CLI). *HITL outstanding:* eyeball the ages with live agents.
-- **Slice 6 — BUILT then REVERTED (declined 2026-07-23).** Pin-to-top persisted by `agent_session`
-  with tombstone GC was implemented (commit `c2fc363`) and reverted (`4ab30ac`) — the maintainer
-  decided it is unnecessary; the Agents view stays grouped-by-workspace with no reorder. Do not rebuild
-  without an explicit re-request; the implementation is recoverable from `c2fc363` if ever revisited.
-- **Slice 7 (optional, only if re-requested after lived experience)** — peek panel and/or arbitrary
-  reorder.
+- **Slices 0-5 are the whole build.** The Agents view is grouped-by-workspace with no reorder. Any
+  further work (e.g. a peek panel) is optional and only pursued if re-requested after lived experience.
 
-## 9. Surface: popup, not a dedicated pane (ruling)
+## 8. Surface: popup, not a dedicated pane (ruling)
 
 The plugin was built as a popup modal, deliberately over a dedicated pane, back when it was *only* a
 summon-and-glance triage queue. Becoming a live agents view reopened that call — so it was re-ruled

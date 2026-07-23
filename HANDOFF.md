@@ -13,9 +13,8 @@ CHANGELOG.** · **License:** MIT · **Repo:** https://github.com/Akram012388/her
 **154 lib + 6 CLI tests**), pushed, tip **`4ab30ac`** (post-revert). Working tree clean.
 
 **START HERE (§6): the popup is TWO tabs — the durable Queue + a live Agents roster, `Tab`/`Ctrl+S` to
-toggle. Slices 0-3 + Slice 4 + Slice 5 are DONE (#2/#3/#4/#5/#6 CLOSED). Slice 6 (pin-to-top, #7) was
-built, then REVERTED — the maintainer declined it as unnecessary (see §6). There is NO queued build;
-the remaining work is polish + an optional Slice 7 (see §6). Do NOT rebuild pin-to-top.**
+toggle. Slices 0-5 are ALL DONE (#2/#3/#4/#5/#6 CLOSED) — that is the whole planned Agents-view build.
+There is NO queued build; the remaining work is small polish (see §6).**
 
 **What shipped THIS session (Slice 4 / issue #5 — last-line status column; DONE + HITL-eyeballed):**
 - **`roster::last_terminal_line`** (pure, Herdr-free) — an agent's last output line from a `herdr
@@ -300,7 +299,7 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
 6. **`queue.rs` never depends on the `Herdr` trait** — identity resolution reaches it as an injected
    closure (`enrich`), not a `Herdr` call. The module boundary enforces it.
 7. **`roster.json` is a prunable observation cache** (Slice 5) — nothing correctness-critical may
-   live *only* there; deleting it must merely degrade timers/pins, never lose a ping. `RosterStore`
+   live *only* there; deleting it must merely degrade timers, never lose a ping. `RosterStore`
    (`roster_state.rs`) is a **separate store** from `state.json` with its own lock, and every writer
    is best-effort (the `status-changed` stamp, the `startup` seed, and the pane sampler's reconcile
    all swallow their own errors). Tests: delete `roster.json` → everything still works; the pane's
@@ -390,12 +389,12 @@ key. After editing: `herdr config check && herdr server reload-config`.
 
 ## 6. Next up (START HERE)
 
-### The Agents view — Slices 0-5 DONE (#2/#3/#4/#5/#6 CLOSED). Slice 6 (pin-to-top) BUILT then REVERTED (declined). See [docs/agents-view-design.md](docs/agents-view-design.md).
+### The Agents view — Slices 0-5 DONE (#2/#3/#4/#5/#6 CLOSED). This is the whole build. See [docs/agents-view-design.md](docs/agents-view-design.md).
 The live **Agents view** roster sits beside the durable Queue in the popup (`Tab`/`Ctrl+S`), loads
-instantly, has full jump/reply parity, shows time-in-state, and now shows each agent's **last terminal
-line**. See the header for the commit summary and `agents-view-design.md` §8 for the full slice table.
-**There is no queued build** — pin-to-top was the last planned slice and was declined. Remaining work
-is polish + an optional Slice 7. **Remaining notes:**
+instantly, has full jump/reply parity, shows time-in-state, and shows each agent's **last terminal
+line**. See the header for the commit summary and `agents-view-design.md` §7 for the full slice table.
+**There is no queued build** — the Agents view is grouped-by-workspace with no reorder. Remaining work
+is small polish only. **Notes on the shipped slices:**
 
 1. **Slice 4 / issue [#5](https://github.com/Akram012388/herdr-checkin/issues/5) — DONE (this
    session), #5 CLOSED.** The last-line status column: `roster::last_terminal_line` (pure chrome-
@@ -409,20 +408,13 @@ is polish + an optional Slice 7. **Remaining notes:**
    `roster.json` + `RosterStore` (separate prunable store = **invariant #7**); `status-changed` event
    binary stamps `status_since_ms`; startup seeds additively; pane sampler reads + back-fills the uuid,
    resets on a reused slot; rows show `blocked 4m` / honest `~`.
-3. **Slice 6 / issue [#7](https://github.com/Akram012388/herdr-checkin/issues/7) — BUILT then REVERTED;
-   DECLINED by the maintainer.** Pin-to-top (`Ctrl+T`, uuid-keyed, `roster.json` pins + tombstone GC)
-   was implemented (commit `c2fc363`) and reverted in `4ab30ac` — the maintainer decided it is
-   unnecessary. **Do NOT rebuild it** without an explicit re-request. If it is ever revisited, the
-   design is in `agents-view-design.md` §6 and the reverted implementation is recoverable from
-   `c2fc363` (it keyed pins by `agent_session` uuid, floated them to the top of the workspace group via
-   the `roster::group_by_workspace` / `agents_in_display_order` seam, and GC'd tombstones at a 7d/50
-   bound). #7 is closed as not-planned.
 
-- **Tracker: GitHub issues [#1–#7](https://github.com/Akram012388/herdr-checkin/issues)** (Slice 0→#1
-  … Slice 6→#7). **#1 (Slice 0)** stays open pending the maintainer's pixel-identical popup eyeball.
-  **#2/#3/#4/#5/#6 done + closed.** **#7 (Slice 6) built then reverted — declined, closed
-  not-planned.** This doc + the design doc are the durable in-repo tracker; the issues are the work
-  queue.
+All planned Agents-view slices are shipped. No further build is queued.
+
+- **Tracker: GitHub issues [#1–#6](https://github.com/Akram012388/herdr-checkin/issues)** (Slice 0→#1
+  … Slice 5→#6). **#1 (Slice 0)** stays open pending the maintainer's pixel-identical popup eyeball.
+  **#2/#3/#4/#5/#6 done + closed.** This doc + the design doc are the durable in-repo tracker; the
+  issues are the work queue.
 
 ### PARKED architectural fork — "dissolve the Queue view into the roster" (do NOT start without a re-decision)
 The maintainer mused whether the Queue is still needed now the Agents view is dominant. Explored +

@@ -671,7 +671,7 @@ impl TailCache {
 }
 
 /// The session uuid from an agent's nested `agent_session.value`, or `None` when the object (or the
-/// value) is absent — herdr lists some agents without a session, and pins key on this later (§6).
+/// value) is absent — herdr lists some agents without a session.
 fn agent_session_value(agent: &Value) -> Option<String> {
     non_empty_string(agent.get("agent_session")?, "value")
 }

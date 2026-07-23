@@ -5,8 +5,8 @@
 //!
 //! The Agents view's pure core (design doc §5): the types, grouping-by-workspace, the display-order
 //! flattening the live view's selection indexes into, and the per-row text formatters. The `Herdr`
-//! seam samples `agent list` on a worker thread; this module only shapes what it delivers. Pins come
-//! later (Slice 6). A plain-text `render_roster_text` also backs the hidden `roster` debug subcommand.
+//! seam samples `agent list` on a worker thread; this module only shapes what it delivers. A
+//! plain-text `render_roster_text` also backs the hidden `roster` debug subcommand.
 
 /// An agent pane's live status, from `herdr agent list`'s `agent_status`. The vocabulary is
 /// closed (live-verified, herdr 0.7.5): `idle`/`working`/`blocked`/`done`, with **`Unknown` as the
@@ -49,8 +49,8 @@ impl AgentStatus {
 /// One agent pane as surfaced by `herdr agent list`, reduced to the fields the Agents view needs.
 /// Plain data the herdr seam parses and the view renders — never a place the `Herdr` trait reaches.
 /// `agent_session` (the session uuid) is `None` for a pane herdr lists without one (seen live for a
-/// non-Claude/Codex agent); it is the stable key pins will use later (design §6), so it is carried
-/// even though Slice 1 only prints it.
+/// non-Claude/Codex agent); it is the stable per-agent identity (distinct from the positional,
+/// reusable `pane_id`), carried even though the view only prints it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RosterAgent {
     pub(crate) pane_id: String,
@@ -102,9 +102,8 @@ pub(crate) struct WorkspaceGroup {
 }
 
 /// Group agents by `workspace_id`, preserving the order workspaces are first seen and the order of
-/// agents within each. Pins float to the top of their workspace group in Slice 6; until then the
-/// within-group order is plain encounter order, so this is the single place that ordering will hook
-/// in (the view never re-sorts). Pure: clones its input into the groups.
+/// agents within each (plain encounter order — the view never re-sorts). Pure: clones its input into
+/// the groups.
 pub(crate) fn group_by_workspace(agents: &[RosterAgent]) -> Vec<WorkspaceGroup> {
     let mut groups: Vec<WorkspaceGroup> = Vec::new();
     for agent in agents {

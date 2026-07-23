@@ -1,10 +1,10 @@
 //! Persisted roster registry: `roster.json` under `HERDR_PLUGIN_STATE_DIR`, guarded by its own
 //! lockfile — a **separate store from `state.json`** (design §5). It holds only the time-in-state
-//! registry (and, from Slice 6, pins). All mutations go through [`RosterStore::update`] — a delta
+//! registry. All mutations go through [`RosterStore::update`] — a delta
 //! under the lock, temp+rename, exactly like [`crate::state::StateStore`].
 //!
 //! **Invariant #7 — this file is a prunable observation cache.** Nothing correctness-critical may
-//! live *only* here: deleting `roster.json` must merely degrade timers/pins, never lose a ping. The
+//! live *only* here: deleting `roster.json` must merely degrade timers, never lose a ping. The
 //! queue's durability lives in `state.json`; this store is best-effort throughout (every writer
 //! ignores its errors), so a corrupt/absent registry simply renders honest `~` timers.
 //!
@@ -33,8 +33,7 @@ const ROSTER_VERSION: u32 = 1;
 /// One pane's observed state in the registry, keyed by `pane_id` in [`Registry`]. `agent_session`
 /// (the stable session uuid) is `None` until the pane sampler back-fills it — the event payload that
 /// stamps transitions carries no uuid (design §4). `status_since_ms` is the wall clock of the last
-/// transition into `status`; `first_seen_ms`/`last_seen_ms` bracket the pane's lifetime for the
-/// tombstone GC that arrives with pins (Slice 6).
+/// transition into `status`; `first_seen_ms`/`last_seen_ms` bracket the pane's observed lifetime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RegistryEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
