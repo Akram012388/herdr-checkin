@@ -120,7 +120,7 @@ this doc is the durable design, the issues are the per-slice work tracker.
 | 3 jump + reply parity | [#4](https://github.com/Akram012388/herdr-checkin/issues/4) | HITL |
 | 4 last-line status column | [#5](https://github.com/Akram012388/herdr-checkin/issues/5) | HITL |
 | 5 `roster.json` + time-in-state **(DONE)** | [#6](https://github.com/Akram012388/herdr-checkin/issues/6) | AFK |
-| 6 pin-to-top | [#7](https://github.com/Akram012388/herdr-checkin/issues/7) | HITL |
+| 6 pin-to-top (BUILT then REVERTED — declined) | [#7](https://github.com/Akram012388/herdr-checkin/issues/7) | HITL |
 
 
 - **Slice 0 (DONE)** — Split `pane.rs` (1513 lines) into `pane/{mod,queue_view,compose}.rs`. Pure
@@ -179,8 +179,10 @@ this doc is the durable design, the issues are the per-slice work tracker.
   filled by `reconcile_roster` on the sampler thread). Gate met: real-binary data-path CLI test +
   startup-idempotence + delete-`roster.json` (invariant #7) + zero-`state.json`-writes tests; CI green
   (142 lib + 6 CLI). *HITL outstanding:* eyeball the ages with live agents.
-- **Slice 6** — Pin-to-top persisted by `agent_session` with tombstone GC. *Gate:* survives popup
-  reopen and pane-slot reuse.
+- **Slice 6 — BUILT then REVERTED (declined 2026-07-23).** Pin-to-top persisted by `agent_session`
+  with tombstone GC was implemented (commit `c2fc363`) and reverted (`4ab30ac`) — the maintainer
+  decided it is unnecessary; the Agents view stays grouped-by-workspace with no reorder. Do not rebuild
+  without an explicit re-request; the implementation is recoverable from `c2fc363` if ever revisited.
 - **Slice 7 (optional, only if re-requested after lived experience)** — peek panel and/or arbitrary
   reorder.
 
