@@ -1245,8 +1245,10 @@ mod tests {
     ) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(format!("fake-herdr-{exit_code}.sh"));
+        // A `__warmup__` first arg makes the script a no-op (logs nothing, exits 0) so the readiness
+        // probe below does not pollute the argv log the tests assert on.
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{log}\"\nprintf 'prompt refused\\n' >&2\nexit {exit_code}\n",
+            "#!/bin/sh\n[ \"$1\" = __warmup__ ] && exit 0\nprintf '%s\\n' \"$@\" >> \"{log}\"\nprintf 'prompt refused\\n' >&2\nexit {exit_code}\n",
             log = log.display()
         );
         std::fs::write(&path, script).expect("fake herdr should write");
@@ -1255,6 +1257,20 @@ mod tests {
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&path, permissions).expect("fake herdr should be executable");
+
+        // Linux transiently reports a just-written executable as ETXTBSY ("Text file busy", errno 26)
+        // when another test thread is mid-spawn. Probe with the warmup sentinel until the exec
+        // succeeds, so the real call (the file is not rewritten after this) never races. Bounded, so a
+        // genuine failure still surfaces through the real call rather than hanging here.
+        for _ in 0..200 {
+            match Command::new(&path).arg("__warmup__").output() {
+                Ok(_) => break,
+                Err(error) if error.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(error) => panic!("fake herdr warmup failed unexpectedly: {error}"),
+            }
+        }
         path
     }
 
