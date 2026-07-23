@@ -10,7 +10,7 @@ later pivoted to a popup: [docs/triage-overlay-design.md](docs/triage-overlay-de
 on request. **All the Agents-view work below is post-0.4.0 internal feature work — NOT in the
 CHANGELOG.** · **License:** MIT · **Repo:** https://github.com/Akram012388/herdr-checkin · **State:**
 `main` is green (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` =
-**142 lib + 6 CLI tests**), tip **`fd92653`** + the uncommitted Slice 5 work below.
+**142 lib + 6 CLI tests**), pushed, tip **`5805e22`** (Slice 5). Working tree clean.
 
 **START HERE (§6): the popup is TWO tabs — the durable Queue + a live Agents roster, `Tab`/`Ctrl+S` to
 toggle. Slices 0-3 + Slice 5 are DONE (#2/#3/#4/#6 CLOSED). The remaining builds are Slice 4 / issue
