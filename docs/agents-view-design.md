@@ -179,8 +179,17 @@ this doc is the durable design, the issues are the per-slice work tracker.
   filled by `reconcile_roster` on the sampler thread). Gate met: real-binary data-path CLI test +
   startup-idempotence + delete-`roster.json` (invariant #7) + zero-`state.json`-writes tests; CI green
   (142 lib + 6 CLI). *HITL outstanding:* eyeball the ages with live agents.
-- **Slice 6** — Pin-to-top persisted by `agent_session` with tombstone GC. *Gate:* survives popup
-  reopen and pane-slot reuse.
+- **Slice 6 (CODE-COMPLETE + GREEN, HITL-outstanding)** — Pin-to-top with `Ctrl+T`, keyed by
+  `agent_session` uuid, persisted in `roster.json` (`pins: [{agent_session, pinned_at_ms,
+  last_seen_ms}]`, store bumped to v2), with tombstone GC (7-day TTL + 50 cap). Pins stable-sort to the
+  top of their workspace group via the single ordering seam (`roster::group_by_workspace` /
+  `agents_in_display_order` on the new `RosterAgent::pin_rank`); no global Pinned section. A
+  session-less agent can't be pinned (no-op, not a crash). `RosterStore::update` now carries the whole
+  `RosterState` (registry + pins) under one lock; `apply_pins` re-derives ranks in place for an instant
+  float with the cursor anchored; pinned rows show a `* ` marker. 12 new tests (166 lib + 6 CLI): pin
+  float, toggle, `last_seen` bump + TTL + cap GC, uuid-keyed reused-slot non-misapplication, reopen
+  persistence, invariant-#7, v1→v2 compat. *Gate (HITL, #7 stays open until met):* survives popup
+  reopen and pane-slot reuse (verify live).
 - **Slice 7 (optional, only if re-requested after lived experience)** — peek panel and/or arbitrary
   reorder.
 
