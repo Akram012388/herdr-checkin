@@ -43,7 +43,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use theme::PaneTheme;
 use tui_textarea::{CursorMove, TextArea};
 
@@ -165,7 +165,7 @@ fn event_loop(
             .map_err(|error| PluginError::new(format!("failed to draw: {error}")))?;
     }
     if model.tab == ActiveTab::Agents {
-        if let Some(snapshot) = sampler.recv_latest_within(FIRST_SAMPLE_WAIT) {
+        if let Some(snapshot) = sampler.recv_initial_within(FIRST_SAMPLE_WAIT) {
             model.apply_roster(snapshot);
         }
     }
@@ -469,22 +469,36 @@ impl RosterSampler {
         latest
     }
 
-    /// Block up to `bound` for the first snapshot, then sweep up any already queued behind it
-    /// (newest wins). Returns `None` on timeout or if the worker is gone — the caller keeps the
-    /// placeholder and the async path recovers. Used once at open to seed the Agents view promptly
-    /// without ever running the CLI on the render thread (invariant: the worker still samples).
-    fn recv_latest_within(&self, bound: Duration) -> Option<RosterSnapshot> {
-        match self.rx.recv_timeout(bound) {
-            Ok(first) => {
-                let mut latest = first;
-                while let Ok(snapshot) = self.rx.try_recv() {
-                    latest = snapshot;
-                }
-                Some(latest)
-            }
+    /// Block up to one shared deadline for the initial baseline and its stable-tail enrichment.
+    /// The worker deliberately sends two snapshots on its first successful sample. Waiting for the
+    /// second lets the first populated Agents paint include idle/blocked/done context in the normal
+    /// fast case; if enrichment is slow, the deadline returns the baseline and `drain_latest`
+    /// applies the enriched snapshot asynchronously later.
+    fn recv_initial_within(&self, bound: Duration) -> Option<RosterSnapshot> {
+        let deadline = Instant::now() + bound;
+        let mut latest = match self.rx.recv_timeout(bound) {
+            Ok(first) => first,
             // Timeout (no sample yet) or Disconnected (worker died at spawn): keep the placeholder.
-            Err(_) => None,
+            Err(_) => return None,
+        };
+
+        // Coalesce an enrichment already queued behind the baseline without another wait.
+        if let Ok(enriched) = self.rx.try_recv() {
+            latest = enriched;
+        } else {
+            // Otherwise spend only the remainder of the original bound waiting for it.
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                if let Ok(enriched) = self.rx.recv_timeout(remaining) {
+                    latest = enriched;
+                }
+            }
         }
+        // Newest wins if an unusually fast subsequent delivery is already queued too.
+        while let Ok(snapshot) = self.rx.try_recv() {
+            latest = snapshot;
+        }
+        Some(latest)
     }
 }
 
@@ -522,22 +536,26 @@ fn sampler_loop(
             // uuids as a delta) here on the worker, so no roster IO ever touches the render tick.
             let sampled_at_ms = current_unix_ms();
             crate::roster_state::reconcile_roster(state_dir, &mut agents, sampled_at_ms);
-            // Fill each row's last terminal line via a budgeted `agent read` sweep (Slice 4) — the
-            // second cache on this worker; the reads stay off the render tick like everything else.
-            // Skipped on the *first* sample: those extra spawns would delay the bounded first paint,
-            // and the roster (names, status, timers) must appear instantly (last session's win). The
-            // lines fill in from the next sample ~1s later.
-            if !first_sample {
+            // The first successful cycle is two-phase: publish the reconciled roster immediately,
+            // then, without sleeping for the normal cadence, enrich only settled agents and publish
+            // again. The receiver coalesces both within its bounded first-paint wait when reads are
+            // fast, while the baseline guarantees slow terminal reads never withhold roster rows.
+            if first_sample {
+                first_sample = false;
+                if !deliver_initial_snapshots(herdr, &mut tails, snapshot_tx, sampled_at_ms, agents)
+                {
+                    return;
+                }
+            } else {
                 tails.refresh(herdr, &mut agents, TAIL_READ_BUDGET);
-            }
-            first_sample = false;
-            let snapshot = RosterSnapshot {
-                sampled_at_ms,
-                agents,
-            };
-            // The receiver is gone -> the pane is closing; stop.
-            if snapshot_tx.send(snapshot).is_err() {
-                return;
+                let snapshot = RosterSnapshot {
+                    sampled_at_ms,
+                    agents,
+                };
+                // The receiver is gone -> the pane is closing; stop.
+                if snapshot_tx.send(snapshot).is_err() {
+                    return;
+                }
             }
         }
         match stop_rx.recv_timeout(ROSTER_SAMPLE_INTERVAL) {
@@ -547,6 +565,32 @@ fn sampler_loop(
             Err(RecvTimeoutError::Timeout) => {}
         }
     }
+}
+
+/// Publish the first roster twice: a no-tail baseline immediately, then a stable-agent enrichment.
+/// Returns `false` when the popup receiver has gone away.
+fn deliver_initial_snapshots(
+    herdr: &dyn Herdr,
+    tails: &mut TailCache,
+    snapshot_tx: &Sender<RosterSnapshot>,
+    sampled_at_ms: u64,
+    mut agents: Vec<RosterAgent>,
+) -> bool {
+    let baseline = RosterSnapshot {
+        sampled_at_ms,
+        agents: agents.clone(),
+    };
+    if snapshot_tx.send(baseline).is_err() {
+        return false;
+    }
+
+    tails.refresh_initial_stable(herdr, &mut agents, TAIL_READ_BUDGET);
+    snapshot_tx
+        .send(RosterSnapshot {
+            sampled_at_ms,
+            agents,
+        })
+        .is_ok()
 }
 
 // --- model (pure) ----------------------------------------------------------
@@ -1708,15 +1752,15 @@ mod tests {
                 "Queue     Agents      tab · switch", // the tab bar, Agents active
                 "3 agents",
                 "",
-                "w4",                       // workspace group header
-                ">   claude · t1 · pane 1", // cursor gutter + child indent mark this agent
-                "idle 1s · herdr-checkin",  // time-in-state from the registry
-                "claude · t1 · pane 2",
-                "blocked ~ · herdr-checkin", // no registry entry -> honest `~`
+                "w4",                                 // workspace group header
+                ">   claude · t1 · pane 1 · idle 1s", // status and age join the identity row
+                "herdr-checkin",                      // full-width terminal context row
+                "claude · t1 · pane 2 · blocked ~",   // no registry entry -> honest `~`
+                "herdr-checkin",
                 "",
                 "wN",
-                "claude · t1 · pane 1",
-                "working ~ · herdr-checkin",
+                "claude · t1 · pane 1 · working ~",
+                "herdr-checkin",
                 "j/k move  ·  enter jump  ·  space reply  ·  q quit",
             ]
         );
@@ -1739,8 +1783,8 @@ mod tests {
         );
         assert_eq!(
             buffer[(4, 5)].symbol(),
-            "w",
-            "status and terminal tail share the agent identity's child edge"
+            "h",
+            "terminal context shares the agent identity's child edge"
         );
         // Selection is one coherent dim-background band, but — unlike plain Queue rows — its
         // semantic foreground hierarchy remains visible instead of collapsing to one text color.
@@ -1748,7 +1792,7 @@ mod tests {
             (2, 4, Color::Rgb(60, 61, 62)),    // child indent: base text
             (4, 4, Color::Rgb(120, 121, 122)), // agent identity: teal
             (2, 5, Color::Rgb(60, 61, 62)),    // child indent: base text
-            (4, 5, Color::Rgb(80, 81, 82)),    // working status: yellow
+            (27, 4, Color::Rgb(80, 81, 82)),   // working status: yellow
         ] {
             let style = buffer[(x, y)].style();
             assert_eq!(style.fg, Some(foreground));
@@ -1756,14 +1800,15 @@ mod tests {
             assert!(style.add_modifier.contains(Modifier::BOLD));
             assert!(!style.add_modifier.contains(Modifier::DIM));
         }
-        let selected_tail = buffer[(16, 5)].style();
-        assert_eq!(selected_tail.fg, Some(Color::Rgb(40, 41, 42)));
+        let selected_tail = buffer[(4, 5)].style();
+        assert_eq!(selected_tail.fg, Some(Color::Rgb(70, 71, 72)));
         assert_eq!(selected_tail.bg, Some(Color::Rgb(30, 31, 32)));
         assert!(selected_tail.add_modifier.contains(Modifier::BOLD));
-        assert!(selected_tail.add_modifier.contains(Modifier::DIM));
+        assert!(!selected_tail.add_modifier.contains(Modifier::DIM));
 
         // The unselected row mirrors Herdr's restrained sidebar hierarchy: identity and tab get
-        // quiet semantic colors, navigation metadata recedes, and terminal content is dimmest.
+        // quiet semantic colors, navigation metadata recedes, status stays scannable on the first
+        // line, and the second line is reserved for readable terminal context.
         let agent_style = buffer[(4, 6)].style();
         assert_eq!(agent_style.fg, Some(Color::Rgb(120, 121, 122)));
         assert_eq!(agent_style.bg, Some(Color::Rgb(10, 11, 12)));
@@ -1775,13 +1820,13 @@ mod tests {
         assert_eq!(buffer[(13, 6)].style().fg, Some(Color::Rgb(90, 91, 92)));
         assert_eq!(buffer[(18, 6)].style().fg, Some(Color::Rgb(50, 51, 52)));
 
-        let status_style = buffer[(4, 7)].style();
+        let status_style = buffer[(27, 6)].style();
         assert_eq!(status_style.fg, Some(Color::Rgb(80, 81, 82)));
-        let age_style = buffer[(12, 7)].style();
+        let age_style = buffer[(35, 6)].style();
         assert_eq!(age_style.fg, Some(Color::Rgb(70, 71, 72)));
-        let tail_style = buffer[(16, 7)].style();
-        assert_eq!(tail_style.fg, Some(Color::Rgb(40, 41, 42)));
-        assert!(tail_style.add_modifier.contains(Modifier::DIM));
+        let tail_style = buffer[(4, 7)].style();
+        assert_eq!(tail_style.fg, Some(Color::Rgb(70, 71, 72)));
+        assert!(!tail_style.add_modifier.contains(Modifier::DIM));
         assert_eq!(tail_style.bg, Some(Color::Rgb(10, 11, 12)));
 
         for y in [6, 7] {
@@ -1807,8 +1852,14 @@ mod tests {
         });
         let lines = content_lines(&render_buffer(&m, 80, 8));
         assert!(
-            lines.contains(&"blocked 1s · Good to proceed?".to_string()),
-            "the row shows the agent's last line, not the title; got:\n{lines:#?}"
+            lines
+                .iter()
+                .any(|line| line.contains("pane 1 · blocked 1s")),
+            "the identity row shows status and age beside the pane; got:\n{lines:#?}"
+        );
+        assert!(
+            lines.contains(&"Good to proceed?".to_string()),
+            "the detail row is reserved for the agent's last line, not the title; got:\n{lines:#?}"
         );
     }
 
@@ -1826,6 +1877,103 @@ mod tests {
                 "",
                 "j/k move  ·  enter jump  ·  space reply  ·  q quit",
             ]
+        );
+    }
+
+    #[test]
+    fn initial_delivery_sends_baseline_then_stable_tail_enrichment() {
+        let herdr = crate::test_support::FakeHerdr::new(&[]).with_tails(&[
+            ("w1:p1", "⏺\n  final answer\n❯\n"),
+            ("w1:p2", "⏺\n  changing output\n❯\n"),
+        ]);
+        let agents = vec![
+            roster_agent("w1:p1", "w1", AgentStatus::Idle),
+            roster_agent("w1:p2", "w1", AgentStatus::Working),
+        ];
+        let mut tails = TailCache::default();
+        let (tx, rx) = mpsc::channel();
+
+        assert!(deliver_initial_snapshots(
+            &herdr, &mut tails, &tx, 1_000, agents
+        ));
+        let baseline = rx.recv().expect("baseline");
+        let enriched = rx.recv().expect("enriched");
+
+        assert!(baseline
+            .agents
+            .iter()
+            .all(|agent| agent.last_line.is_none()));
+        assert_eq!(
+            enriched.agents[0].last_line.as_deref(),
+            Some("final answer")
+        );
+        assert_eq!(enriched.agents[1].last_line, None);
+        assert_eq!(
+            herdr.reads.borrow().as_slice(),
+            &["w1:p1".to_string()],
+            "the working pane must not delay first paint"
+        );
+    }
+
+    #[test]
+    fn initial_receiver_coalesces_the_enriched_snapshot() {
+        let (tx, rx) = mpsc::channel();
+        let mut enriched_agent = roster_agent("w1:p1", "w1", AgentStatus::Idle);
+        let baseline = RosterSnapshot {
+            sampled_at_ms: 1_000,
+            agents: vec![enriched_agent.clone()],
+        };
+        enriched_agent.last_line = Some("ready now".to_string());
+        let enriched = RosterSnapshot {
+            sampled_at_ms: 1_000,
+            agents: vec![enriched_agent],
+        };
+        tx.send(baseline).unwrap();
+        tx.send(enriched).unwrap();
+        let sampler = RosterSampler {
+            rx,
+            stop_tx: None,
+            handle: None,
+        };
+
+        let received = sampler
+            .recv_initial_within(Duration::from_millis(20))
+            .expect("initial snapshot");
+
+        assert_eq!(received.agents[0].last_line.as_deref(), Some("ready now"));
+    }
+
+    #[test]
+    fn initial_receiver_returns_baseline_at_deadline_and_drains_late_enrichment() {
+        let (tx, rx) = mpsc::channel();
+        let baseline = RosterSnapshot {
+            sampled_at_ms: 1_000,
+            agents: vec![roster_agent("w1:p1", "w1", AgentStatus::Blocked)],
+        };
+        tx.send(baseline.clone()).unwrap();
+        let sampler = RosterSampler {
+            rx,
+            stop_tx: None,
+            handle: None,
+        };
+
+        let received = sampler
+            .recv_initial_within(Duration::ZERO)
+            .expect("queued baseline");
+        assert_eq!(received, baseline);
+
+        let mut late_agent = baseline.agents[0].clone();
+        late_agent.last_line = Some("late but safe".to_string());
+        tx.send(RosterSnapshot {
+            sampled_at_ms: 1_000,
+            agents: vec![late_agent],
+        })
+        .unwrap();
+        assert_eq!(
+            sampler.drain_latest().expect("late enrichment").agents[0]
+                .last_line
+                .as_deref(),
+            Some("late but safe")
         );
     }
 

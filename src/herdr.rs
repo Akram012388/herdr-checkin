@@ -593,12 +593,45 @@ impl TailCache {
     /// their cached line (**never-blank**). Best-effort throughout — a read error or a chrome-only
     /// screen leaves the prior line intact (invariant #7).
     pub(crate) fn refresh(&mut self, herdr: &dyn Herdr, agents: &mut [RosterAgent], budget: usize) {
+        let selected = self.select_to_read(agents, budget);
+        self.refresh_selected(herdr, agents, &selected);
+    }
+
+    /// Prime the first popup paint with terminal tails from settled agents only. Blocked and done
+    /// panes carry the most actionable context, followed by idle panes; working and unknown panes
+    /// wait for the normal sweep so volatile output cannot hold up first paint.
+    pub(crate) fn refresh_initial_stable(
+        &mut self,
+        herdr: &dyn Herdr,
+        agents: &mut [RosterAgent],
+        budget: usize,
+    ) {
+        let mut selected = Vec::new();
+        for status in [AgentStatus::Blocked, AgentStatus::Done, AgentStatus::Idle] {
+            selected.extend(
+                agents
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, agent)| (agent.agent_status == status).then_some(index)),
+            );
+        }
+        selected.truncate(budget);
+        self.refresh_selected(herdr, agents, &selected);
+    }
+
+    /// Refresh exactly the selected roster indices, then fill every row from the retained cache.
+    fn refresh_selected(
+        &mut self,
+        herdr: &dyn Herdr,
+        agents: &mut [RosterAgent],
+        selected: &[usize],
+    ) {
         // Drop cache entries for panes no longer present, so the map tracks the live roster.
         let live: HashSet<&str> = agents.iter().map(|agent| agent.pane_id.as_str()).collect();
         self.lines
             .retain(|pane_id, _| live.contains(pane_id.as_str()));
 
-        for index in self.select_to_read(agents, budget) {
+        for &index in selected {
             let pane_id = agents[index].pane_id.clone();
             let status = agents[index].agent_status;
             let line = herdr
@@ -1106,6 +1139,43 @@ mod tests {
         let mut agents = vec![tail_agent("w1:p1", AgentStatus::Working)];
         cache.refresh(&herdr, &mut agents, TAIL_READ_BUDGET);
         assert_eq!(agents[0].last_line.as_deref(), Some("the answer is 42"));
+    }
+
+    #[test]
+    fn initial_tail_sweep_reads_stable_agents_by_priority_and_defers_working_unknown() {
+        use crate::test_support::FakeHerdr;
+        let herdr = FakeHerdr::new(&[]).with_tails(&[
+            ("w1:working", "⏺\n  volatile\n❯\n"),
+            ("w1:idle", "⏺\n  idle context\n❯\n"),
+            ("w1:done", "⏺\n  done context\n❯\n"),
+            ("w1:blocked", "⏺\n  blocked question\n❯\n"),
+            ("w1:unknown", "⏺\n  unknown context\n❯\n"),
+        ]);
+        // Deliberately put working/idle before the more actionable stable statuses in roster order.
+        let mut agents = vec![
+            tail_agent("w1:working", AgentStatus::Working),
+            tail_agent("w1:idle", AgentStatus::Idle),
+            tail_agent("w1:done", AgentStatus::Done),
+            tail_agent("w1:blocked", AgentStatus::Blocked),
+            tail_agent("w1:unknown", AgentStatus::Unknown),
+        ];
+        let mut cache = TailCache::default();
+
+        cache.refresh_initial_stable(&herdr, &mut agents, 3);
+
+        assert_eq!(
+            herdr.reads.borrow().as_slice(),
+            &[
+                "w1:blocked".to_string(),
+                "w1:done".to_string(),
+                "w1:idle".to_string(),
+            ]
+        );
+        assert_eq!(agents[1].last_line.as_deref(), Some("idle context"));
+        assert_eq!(agents[2].last_line.as_deref(), Some("done context"));
+        assert_eq!(agents[3].last_line.as_deref(), Some("blocked question"));
+        assert_eq!(agents[0].last_line, None);
+        assert_eq!(agents[4].last_line, None);
     }
 
     #[test]

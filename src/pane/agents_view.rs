@@ -176,8 +176,13 @@ fn draw_roster(
             Row::Header(workspace) => ListItem::new(workspace.clone()).style(theme.heading()),
             Row::Entry(index) => {
                 let selected = highlight_index == Some(*index);
-                ListItem::new(agent_destination_line(theme, agents[*index], selected))
-                    .style(row_style(theme, selected, theme.base()))
+                ListItem::new(agent_destination_line(
+                    theme,
+                    agents[*index],
+                    now_ms,
+                    selected,
+                ))
+                .style(row_style(theme, selected, theme.base()))
             }
             Row::Detail(index) => {
                 let selected = highlight_index == Some(*index);
@@ -229,10 +234,17 @@ fn draw_roster(
 
 /// Mirror Herdr's own dense-sidebar hierarchy without turning the row into a rainbow: agent
 /// identity gets the quiet identity color, tab context the special-label color, pane location a
-/// softer overlay, and separators recede. Selection adds one coherent two-line background band
-/// without discarding those subtle foreground distinctions.
-fn agent_destination_line(theme: &PaneTheme, agent: &RosterAgent, selected: bool) -> Line<'static> {
+/// softer overlay, and current status follows the pane so the context line below has the full row.
+/// Separators recede. Selection adds one coherent two-line background band without discarding those
+/// subtle foreground distinctions.
+fn agent_destination_line(
+    theme: &PaneTheme,
+    agent: &RosterAgent,
+    now_ms: u64,
+    selected: bool,
+) -> Line<'static> {
     let parts = agent_destination_parts(agent);
+    let detail = agent_detail_parts(agent, now_ms);
     let mut spans = vec![Span::styled(
         CHILD_INDENT,
         row_style(theme, selected, theme.base()),
@@ -257,20 +269,6 @@ fn agent_destination_line(theme: &PaneTheme, agent: &RosterAgent, selected: bool
         push_part(tab, theme.tab_label());
     }
     push_part(parts.pane, theme.pane_label());
-
-    Line::from(spans)
-}
-
-/// The status remains quickly scannable, while age and terminal content step down through the same
-/// secondary/overlay ladder Herdr uses for dense sidebar metadata. The detail uses the exact same
-/// child indent as the identity line, making each workspace section read as a small tree.
-fn agent_detail_line(
-    theme: &PaneTheme,
-    agent: &RosterAgent,
-    now_ms: u64,
-    selected: bool,
-) -> Line<'static> {
-    let parts = agent_detail_parts(agent, now_ms);
     let state_color = match agent.agent_status {
         AgentStatus::Idle => theme.green,
         AgentStatus::Working => theme.yellow,
@@ -278,15 +276,28 @@ fn agent_detail_line(
         AgentStatus::Done => theme.teal,
         AgentStatus::Unknown => theme.overlay0,
     };
+    push_part(detail.status.to_string(), theme.status(state_color));
+    spans.push(Span::styled(
+        format!(" {}", detail.age),
+        row_style(theme, selected, theme.secondary()),
+    ));
+
+    Line::from(spans)
+}
+
+/// The detail row is reserved entirely for terminal context, maximizing the useful text visible at a
+/// glance. It uses the exact same child indent as the identity line, making each workspace section
+/// read as a small tree.
+fn agent_detail_line(
+    theme: &PaneTheme,
+    agent: &RosterAgent,
+    now_ms: u64,
+    selected: bool,
+) -> Line<'static> {
+    let parts = agent_detail_parts(agent, now_ms);
     let selected_or = |style| row_style(theme, selected, style);
-    let mut spans = vec![
-        Span::styled(CHILD_INDENT, selected_or(theme.base())),
-        Span::styled(parts.status, selected_or(theme.status(state_color))),
-        Span::styled(" ", selected_or(theme.base())),
-        Span::styled(parts.age, selected_or(theme.secondary())),
-    ];
+    let mut spans = vec![Span::styled(CHILD_INDENT, selected_or(theme.base()))];
     if let Some(tail) = parts.tail {
-        spans.push(Span::styled(" · ", selected_or(theme.separator())));
         spans.push(Span::styled(
             tail.to_string(),
             selected_or(theme.terminal_tail()),

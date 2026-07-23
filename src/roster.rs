@@ -326,20 +326,27 @@ pub(crate) fn format_age(now_ms: u64, since_ms: u64) -> String {
 /// Agents-view status column (Slice 4 / issue #5). `herdr agent read` returns the *rendered*
 /// terminal, so its bottom rows are the agent's own UI chrome — the input box, the `❯` prompt, the
 /// Claude Code status bar and footer, and, while generating, a spinner + token counter — never the
-/// content. We read from the bottom, skip that chrome, and return the first real content line,
-/// stripped of a trailing scrollbar column and surrounding whitespace. `None` when nothing but chrome
-/// is visible (e.g. an agent whose output has scrolled off above the input box, or a blank pane), so
-/// the caller keeps its cached line rather than ever showing a border or `-- INSERT --`.
+/// content. When the rendered UI exposes an input prompt, that prompt is a structural boundary:
+/// everything from the bottommost prompt downward belongs to the composer/footer and is excluded.
+/// We then read upward, skip remaining chrome, and return the first real content line, stripped of a
+/// trailing scrollbar column and surrounding whitespace. `None` when nothing but chrome is visible
+/// (e.g. an agent whose output has scrolled off above the input box, or a blank pane), so the caller
+/// keeps its cached line rather than ever showing a border or `-- INSERT --`.
 ///
 /// **Best-effort and expected to iterate** (design §4): the chrome vocabulary is tuned to the agents
 /// we see (Claude Code, amp); an unfamiliar TUI simply yields whatever its last non-chrome row is, or
 /// `~` — never a crash, never a ping lost (this only feeds the live view, invariant #7).
 pub(crate) fn last_terminal_line(snapshot: &str) -> Option<String> {
-    snapshot
-        .lines()
+    let lines: Vec<String> = snapshot.lines().map(normalize_terminal_line).collect();
+    let output_end = lines
+        .iter()
+        .rposition(|line| is_input_prompt(line))
+        .unwrap_or(lines.len());
+    lines[..output_end]
+        .iter()
         .rev()
-        .map(normalize_terminal_line)
         .find(|line| !is_terminal_chrome(line))
+        .cloned()
 }
 
 /// Trim a rendered terminal row down to its content: drop a trailing scrollbar column (block-element
@@ -396,16 +403,29 @@ fn is_bare_prompt(line: &str) -> bool {
     matches!(line, "❯" | "›" | ">" | "$" | "#")
 }
 
+/// An agent input/composer prompt, including a draft or placeholder after the prompt glyph. The
+/// bottommost prompt divides settled agent output from the editable input and pinned footer below it.
+fn is_input_prompt(line: &str) -> bool {
+    is_bare_prompt(line)
+        || line
+            .strip_prefix(['❯', '›'])
+            .is_some_and(|suffix| suffix.starts_with(char::is_whitespace))
+}
+
 /// A Claude Code status bar or footer row (the two lines herdr pins below the input box). Keyed on
-/// stable substrings of that agent's chrome; unfamiliar agents fall through (best-effort).
+/// stable substrings of that agent's chrome, plus Codex's pinned model/access/context footer;
+/// unfamiliar agents fall through (best-effort).
 fn is_status_bar(line: &str) -> bool {
-    const MARKERS: [&str; 6] = [
+    const MARKERS: [&str; 9] = [
         "-- INSERT --",
         "-- NORMAL --",
         "auto mode on",
         "for agents",
         "| ctx:",
         "resets:",
+        " · Full Access · ",
+        " · Context ",
+        " · weekly ",
     ];
     MARKERS.iter().any(|marker| line.contains(marker))
 }
@@ -416,7 +436,10 @@ fn is_status_bar(line: &str) -> bool {
 /// *settled* output line instead of a value that churns every refresh (the maintainer's call — the
 /// `working 2m` time-in-state already signals "busy").
 fn is_live_activity(line: &str) -> bool {
-    is_spinner_prefixed(line) || line.ends_with("tokens)") || is_token_count(line)
+    is_spinner_prefixed(line)
+        || line.ends_with("tokens)")
+        || is_token_count(line)
+        || (line.starts_with("• Working (") && line.contains("esc to interrupt"))
 }
 
 /// A line that opens with a spinner glyph then a space — Claude Code's activity spinner, whose frames
@@ -850,6 +873,20 @@ mod tests {
     }
 
     #[test]
+    fn last_terminal_line_stops_above_codex_input_prompt() {
+        // Codex's prompt can contain placeholder or draft text, so it is not a bare prompt. Treat
+        // the bottommost prompt as a structural boundary and return the final settled response line
+        // above it—not the prompt, status footer, or work-duration rule.
+        let snapshot = include_str!("fixtures/agent_read_codex_idle.txt");
+        assert_eq!(
+            last_terminal_line(snapshot).as_deref(),
+            Some(
+                "No upstream issue/PR, tag, or release was created. Remaining: GIF approval and eventual maintainer approval."
+            )
+        );
+    }
+
+    #[test]
     fn last_terminal_line_is_none_when_only_chrome_is_visible() {
         // An agent whose output has scrolled off leaves nothing but its input box on screen: no
         // honest content line, so the column keeps its cached value rather than showing a border.
@@ -871,6 +908,12 @@ mod tests {
         assert!(is_terminal_chrome("╭──────────────────────╮"));
         assert!(is_terminal_chrome("│                      │")); // an empty box side
         assert!(is_terminal_chrome("❯"));
+        assert!(is_input_prompt("› Find and fix a bug in @filename"));
+        assert!(is_input_prompt("❯ write a test"));
+        assert!(is_terminal_chrome(
+            "herdr-checkin · main · gpt-5.6-sol · high · Full Access · Context 45% left · weekly 32% left"
+        ));
+        assert!(is_terminal_chrome("• Working (15s • esc to interrupt)"));
         assert!(is_terminal_chrome("133659 tokens")); // the running token counter
                                                       // Both Claude Code spinner frames: the token-tailed one and the "cheeky verb for <time>" one.
         assert!(is_terminal_chrome("· Churning… (1m 7s · ↓ 3.9k tokens)"));

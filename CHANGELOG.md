@@ -105,6 +105,14 @@ reply, and grouped render as one interface release.
   (enforced by the module boundary, not just a comment). No behavior change.
 
 ### Fixed
+- **Agents rows now show the last settled output above the input prompt.** Codex's non-bare
+  composer prompt and pinned model/context footer are treated as a structural boundary rather than
+  terminal output, while Claude Code and amp chrome filtering remains intact. Terminal-tail text now
+  uses the readable secondary-text palette role without an extra dim modifier. Status and
+  time-in-state now sit beside the pane on the first row, leaving the second row's full width for
+  terminal context. The popup's first sample now immediately enriches blocked, done, and idle agents
+  with their settled terminal context instead of making every row wait for the one-second periodic
+  sweep; a baseline roster still paints within the existing bound if a terminal read is slow.
 - **Valid alphabetic Herdr pane IDs no longer leak into rows.** Herdr encodes stable public
   allocation numbers with a bijective base-32 alphabet, so `pA` means pane allocation 10. Queue and
   Agents rows now render `pane 10` instead of exposing `wT:pA` or silently omitting the pane. Unknown

@@ -204,7 +204,7 @@ impl PaneTheme {
     }
 
     pub(super) fn terminal_tail(&self) -> Style {
-        self.subtle().add_modifier(Modifier::DIM)
+        self.secondary()
     }
 
     pub(super) fn tab_selection(&self) -> Style {
