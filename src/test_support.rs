@@ -20,10 +20,16 @@ pub(crate) struct FakeHerdr {
     tab_labels: HashMap<String, String>,
     focus_fails: bool,
     prompt_fails: bool,
+    /// Canned `agent read` snapshots, `pane_id -> terminal text`. A pane absent here errors, mirroring
+    /// herdr rejecting a non-readable pane.
+    tails: HashMap<String, String>,
     pub(crate) focused: RefCell<Vec<String>>,
     /// Every `prompt_agent` call, as `(pane_id, text)`, in order.
     pub(crate) prompts: RefCell<Vec<(String, String)>>,
     pub(crate) notifications: RefCell<Vec<(String, Option<String>, String)>>,
+    /// Every `read_terminal_tail` call's `pane_id`, in order — for asserting the tail sweep's budget
+    /// and round-robin.
+    pub(crate) reads: RefCell<Vec<String>>,
 }
 
 impl FakeHerdr {
@@ -54,10 +60,22 @@ impl FakeHerdr {
             tab_labels: HashMap::new(),
             focus_fails: false,
             prompt_fails: false,
+            tails: HashMap::new(),
             focused: RefCell::new(Vec::new()),
             prompts: RefCell::new(Vec::new()),
             notifications: RefCell::new(Vec::new()),
+            reads: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Seed canned `agent read` snapshots (`pane_id -> terminal text`) for the tail sweep. A pane not
+    /// seeded here errors on read, exactly as herdr rejects a non-readable pane.
+    pub(crate) fn with_tails(mut self, tails: &[(&str, &str)]) -> Self {
+        self.tails = tails
+            .iter()
+            .map(|(pane_id, text)| (pane_id.to_string(), text.to_string()))
+            .collect();
+        self
     }
 
     pub(crate) fn with_failing_focus(mut self) -> Self {
@@ -125,6 +143,14 @@ impl Herdr for FakeHerdr {
 
     fn agent_list(&self) -> Result<Vec<RosterAgent>, PluginError> {
         Ok(self.agents.clone())
+    }
+
+    fn read_terminal_tail(&self, pane_id: &str) -> Result<String, PluginError> {
+        self.reads.borrow_mut().push(pane_id.to_string());
+        self.tails
+            .get(pane_id)
+            .cloned()
+            .ok_or_else(|| PluginError::new(format!("no readable agent at {pane_id}")))
     }
 
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError> {

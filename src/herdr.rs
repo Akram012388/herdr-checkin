@@ -50,6 +50,12 @@ pub(crate) trait Herdr {
     /// `workspace`/`tab`/`pane list`). For a one-off dump; the sampler uses [`sample_roster`], which
     /// caches the label maps instead of refetching them every sample.
     fn agent_list(&self) -> Result<Vec<RosterAgent>, PluginError>;
+    /// Read a pane's terminal snapshot (`herdr agent read <pane_id> --source recent --format text`) —
+    /// the recent on-screen output, from which [`crate::roster::last_terminal_line`] extracts the
+    /// agent's last line for the Agents view (Slice 4). Errs when the target is not a readable agent
+    /// pane (herdr rejects some panes); the tail sweep treats that as "no reading this time" and keeps
+    /// the pane's cached line, so a failure never blanks a row.
+    fn read_terminal_tail(&self, pane_id: &str) -> Result<String, PluginError>;
     /// Bring the agent in the given pane into focus (jumps workspace/tab/pane).
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError>;
     /// Submit `text` as a reply into the agent in the given pane (routes into its session).
@@ -184,6 +190,33 @@ impl Herdr for CliHerdr {
         let mut roster = self.agent_roster()?;
         enrich_roster_labels(self, &mut roster);
         Ok(roster)
+    }
+
+    fn read_terminal_tail(&self, pane_id: &str) -> Result<String, PluginError> {
+        // `recent` (herdr's default source) returns the recent on-screen rows — enough history to
+        // reach the agent's last output above its pinned input box. `text` strips ANSI (we only want
+        // the characters). We do NOT cap `--lines`: a small cap returns only the bottom chrome rows.
+        let output = Command::new(&self.bin_path)
+            .arg("agent")
+            .arg("read")
+            .arg(pane_id)
+            .arg("--source")
+            .arg("recent")
+            .arg("--format")
+            .arg("text")
+            .output()
+            .map_err(|error| {
+                PluginError::new(format!(
+                    "failed to run HERDR_BIN_PATH agent read {pane_id} ({}): {error}",
+                    self.bin_path.display()
+                ))
+            })?;
+
+        if !output.status.success() {
+            return Err(command_failure("HERDR_BIN_PATH agent read", &output));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     fn focus_agent(&self, pane_id: &str) -> Result<(), PluginError> {
@@ -407,6 +440,9 @@ fn parse_agent_list(stdout: &[u8]) -> Result<Vec<RosterAgent>, PluginError> {
             workspace_label: None,
             tab_label: None,
             pane_label: None,
+            // Terminal contents are not in `agent list`; the sampler's tail sweep fills this from
+            // `agent read` after parse (see `TailCache::refresh`).
+            last_line: None,
         });
     }
     Ok(roster)
@@ -516,6 +552,122 @@ pub(crate) fn sample_roster(
         &mut roster,
     );
     Ok(roster)
+}
+
+/// Read at most this many panes' terminals per sample sweep, so a large fleet can't stall the sampler
+/// worker: the `agent read` spawns are spread round-robin across sweeps (a status-changed pane jumps
+/// the queue). At the ~1s sample cadence a fleet of this size or smaller is fully refreshed every
+/// sweep; a larger one refreshes each pane every `ceil(n / budget)` seconds — a few seconds of lag on
+/// a line that only feeds the glanceable view (invariant #7). Tunable by eyeball with a large fleet.
+pub(crate) const TAIL_READ_BUDGET: usize = 10;
+
+/// One pane's cached terminal tail: the last content line we extracted and the agent status when we
+/// read it (to notice a transition and re-read promptly).
+struct CachedTail {
+    /// The last *non-empty* content line extracted from this pane; kept across sweeps so a pane we did
+    /// not read this sweep — or whose latest read showed only chrome — never blanks. Replaced only by
+    /// a fresh non-empty read.
+    line: Option<String>,
+    /// The agent status at the last read of this pane.
+    status: AgentStatus,
+}
+
+/// The Agents view's last-line cache (Slice 4 / issue #5): `pane_id -> CachedTail`, filled by a
+/// budgeted `herdr agent read` sweep on the sampler thread — the second cache on that thread beside
+/// [`LabelCache`]. A **prunable observation cache** (invariant #7): every read is best-effort, a
+/// failure keeps the prior line, and it feeds only the live view, never a ping. Lives on the sampler
+/// thread; never shared.
+#[derive(Default)]
+pub(crate) struct TailCache {
+    lines: HashMap<String, CachedTail>,
+    /// Round-robin cursor into the roster, so successive sweeps read different panes when the fleet
+    /// exceeds the budget.
+    cursor: usize,
+}
+
+impl TailCache {
+    /// Fill each agent's [`RosterAgent::last_line`] from the cache, first refreshing up to `budget`
+    /// panes this sweep: panes whose status changed since their last read (their output likely changed
+    /// too), or that were never read, go first; the rest fill round-robin. Un-refreshed panes keep
+    /// their cached line (**never-blank**). Best-effort throughout — a read error or a chrome-only
+    /// screen leaves the prior line intact (invariant #7).
+    pub(crate) fn refresh(&mut self, herdr: &dyn Herdr, agents: &mut [RosterAgent], budget: usize) {
+        // Drop cache entries for panes no longer present, so the map tracks the live roster.
+        let live: HashSet<&str> = agents.iter().map(|agent| agent.pane_id.as_str()).collect();
+        self.lines
+            .retain(|pane_id, _| live.contains(pane_id.as_str()));
+
+        for index in self.select_to_read(agents, budget) {
+            let pane_id = agents[index].pane_id.clone();
+            let status = agents[index].agent_status;
+            let line = herdr
+                .read_terminal_tail(&pane_id)
+                .ok()
+                .and_then(|snapshot| crate::roster::last_terminal_line(&snapshot));
+            let entry = self
+                .lines
+                .entry(pane_id)
+                .or_insert(CachedTail { line: None, status });
+            // Never-blank: only a fresh non-empty line replaces the cached one; a read miss or a
+            // chrome-only screen keeps what we had. Always record the status so a pane that stays put
+            // is not re-prioritized every sweep.
+            if line.is_some() {
+                entry.line = line;
+            }
+            entry.status = status;
+        }
+
+        // Fill every row from the cache (un-read panes included -> never-blank).
+        for agent in agents.iter_mut() {
+            agent.last_line = self
+                .lines
+                .get(&agent.pane_id)
+                .and_then(|cached| cached.line.clone());
+        }
+    }
+
+    /// The pane indices to read this sweep: every pane whose status differs from its cached status (or
+    /// that has no cache entry) first, then round-robin fill from `cursor` up to `budget`. Advances
+    /// `cursor` past the panes the round-robin pass scanned, so the next sweep continues onward.
+    fn select_to_read(&mut self, agents: &[RosterAgent], budget: usize) -> Vec<usize> {
+        let n = agents.len();
+        if n == 0 || budget == 0 {
+            return Vec::new();
+        }
+        let mut selected: Vec<usize> = Vec::new();
+        let mut chosen = vec![false; n];
+        // Priority: status-changed or never-read panes (their output most likely just changed).
+        for (index, agent) in agents.iter().enumerate() {
+            let changed = match self.lines.get(&agent.pane_id) {
+                Some(cached) => cached.status != agent.agent_status,
+                None => true,
+            };
+            if changed {
+                selected.push(index);
+                chosen[index] = true;
+            }
+        }
+        selected.truncate(budget);
+        if selected.len() >= budget {
+            return selected;
+        }
+        // Round-robin fill the rest of the budget, starting at the cursor and skipping the already
+        // chosen. Track how far we scanned so the cursor advances even past priority-chosen panes.
+        let mut scanned = 0usize;
+        for step in 0..n {
+            if selected.len() >= budget {
+                break;
+            }
+            scanned = step + 1;
+            let index = (self.cursor + step) % n;
+            if !chosen[index] {
+                selected.push(index);
+                chosen[index] = true;
+            }
+        }
+        self.cursor = (self.cursor + scanned) % n;
+        selected
+    }
 }
 
 /// The session uuid from an agent's nested `agent_session.value`, or `None` when the object (or the
@@ -820,6 +972,7 @@ mod tests {
             workspace_label: None,
             tab_label: None,
             pane_label: None,
+            last_line: None,
         }];
         let herdr = FakeHerdr::new(&[])
             .with_workspace_labels(&[("w4", "home")])
@@ -862,6 +1015,7 @@ mod tests {
             workspace_label: None,
             tab_label: None,
             pane_label: None,
+            last_line: None,
         }];
 
         enrich_roster_labels(&FakeHerdr::new(&[]), &mut roster);
@@ -890,6 +1044,7 @@ mod tests {
                 workspace_label: None,
                 tab_label: None,
                 pane_label: None,
+                last_line: None,
             }])
             .with_workspace_labels(&[("w4", "home")])
             .with_tab_labels(&[("w4:t1", "~")])
@@ -919,6 +1074,132 @@ mod tests {
         assert_eq!(
             cache.samples_since_refresh, 1,
             "a stable roster does not refetch the label maps"
+        );
+    }
+
+    /// A minimal roster agent for the tail-sweep tests (only pane id + status matter here).
+    fn tail_agent(pane_id: &str, status: AgentStatus) -> RosterAgent {
+        RosterAgent {
+            pane_id: pane_id.to_string(),
+            workspace_id: pane_id.split(':').next().unwrap_or("w1").to_string(),
+            tab_id: None,
+            agent: Some("claude".to_string()),
+            agent_status: status,
+            agent_session: None,
+            cwd: None,
+            focused: false,
+            terminal_title: None,
+            status_since_ms: None,
+            workspace_label: None,
+            tab_label: None,
+            pane_label: None,
+            last_line: None,
+        }
+    }
+
+    #[test]
+    fn tail_sweep_extracts_and_fills_each_rows_last_line() {
+        use crate::test_support::FakeHerdr;
+        let herdr = FakeHerdr::new(&[]).with_tails(&[("w1:p1", "⏺ done\n  the answer is 42\n❯\n")]);
+        let mut cache = TailCache::default();
+        let mut agents = vec![tail_agent("w1:p1", AgentStatus::Working)];
+        cache.refresh(&herdr, &mut agents, TAIL_READ_BUDGET);
+        assert_eq!(agents[0].last_line.as_deref(), Some("the answer is 42"));
+    }
+
+    #[test]
+    fn tail_sweep_keeps_the_prior_line_when_a_later_read_is_chrome_only() {
+        // never-blank (invariant #7): once a pane has a line, a later read that finds only chrome
+        // (its output scrolled off) or fails must not erase it — the row holds its last known line.
+        let good = "⏺ done\n  the answer is 42\n❯\n";
+        let chrome = "──────────── x ────────────\n❯\n  -- INSERT -- auto mode on\n";
+        let mut cache = TailCache::default();
+
+        let mut first = vec![tail_agent("w1:p1", AgentStatus::Working)];
+        cache.refresh(
+            &crate::test_support::FakeHerdr::new(&[]).with_tails(&[("w1:p1", good)]),
+            &mut first,
+            TAIL_READ_BUDGET,
+        );
+        assert_eq!(first[0].last_line.as_deref(), Some("the answer is 42"));
+
+        let mut second = vec![tail_agent("w1:p1", AgentStatus::Working)];
+        cache.refresh(
+            &crate::test_support::FakeHerdr::new(&[]).with_tails(&[("w1:p1", chrome)]),
+            &mut second,
+            TAIL_READ_BUDGET,
+        );
+        assert_eq!(
+            second[0].last_line.as_deref(),
+            Some("the answer is 42"),
+            "a chrome-only read keeps the last known line, never blanks it"
+        );
+    }
+
+    #[test]
+    fn tail_sweep_reads_a_status_changed_pane_before_the_round_robin() {
+        use crate::test_support::FakeHerdr;
+        // Warm two working panes so neither is a never-read priority anymore.
+        let warm = FakeHerdr::new(&[])
+            .with_tails(&[("w1:p1", "⏺\n  line A\n❯\n"), ("w1:p2", "⏺\n  line B\n❯\n")]);
+        let mut cache = TailCache::default();
+        let mut agents = vec![
+            tail_agent("w1:p1", AgentStatus::Working),
+            tail_agent("w1:p2", AgentStatus::Working),
+        ];
+        cache.refresh(&warm, &mut agents, TAIL_READ_BUDGET);
+
+        // p2 transitions to blocked with new output. A budget-1 sweep must spend its single read on
+        // p2 (status-changed), not p1, so the new line surfaces without waiting for the round-robin.
+        let changed = FakeHerdr::new(&[]).with_tails(&[
+            ("w1:p1", "⏺\n  line A\n❯\n"),
+            ("w1:p2", "⏺\n  now blocked: proceed?\n❯\n"),
+        ]);
+        let mut next = vec![
+            tail_agent("w1:p1", AgentStatus::Working),
+            tail_agent("w1:p2", AgentStatus::Blocked),
+        ];
+        cache.refresh(&changed, &mut next, 1);
+        assert_eq!(
+            changed.reads.borrow().as_slice(),
+            &["w1:p2".to_string()],
+            "the status-changed pane is the one read"
+        );
+        assert_eq!(next[1].last_line.as_deref(), Some("now blocked: proceed?"));
+    }
+
+    #[test]
+    fn tail_sweep_round_robins_across_sweeps_when_over_budget() {
+        use crate::test_support::FakeHerdr;
+        let herdr = FakeHerdr::new(&[]).with_tails(&[
+            ("w1:p1", "⏺\n  A\n❯\n"),
+            ("w1:p2", "⏺\n  B\n❯\n"),
+            ("w1:p3", "⏺\n  C\n❯\n"),
+        ]);
+        let mut cache = TailCache::default();
+        let roster = || {
+            vec![
+                tail_agent("w1:p1", AgentStatus::Working),
+                tail_agent("w1:p2", AgentStatus::Working),
+                tail_agent("w1:p3", AgentStatus::Working),
+            ]
+        };
+        // Warm all three, then clear the log so we only observe the round-robin sweeps below.
+        cache.refresh(&herdr, &mut roster(), 3);
+        herdr.reads.borrow_mut().clear();
+
+        // With none status-changed, three budget-1 sweeps must read three *distinct* panes.
+        for _ in 0..3 {
+            cache.refresh(&herdr, &mut roster(), 1);
+        }
+        let mut distinct = herdr.reads.borrow().clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            3,
+            "round-robin covers every pane across sweeps; got {:?}",
+            herdr.reads.borrow()
         );
     }
 

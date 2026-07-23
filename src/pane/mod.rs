@@ -22,7 +22,7 @@ mod agents_view;
 mod compose;
 mod queue_view;
 
-use crate::herdr::{sample_roster, CliHerdr, LabelCache};
+use crate::herdr::{sample_roster, CliHerdr, LabelCache, TailCache, TAIL_READ_BUDGET};
 use crate::roster::{agents_in_display_order, roster_reply_label, RosterAgent, RosterSnapshot};
 use crate::{
     agent_label, clear, current_unix_ms, evict, load_entries, Herdr, PluginError, QueueEntry,
@@ -507,12 +507,23 @@ fn sampler_loop(
     stop_rx: &Receiver<()>,
 ) {
     let mut labels = LabelCache::default();
+    let mut tails = TailCache::default();
+    let mut first_sample = true;
     loop {
         if let Ok(mut agents) = sample_roster(herdr, &mut labels) {
             // Fill each row's time-in-state from the `roster.json` registry (back-filling session
             // uuids as a delta) here on the worker, so no roster IO ever touches the render tick.
             let sampled_at_ms = current_unix_ms();
             crate::roster_state::reconcile_roster(state_dir, &mut agents, sampled_at_ms);
+            // Fill each row's last terminal line via a budgeted `agent read` sweep (Slice 4) — the
+            // second cache on this worker; the reads stay off the render tick like everything else.
+            // Skipped on the *first* sample: those extra spawns would delay the bounded first paint,
+            // and the roster (names, status, timers) must appear instantly (last session's win). The
+            // lines fill in from the next sample ~1s later.
+            if !first_sample {
+                tails.refresh(herdr, &mut agents, TAIL_READ_BUDGET);
+            }
+            first_sample = false;
             let snapshot = RosterSnapshot {
                 sampled_at_ms,
                 agents,
@@ -1426,6 +1437,7 @@ mod tests {
             workspace_label: None,
             tab_label: None,
             pane_label: None,
+            last_line: None,
         }
     }
 
@@ -1568,6 +1580,27 @@ mod tests {
                 "working ~ · herdr-checkin",
                 "j/k move  ·  enter jump  ·  space reply  ·  q quit",
             ]
+        );
+    }
+
+    #[test]
+    fn snapshot_agents_view_shows_the_last_terminal_line_when_the_sweep_filled_it() {
+        // Once the tail sweep fills `last_line`, the detail row shows the agent's last line (what it
+        // is doing / last said) in place of the static terminal title (Slice 4 / issue #5).
+        let mut m = model(&[]);
+        m.tab = ActiveTab::Agents;
+        m.roster = Some(RosterSnapshot {
+            sampled_at_ms: 1_000,
+            agents: vec![RosterAgent {
+                status_since_ms: Some(0),
+                last_line: Some("Good to proceed?".to_string()),
+                ..roster_agent("w4:p1", "w4", AgentStatus::Blocked)
+            }],
+        });
+        let lines = content_lines(&render_buffer(&m, 80, 8));
+        assert!(
+            lines.contains(&"blocked 1s · Good to proceed?".to_string()),
+            "the row shows the agent's last line, not the title; got:\n{lines:#?}"
         );
     }
 

@@ -1,0 +1,49 @@
+                                                                                                                                                         █
+ For least privilege, create a custom account token scoped only to account Akram012388@gmail.com's Account with:                                         █
+                                                                                                                                                         █
+ - Zero Trust — Edit                                                                                                                                     █
+ - Access: Apps and Policies — Edit                                                                                                                      █
+ - Access: Organizations, Identity Providers, and Groups — Edit                                                                                          █
+                                                                                                                                                         █
+ No Zone/DNS, Workers, R2, billing, or Global API Key permissions are needed. Rather than pasting it into chat, store it in your Mac Keychain from       █
+ Ghostty:                                                                                                                                                █
+                                                                                                                                                         █
+     security add-generic-password \                                                                                                                     █
+       -a akram \                                                                                                                                        █
+       -s amp-cloudflare-mesh \                                                                                                                          █
+       -w 'PASTE_TOKEN_HERE' \                                                                                                                           █
+       -U                                                                                                                                                █
+                                                                                                                                                         █
+ That keeps it out of shell history after execution only if you edit the placeholder carefully; an even safer interactive command is:                    █
+                                                                                                                                                         █
+     read -s "CF_TOKEN?Cloudflare token: "; echo                                                                                                         █
+     security add-generic-password -a akram -s amp-cloudflare-mesh -w "$CF_TOKEN" -U                                                                     █
+     unset CF_TOKEN                                                                                                                                      █
+                                                                                                                                                         █
+ Then tell me “installed and token saved”. I’ll retrieve it directly from Keychain without printing it, verify scope, inspect existing Zero Trust        █
+ state, apply only the missing Mesh configuration, and enroll this Mac.                                                                                  █
+                                                                                                                                                         █
+ The latest official Cloudflare Mesh documentation and local CLI audit are complete.                                                                     █
+                                                                                                                                                         █
+ Current state:                                                                                                                                          █
+                                                                                                                                                         █
+ - wrangler 4.101.0 installed and OAuth-authenticated.                                                                                                   █
+ - cloudflared 2026.5.2 installed; it is not required for client-to-client Mesh.                                                                         █
+ - Cloudflare One Client 2026.6.880.0 downloaded.                                                                                                        █
+ - Package verified as Apple-notarized and signed by Cloudflare Inc.                                                                                     █
+ - The macOS Installer should currently be open.                                                                                                         █
+ - Cloudflare Mesh supports macOS, iOS, and Android with private TCP, UDP, and ICMP.                                                                     █
+ - A Linux Mesh node and public Cloudflare Tunnel are unnecessary.                                                                                       █
+ - We’ll route only 100.96.0.0/12 through Cloudflare, not all your Internet traffic.                                                                     █
+                                                                                                                                                         █
+ Complete these two user-only steps:                                                                                                                     █
+                                                                                                                                                         █
+ 1. Finish the open macOS installer and approve its system-extension/VPN prompts.                                                                        █
+ 2. Create and save the scoped token using the Keychain command above.                                                                                   ▆
+                                                                                                                                                         █
+ Then reply “installed and token saved.”                                                                                                                 █
+╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── $0.10 ─ medium ─╮
+│                                                                                                                                                        │
+│                                                                                                                                                        │
+│                                                                                                                                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ~ ─╯

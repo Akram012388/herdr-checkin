@@ -76,6 +76,13 @@ pub(crate) struct RosterAgent {
     pub(crate) workspace_label: Option<String>,
     pub(crate) tab_label: Option<String>,
     pub(crate) pane_label: Option<String>,
+    /// The agent's last line of visible terminal output (Slice 4 / issue #5) — the tail of its last
+    /// message (a blocked agent's question, a done agent's closing line), extracted by
+    /// [`last_terminal_line`] from a `herdr agent read` snapshot and filled by the sampler's tail
+    /// sweep ([`crate::herdr::TailCache`]). `None` before this pane's first read lands, or when only
+    /// UI chrome is on screen — the row then falls back to the terminal title. Not from `agent list`
+    /// (it carries no terminal contents); filled after parse like the label and timer fields above.
+    pub(crate) last_line: Option<String>,
 }
 
 /// A single sampler delivery: the whole roster at one instant. The view replaces this wholesale each
@@ -200,21 +207,32 @@ pub(crate) fn agent_destination(agent: &RosterAgent) -> String {
 }
 
 /// The detail (second) line for an Agents-view row: the live status **with its time-in-state** then
-/// the terminal title, if any (`blocked 4m · title`, or `blocked 4m` when the pane has no title). The
-/// age comes from the `roster.json` registry via [`RosterAgent::status_since_ms`]; when that is
-/// unknown the age renders as `~` (design §4), so the status word is always present.
+/// the agent's **last terminal line** (`blocked 4m · Good to proceed?`), the tail of what it last did
+/// or said (Slice 4). Before this pane's first `agent read` lands the last line is unknown, so it
+/// falls back to the terminal title, then to nothing (`blocked 4m`). The age comes from the
+/// `roster.json` registry via [`RosterAgent::status_since_ms`]; when unknown it renders as `~` (design
+/// §4), so the status word is always present.
 pub(crate) fn agent_detail(agent: &RosterAgent, now_ms: u64) -> String {
     let head = format!(
         "{} {}",
         agent.agent_status.as_str(),
         time_in_state(now_ms, agent.status_since_ms)
     );
-    match agent
-        .terminal_title
+    // Prefer the agent's live last terminal line — what it is doing, or last said (Slice 4). Before
+    // this pane's first `agent read` lands it is `None`, so fall back to the terminal title; the row
+    // is never bare.
+    let tail = agent
+        .last_line
         .as_deref()
-        .filter(|title| !title.is_empty())
-    {
-        Some(title) => format!("{head} · {title}"),
+        .filter(|line| !line.is_empty())
+        .or_else(|| {
+            agent
+                .terminal_title
+                .as_deref()
+                .filter(|title| !title.is_empty())
+        });
+    match tail {
+        Some(tail) => format!("{head} · {tail}"),
         None => head,
     }
 }
@@ -243,6 +261,128 @@ pub(crate) fn format_age(now_ms: u64, since_ms: u64) -> String {
     } else {
         format!("{}d", secs / 86_400)
     }
+}
+
+/// Extract an agent's last line of visible output from a `herdr agent read` terminal snapshot — the
+/// tail of its last message (a blocked agent's question, a done agent's closing line) for the
+/// Agents-view status column (Slice 4 / issue #5). `herdr agent read` returns the *rendered*
+/// terminal, so its bottom rows are the agent's own UI chrome — the input box, the `❯` prompt, the
+/// Claude Code status bar and footer, and, while generating, a spinner + token counter — never the
+/// content. We read from the bottom, skip that chrome, and return the first real content line,
+/// stripped of a trailing scrollbar column and surrounding whitespace. `None` when nothing but chrome
+/// is visible (e.g. an agent whose output has scrolled off above the input box, or a blank pane), so
+/// the caller keeps its cached line rather than ever showing a border or `-- INSERT --`.
+///
+/// **Best-effort and expected to iterate** (design §4): the chrome vocabulary is tuned to the agents
+/// we see (Claude Code, amp); an unfamiliar TUI simply yields whatever its last non-chrome row is, or
+/// `~` — never a crash, never a ping lost (this only feeds the live view, invariant #7).
+pub(crate) fn last_terminal_line(snapshot: &str) -> Option<String> {
+    snapshot
+        .lines()
+        .rev()
+        .map(normalize_terminal_line)
+        .find(|line| !is_terminal_chrome(line))
+}
+
+/// Trim a rendered terminal row down to its content: drop a trailing scrollbar column (block-element
+/// glyphs like `█`/`▆` herdr's agents paint down the right edge) plus all surrounding whitespace.
+fn normalize_terminal_line(line: &str) -> String {
+    line.trim_end_matches(|c: char| c.is_whitespace() || is_block_glyph(c))
+        .trim_start()
+        .to_string()
+}
+
+/// True for a normalized row that is agent UI chrome rather than output — see [`last_terminal_line`].
+/// Runs on the already-normalized line (leading/trailing whitespace and the scrollbar column gone).
+fn is_terminal_chrome(line: &str) -> bool {
+    line.is_empty()
+        || is_box_rule(line)
+        || is_box_side(line)
+        || is_bare_prompt(line)
+        || is_status_bar(line)
+        || is_live_activity(line)
+}
+
+/// A horizontal box rule / border — the input-box top and bottom edges (`────`, `╭───`, `╰───`),
+/// even with an embedded title (`── slice-4-and-beyond ──`). Detected by a run of ≥8 consecutive
+/// box-drawing chars, which real content effectively never contains.
+fn is_box_rule(line: &str) -> bool {
+    let mut run = 0usize;
+    for ch in line.chars() {
+        if is_box_glyph(ch) {
+            run += 1;
+            if run >= 8 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
+/// A vertical box side — an empty input box's left/right rails (`│              │`): a normalized line
+/// that opens and closes with a vertical box glyph and holds only spaces between.
+fn is_box_side(line: &str) -> bool {
+    let mut chars = line.chars();
+    match (chars.next(), line.chars().last()) {
+        (Some(first), Some(last)) if is_vertical_glyph(first) && is_vertical_glyph(last) => {
+            line.chars().all(|c| c == ' ' || is_vertical_glyph(c))
+        }
+        _ => false,
+    }
+}
+
+/// A bare shell/agent prompt with no command typed after it.
+fn is_bare_prompt(line: &str) -> bool {
+    matches!(line, "❯" | "›" | ">" | "$" | "#")
+}
+
+/// A Claude Code status bar or footer row (the two lines herdr pins below the input box). Keyed on
+/// stable substrings of that agent's chrome; unfamiliar agents fall through (best-effort).
+fn is_status_bar(line: &str) -> bool {
+    const MARKERS: [&str; 6] = [
+        "-- INSERT --",
+        "-- NORMAL --",
+        "auto mode on",
+        "for agents",
+        "| ctx:",
+        "resets:",
+    ];
+    MARKERS.iter().any(|marker| line.contains(marker))
+}
+
+/// A live-activity row shown only while an agent is generating: the spinner line (`… ↓ 3.9k tokens)`)
+/// or the right-aligned running token counter (`133659 tokens`). Skipped so the column shows the last
+/// *settled* output line instead of a value that churns every refresh (the maintainer's call — the
+/// `working 2m` time-in-state already signals "busy").
+fn is_live_activity(line: &str) -> bool {
+    line.ends_with("tokens)") || is_token_count(line)
+}
+
+/// The bare running-token counter `<digits> tokens` (commas allowed), nothing else on the line.
+fn is_token_count(line: &str) -> bool {
+    match line.strip_suffix(" tokens") {
+        Some(count) => !count.is_empty() && count.chars().all(|c| c.is_ascii_digit() || c == ','),
+        None => false,
+    }
+}
+
+/// A box-drawing glyph (U+2500 block): the light/heavy lines and corners agents draw their input box
+/// and rules with.
+fn is_box_glyph(ch: char) -> bool {
+    matches!(ch, '\u{2500}'..='\u{257F}')
+}
+
+/// A vertical box-drawing glyph specifically (`│`, `┃`, and their variants) — an input box's side.
+fn is_vertical_glyph(ch: char) -> bool {
+    matches!(ch, '│' | '┃' | '╎' | '╏' | '┆' | '┇' | '┊' | '┋')
+}
+
+/// A block-element glyph (U+2580 block: `█ ▆ ▌` …) — what agents paint a scrollbar column with down
+/// the right edge; stripped from the end of a content line by [`normalize_terminal_line`].
+fn is_block_glyph(ch: char) -> bool {
+    matches!(ch, '\u{2580}'..='\u{259F}')
 }
 
 /// The last `:`-separated segment of an id (`wS:tN` -> `tN`), or `None` if empty. Mirrors the queue's
@@ -311,6 +451,7 @@ mod tests {
             workspace_label: None,
             tab_label: None,
             pane_label: None,
+            last_line: None,
         }
     }
 
@@ -514,6 +655,28 @@ mod tests {
     }
 
     #[test]
+    fn agent_detail_prefers_the_last_terminal_line_over_the_title() {
+        // Once a read lands, the row shows the agent's last line (what it is doing / last said), not
+        // the static terminal title.
+        let with_line = RosterAgent {
+            status_since_ms: Some(1_000),
+            last_line: Some("Good to proceed?".to_string()),
+            ..agent("w4:p1", "w4", AgentStatus::Blocked) // title defaults to "title"
+        };
+        assert_eq!(
+            agent_detail(&with_line, 241_000),
+            "blocked 4m · Good to proceed?"
+        );
+        // An empty last line is ignored and the title still shows (never a trailing separator).
+        let empty_line = RosterAgent {
+            status_since_ms: Some(1_000),
+            last_line: Some(String::new()),
+            ..agent("w4:p1", "w4", AgentStatus::Working)
+        };
+        assert_eq!(agent_detail(&empty_line, 241_000), "working 4m · title");
+    }
+
+    #[test]
     fn agent_detail_shows_a_tilde_when_the_timer_is_unknown() {
         // No registry entry (status_since_ms None) renders an honest `~`, never a fake zero.
         let unknown = agent("w4:p1", "w4", AgentStatus::Blocked);
@@ -536,6 +699,83 @@ mod tests {
     fn time_in_state_is_a_tilde_when_unknown() {
         assert_eq!(time_in_state(240_000, Some(0)), "4m");
         assert_eq!(time_in_state(240_000, None), "~");
+    }
+
+    #[test]
+    fn last_terminal_line_reads_a_blocked_claudes_question_over_the_chrome() {
+        // The maintainer's ground-truth case (a screenshot): a blocked Claude agent's last line is
+        // its question to you, sitting above the input box / prompt / status bar / footer.
+        let snapshot = include_str!("fixtures/agent_read_claude_blocked.txt");
+        assert_eq!(
+            last_terminal_line(snapshot).as_deref(),
+            Some("Good to proceed on that, and which way on the spinner-vs-response choice?")
+        );
+    }
+
+    #[test]
+    fn last_terminal_line_skips_the_spinner_and_token_counter_while_working() {
+        // While generating, Claude paints a spinner (`… ↓ 3.9k tokens)`) and a running token counter
+        // just above the box. Both are skipped so the column shows the last *settled* output line.
+        let snapshot = include_str!("fixtures/agent_read_claude_working.txt");
+        assert_eq!(
+            last_terminal_line(snapshot).as_deref(),
+            Some("test result: ok. 42 passed")
+        );
+    }
+
+    #[test]
+    fn last_terminal_line_reads_amp_over_its_empty_input_box() {
+        // A real amp capture: its last message sits above an empty input box whose sides are `│ … │`
+        // and whose edges carry a price/label. The content lines also trail a `█` scrollbar column,
+        // which must be stripped, not treated as content or a border.
+        let snapshot = include_str!("fixtures/agent_read_amp_done.txt");
+        assert_eq!(
+            last_terminal_line(snapshot).as_deref(),
+            Some("Then reply “installed and token saved.”")
+        );
+    }
+
+    #[test]
+    fn last_terminal_line_is_none_when_only_chrome_is_visible() {
+        // An agent whose output has scrolled off leaves nothing but its input box on screen: no
+        // honest content line, so the column keeps its cached value rather than showing a border.
+        let only_chrome = "\
+────────────────────────────────────── my-session ──
+❯
+──────────────────────────────────────────────────────
+  herdr-checkin [main] | ctx: 13% | resets: 1d-10h
+  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle)
+";
+        assert_eq!(last_terminal_line(only_chrome), None);
+        assert_eq!(last_terminal_line(""), None);
+        assert_eq!(last_terminal_line("   \n  \n"), None);
+    }
+
+    #[test]
+    fn box_rules_sides_and_prompts_are_chrome_but_content_is_not() {
+        assert!(is_terminal_chrome("────────────── title ──")); // a rule with an embedded title
+        assert!(is_terminal_chrome("╭──────────────────────╮"));
+        assert!(is_terminal_chrome("│                      │")); // an empty box side
+        assert!(is_terminal_chrome("❯"));
+        assert!(is_terminal_chrome("133659 tokens")); // the running token counter
+        assert!(is_terminal_chrome("· Churning… (1m 7s · ↓ 3.9k tokens)")); // the spinner
+                                                                            // Real content with a stray box char or the word "tokens" mid-line is NOT chrome.
+        assert!(!is_terminal_chrome(
+            "Then reply “installed and token saved.”"
+        ));
+        assert!(!is_terminal_chrome("the pipe | splits two clauses here"));
+        assert!(!is_terminal_chrome(
+            "we spent 40000 tokens on that run, roughly"
+        ));
+    }
+
+    #[test]
+    fn normalize_strips_a_trailing_scrollbar_column_and_surrounding_space() {
+        assert_eq!(
+            normalize_terminal_line("  Then reply now.                    █"),
+            "Then reply now."
+        );
+        assert_eq!(normalize_terminal_line("   plain line   "), "plain line");
     }
 
     #[test]

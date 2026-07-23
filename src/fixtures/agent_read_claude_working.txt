@@ -1,0 +1,11 @@
+⏺ Bash(cargo test --lib roster)
+  ⎿  running 42 tests
+     test result: ok. 42 passed
+
+· Churning… (1m 7s · ↓ 3.9k tokens)
+                                                            133659 tokens
+──────────────────────────────────────────────────────────── slice-4-and-beyond ──
+❯
+──────────────────────────────────────────────────────────────────────────────────
+  herdr-checkin [main] | Opus-4.8-[1M] | ctx: 13% | 5h: 36% | 7d: 87% | resets: 1d-10h                /rc
+  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

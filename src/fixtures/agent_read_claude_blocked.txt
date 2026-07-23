@@ -1,0 +1,14 @@
+⏺ Two things before I build:
+
+  1. One UX choice: while an agent is actively generating, show the last completed
+     response line, or the live spinner line itself? For blocked/done both are identical.
+  2. Confirm the build path: pure fn + fixtures in roster.rs; a ~2s sweep on the sampler
+     thread, never-blank cache so a row keeps its last line while a fresh read is in flight.
+
+  Good to proceed on that, and which way on the spinner-vs-response choice?
+
+──────────────────────────────────────────────────────────── slice-4-and-beyond ──
+❯
+──────────────────────────────────────────────────────────────────────────────────
+  herdr-checkin [main] | Opus-4.8-[1M] | ctx: 13% | 5h: 36% | 7d: 87% | resets: 1d-10h                /rc
+  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

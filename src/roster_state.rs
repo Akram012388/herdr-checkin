@@ -650,6 +650,7 @@ mod tests {
             workspace_label: None,
             tab_label: None,
             pane_label: None,
+            last_line: None,
         }
     }
 }
