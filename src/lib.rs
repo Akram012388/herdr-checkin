@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 mod actions;
 mod herdr;
+mod herdr_id;
 mod pane;
 mod queue;
 mod roster;

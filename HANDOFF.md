@@ -173,6 +173,8 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
   the pure enrich shared by `enrich_roster_labels` and `sample_roster`. **`enrich_location(&dyn Herdr,
   &mut StatusEvent)`** is the Queue's analogue for the enqueue path, best-effort, never fails the
   enqueue.
+- `src/herdr_id.rs` — pure display-only decoder for Herdr's stable public pane allocation suffix
+  (`wT:pA` -> `pane 10`). IDs remain opaque command targets; unknown syntax degrades neutrally.
 - `src/queue.rs` (~230) — pure queue transitions (`enqueue`/`evict`/`is_live`) and the event handlers
   (`on_status_changed`/`on_focused`/`on_closed`). **Never depends on the `Herdr` trait.**
   `on_status_changed(runtime, enrich: impl FnOnce(&mut StatusEvent))` runs `enrich` **before the
@@ -269,8 +271,9 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
 - **Row copy (the render — this session's redesign):** each waiter is **two lines** — the bright
   destination `{workspace} · {tab} · {pane}` then the dim detail `{status} · {title} · {waited}` —
   location-first, mirroring herdr's `prefix+g` go-to breadcrumb. Every segment prefers its human name
-  and falls back to a positional id: workspace label → `workspace_id`; tab label → `t{N}` (from
-  `tab_id`); pane manual label → `pane {N}` (from `pane_id`). Built once in `entry_destination` +
+  and falls back to public navigation metadata: workspace label → `workspace_id`; tab label → the
+  public `t{N}` segment; pane manual label → Herdr's stable public allocation number (`pA` →
+  `pane 10`, not visual order). Built once in `entry_destination` +
   `entry_detail` (actions.rs) so the pane rows, the `peek` toast (`describe_entry` joins them one-
   line), and the reply footer (`agent_label`) stay consistent. Colorless except the grey selection
   band.
@@ -315,8 +318,10 @@ re-exports items as `pub(crate)` so `crate::X` paths still resolve):
   agent_status, agent, display_agent, title}}`. Manifest `on =` uses the dotted form
   (`pane.agent_status_changed`, `pane.focused`, `pane.closed`).
 - **PANE IDENTITY (load-bearing for the row render; verified in herdr 0.7.5 source `c234f22`):**
-  - IDs are positional: `workspace_id` = `w1`; `tab_id` = `w1:t2`; `pane_id` = `w1:p3`. **`pane_id`
-    does NOT encode the tab** — the tab is only in `tab_id`.
+  - IDs are Herdr-generated public allocation identifiers: `workspace_id` = `w1`; `tab_id` =
+    `w1:t2`; `pane_id` = `w1:p3`. Suffixes use Herdr's bijective base-32 alphabet, so `pA` is public
+    pane allocation 10; it is not visual order and closed allocations leave gaps. **`pane_id` does
+    NOT encode the tab** — the tab is only in `tab_id`.
   - **`herdr pane list`** per pane: `pane_id`, `workspace_id`, **`tab_id`**, **`label`** (manual pane
     label, usually null), `agent`, `title`, `display_agent`, `agent_status`, … We parse `pane_id`,
     `workspace_id`, `tab_id`, `label`, `agent_status`, `agent`, `display_agent`, `title`.

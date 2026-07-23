@@ -3,6 +3,7 @@
 //! callers that also talk to herdr (focus, notifications, pane list).
 
 use crate::herdr::{Herdr, StatusEvent};
+use crate::herdr_id::pane_public_number;
 use crate::queue::{enqueue, evict, is_live};
 use crate::roster::{render_roster_text, RosterSnapshot};
 use crate::state::{current_unix_ms, PluginError, QueueEntry, StateStore};
@@ -196,13 +197,13 @@ pub(crate) fn describe_entry(entry: &QueueEntry, now_ms: u64) -> String {
 
 /// The row's **destination** — where the waiter is, in herdr's own go-to vocabulary and order:
 /// `{workspace} · {tab} · {pane}`. Each segment prefers its human label and falls back to the
-/// positional id, and is dropped entirely when neither is known so there is never a dangling
+/// public navigation metadata, and is dropped entirely when neither is known so there is no dangling
 /// separator:
 /// - workspace: `workspace_label` else the raw `workspace_id`
 /// - tab: `tab_label` (program) else `t{N}` (from `tab_id`)
-/// - pane: `pane_label` (manual) else `pane {N}` (from `pane_id`)
+/// - pane: `pane_label` (manual) else Herdr's stable public allocation number (`pA` -> `pane 10`)
 ///
-/// Returns `None` only when not even a pane number is known (a malformed/hand-seeded row).
+/// The pane number is not visual order and may have gaps. Returns `None` only when no segment is known.
 pub(crate) fn entry_destination(entry: &QueueEntry) -> Option<String> {
     let mut parts: Vec<String> = Vec::with_capacity(3);
     if let Some(workspace) =
@@ -217,7 +218,7 @@ pub(crate) fn entry_destination(entry: &QueueEntry) -> Option<String> {
     }
     if let Some(pane) = non_empty(entry.pane_label.as_deref()) {
         parts.push(pane.to_string());
-    } else if let Some(number) = id_segment(&entry.pane_id).and_then(pane_number) {
+    } else if let Some(number) = pane_public_number(&entry.pane_id) {
         parts.push(format!("pane {number}"));
     }
     if parts.is_empty() {
@@ -244,19 +245,12 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.filter(|text| !text.is_empty())
 }
 
-/// The trailing positional segment of a herdr id — the part after its `:` (`wS:t2` -> `t2`). An id
-/// with no `:` (or an empty tail) has no segment we can trust, so this returns None.
+/// The trailing public-ID segment — the part after its `:` (`wS:t2` -> `t2`). An id with no `:` (or
+/// an empty tail) has no segment we can trust, so this returns None.
 fn id_segment(id: &str) -> Option<&str> {
     id.rsplit_once(':')
         .map(|(_, segment)| segment)
         .filter(|segment| !segment.is_empty())
-}
-
-/// The number in a pane segment (`p3` -> `3`), for the `pane {N}` fallback that mirrors herdr's
-/// go-to picker. None if the segment is not `p<digits>`.
-fn pane_number(segment: &str) -> Option<&str> {
-    let number = segment.strip_prefix('p')?;
-    (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())).then_some(number)
 }
 
 fn format_waited(ms: u64) -> String {
@@ -550,6 +544,24 @@ mod tests {
         assert_eq!(
             entry_destination(&entry).as_deref(),
             Some("herdr-checkin · t2 · pane 1")
+        );
+    }
+
+    #[test]
+    fn entry_destination_decodes_herdrs_public_pane_number() {
+        let entry = render_entry(
+            "wT:pA",
+            "wT",
+            Some("herdr-checkin"),
+            Some("wT:t2"),
+            Some("amp"),
+            None,
+            None,
+            WaitStatus::Blocked,
+        );
+        assert_eq!(
+            entry_destination(&entry).as_deref(),
+            Some("herdr-checkin · amp · pane 10")
         );
     }
 

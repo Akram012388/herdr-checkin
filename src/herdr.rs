@@ -22,7 +22,7 @@ pub(crate) struct PaneInfo {
     /// the enqueue path must look a pane up here to learn its tab.
     pub(crate) tab_id: Option<String>,
     /// The pane's manual label (`terminal.manual_label`, e.g. `orchestrator`) — usually null. When
-    /// set, herdr's own go-to picker shows it in place of `pane {N}`, so the row mirrors that.
+    /// set, herdr's own go-to picker shows it in place of the stable public allocation (`pane {N}`).
     pub(crate) label: Option<String>,
     pub(crate) agent_status: String,
     pub(crate) agent: Option<String>,
@@ -450,7 +450,7 @@ fn parse_agent_list(stdout: &[u8]) -> Result<Vec<RosterAgent>, PluginError> {
 }
 
 /// Enrich a parsed roster with herdr's human names for each pane's workspace/tab/pane. `agent list`
-/// carries only positional ids (`w4`, `w4:t1`), so we resolve labels from `workspace list`/`tab
+/// carries only public ids (`w4`, `w4:t1`), so we resolve labels from `workspace list`/`tab
 /// list`/`pane list` — the same sources the Queue enriches from — so the Agents view retains herdr's
 /// navigation context (`home · ~`) beside the authoritative agent type rather than showing raw ids.
 /// **Best-effort:** a lookup that fails leaves that label `None` and the view falls back to the id;

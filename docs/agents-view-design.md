@@ -152,7 +152,9 @@ this doc is the durable design, the issues are the per-slice work tracker.
     Codex row reads `home / codex · ~ · pane 1` rather than `w4 / codex · t1 · pane 1`.
     `RosterAgent` carries `workspace_label`/`tab_label`/`pane_label`; `agent_destination` prepends the
     authoritative agent type and omits only a human tab label that repeats it (`amp · pane 4`, not
-    `amp · amp · pane 4`). A missed lookup degrades to ids — never fails the roster.
+    `amp · amp · pane 4`). Without a manual pane label, the row decodes Herdr's stable public pane
+    allocation (`pA` -> `pane 10`); this number is not visual order and may have gaps. A missed
+    lookup degrades to public navigation metadata — never fails the roster.
   - **Tab-bar tooltip:** a dim `tab · switch` hint sits beside the two tabs on both views.
   - `pane/agents_view.rs` render sibling; `TestBackend` snapshots for the grouped roster (with cursor),
     the placeholder, the empty-roster wording, the toggle, plus model tests for agents selection/clamp,

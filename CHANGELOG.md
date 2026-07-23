@@ -101,6 +101,10 @@ reply, and grouped render as one interface release.
   (enforced by the module boundary, not just a comment). No behavior change.
 
 ### Fixed
+- **Valid alphabetic Herdr pane IDs no longer leak into rows.** Herdr encodes stable public
+  allocation numbers with a bijective base-32 alphabet, so `pA` means pane allocation 10. Queue and
+  Agents rows now render `pane 10` instead of exposing `wT:pA` or silently omitting the pane. Unknown
+  future ID syntax degrades to neutral `pane`; raw IDs remain internal focus/reply targets.
 - **`ctrl+u` in the reply bar now clears the line to the left of the cursor** (readline
   "unix-line-discard"). tui-textarea 0.7 binds `ctrl+u` to *undo* and puts delete-to-line-start on
   `ctrl+j`; the reply bar now intercepts `ctrl+u` and drives the delete itself, matching the

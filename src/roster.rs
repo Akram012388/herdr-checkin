@@ -8,6 +8,8 @@
 //! seam samples `agent list` on a worker thread; this module only shapes what it delivers. A
 //! plain-text `render_roster_text` also backs the hidden `roster` debug subcommand.
 
+use crate::herdr_id::pane_public_number;
+
 /// An agent pane's live status, from `herdr agent list`'s `agent_status`. The vocabulary is
 /// closed (live-verified, herdr 0.7.5): `idle`/`working`/`blocked`/`done`, with **`Unknown` as the
 /// catch-all** for an empty or unrecognized value — herdr has no separate `failed`/`stopped`, so an
@@ -49,8 +51,8 @@ impl AgentStatus {
 /// One agent pane as surfaced by `herdr agent list`, reduced to the fields the Agents view needs.
 /// Plain data the herdr seam parses and the view renders — never a place the `Herdr` trait reaches.
 /// `agent_session` (the session uuid) is `None` for a pane herdr lists without one (seen live for a
-/// non-Claude/Codex agent); it is the stable per-agent identity (distinct from the positional,
-/// reusable `pane_id`), carried even though the view only prints it.
+/// non-Claude/Codex agent); it is the stable per-agent identity (distinct from Herdr's public
+/// `pane_id` allocation), carried even though the view only prints it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RosterAgent {
     pub(crate) pane_id: String,
@@ -70,7 +72,7 @@ pub(crate) struct RosterAgent {
     /// filled after parse, mirroring the label fields below.
     pub(crate) status_since_ms: Option<u64>,
     /// Human names herdr shows for this pane's workspace/tab/pane (`w4` -> `home`, `w4:t1` -> `~`).
-    /// `agent list` carries only positional ids, so the herdr seam enriches these from
+    /// `agent list` carries only public ids, so the herdr seam enriches these from
     /// `workspace list`/`tab list`/`pane list` — `None` when a lookup missed, and the view then falls
     /// back to the id (mirroring the Queue's `workspace_label`/`tab_label`/`pane_label`).
     pub(crate) workspace_label: Option<String>,
@@ -175,8 +177,8 @@ pub(crate) fn workspace_display_label(agent: &RosterAgent) -> &str {
 /// The workspace is already the group header. Agent identity is authoritative from `agent list`; a
 /// human tab label that repeats it (case-insensitively) is omitted, so an Amp tab reads
 /// `amp · pane 4` while a Codex agent on the generic home tab reads `codex · ~ · pane 1`. Distinct
-/// tab labels remain visible as navigation context. Missing names fall back to positional ids, and
-/// the pane segment is never blank.
+/// tab labels remain visible as navigation context. Missing names fall back to public navigation
+/// metadata, and the pane segment is never blank.
 pub(crate) fn agent_destination(agent: &RosterAgent) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(3);
 
@@ -190,7 +192,7 @@ pub(crate) fn agent_destination(agent: &RosterAgent) -> String {
     }
 
     // Tab: keep a distinct human label, else the `tN` segment of the tab id. Deduplicate only a
-    // human label that repeats the authoritative agent name; positional ids remain navigation data.
+    // human label that repeats the authoritative agent name; public tab ids remain navigation data.
     let tab_label = agent
         .tab_label
         .as_deref()
@@ -208,7 +210,8 @@ pub(crate) fn agent_destination(agent: &RosterAgent) -> String {
         }
     }
 
-    // Pane: its label, else `pane N` from the `pN` segment, else the raw pane id — never blank.
+    // Pane: its label, else Herdr's stable public allocation number, else a neutral fallback. Raw
+    // control IDs never belong in the user-facing row.
     if let Some(pane) = agent
         .pane_label
         .as_deref()
@@ -216,10 +219,10 @@ pub(crate) fn agent_destination(agent: &RosterAgent) -> String {
         .filter(|label| !label.is_empty())
     {
         parts.push(pane.to_string());
-    } else if let Some(number) = id_segment(&agent.pane_id).and_then(pane_number) {
+    } else if let Some(number) = pane_public_number(&agent.pane_id) {
         parts.push(format!("pane {number}"));
     } else {
-        parts.push(agent.pane_id.clone());
+        parts.push("pane".to_string());
     }
 
     parts.join(" · ")
@@ -432,13 +435,6 @@ fn id_segment(id: &str) -> Option<&str> {
     id.rsplit_once(':')
         .map(|(_, segment)| segment)
         .filter(|segment| !segment.is_empty())
-}
-
-/// The numeric part of a `pN` pane segment (`p1` -> `1`), or `None` if it isn't `p`+digits. Mirrors
-/// the queue's `actions::pane_number`.
-fn pane_number(segment: &str) -> Option<&str> {
-    let number = segment.strip_prefix('p')?;
-    (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())).then_some(number)
 }
 
 /// Render a snapshot as a plain-text dump for the hidden `roster` debug subcommand: a header line
@@ -677,6 +673,17 @@ mod tests {
     }
 
     #[test]
+    fn agent_destination_decodes_herdrs_public_pane_number() {
+        // Live repro: Herdr's bijective base-32 `pA` is public pane allocation 10, not a raw label.
+        let amp = RosterAgent {
+            agent: Some("amp".to_string()),
+            tab_label: Some("amp".to_string()),
+            ..agent("wT:pA", "wT", AgentStatus::Working)
+        };
+        assert_eq!(agent_destination(&amp), "amp · pane 10");
+    }
+
+    #[test]
     fn workspace_display_label_prefers_the_name_then_the_id() {
         let named = RosterAgent {
             workspace_label: Some("home".to_string()),
@@ -690,13 +697,13 @@ mod tests {
 
     #[test]
     fn agent_destination_falls_back_when_ids_do_not_parse() {
-        // No tab id and a non-`pN` pane id: the raw pane id keeps the row identifiable, never blank.
+        // Unknown future ID syntax stays visually neutral instead of leaking internal metadata.
         let a = RosterAgent {
             agent: None,
             tab_id: None,
             ..agent("weird-pane", "wX", AgentStatus::Working)
         };
-        assert_eq!(agent_destination(&a), "weird-pane");
+        assert_eq!(agent_destination(&a), "pane");
     }
 
     #[test]
