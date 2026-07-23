@@ -19,7 +19,15 @@ use ratatui::style::{Style, Stylize};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
-const AGENTS_FOOTER_HINTS: &str = "j/k move  ·  enter jump  ·  space reply  ·  q quit";
+const AGENTS_FOOTER_HINTS: &str =
+    "j/k move  ·  enter jump  ·  space reply  ·  ctrl+t pin  ·  q quit";
+
+/// The two-column prefix a roster Entry line carries **when any agent is pinned**, so pinned and
+/// unpinned rows in the same group stay left-aligned: a pinned agent shows `* `, an unpinned one two
+/// spaces. When nothing is pinned the slot is omitted entirely (the common case renders exactly as
+/// before Slice 6). A plain-ASCII marker on purpose (no emoji); easy to retune live.
+const PIN_MARKER: &str = "* ";
+const NO_PIN_MARKER: &str = "  ";
 
 /// One rendered line of the grouped roster: a blank spacer, a non-selectable workspace header, an
 /// agent's **primary** line (the destination, carrying its index into the display-order agent list —
@@ -161,12 +169,25 @@ fn draw_roster(
         None => (!agents.is_empty()).then_some(model.roster_selected.min(agents.len() - 1)),
     };
 
+    // Only reserve the pin-marker column when something is actually pinned; otherwise the roster
+    // renders exactly as it did before Slice 6 (no global indent for a feature nobody's using).
+    let any_pinned = agents.iter().any(|agent| agent.pin_rank.is_some());
+
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match row {
             Row::Spacer => ListItem::new(""),
             Row::Header(workspace) => ListItem::new(workspace.clone()).bold(),
-            Row::Entry(index) => ListItem::new(agent_destination(agents[*index])),
+            Row::Entry(index) => {
+                // Flag pinned rows with a leading marker; the fixed-width slot keeps the destination
+                // column aligned with unpinned rows within the group (Slice 6).
+                let marker = match (any_pinned, agents[*index].pin_rank.is_some()) {
+                    (false, _) => "",
+                    (true, true) => PIN_MARKER,
+                    (true, false) => NO_PIN_MARKER,
+                };
+                ListItem::new(format!("{marker}{}", agent_destination(agents[*index])))
+            }
             Row::Detail(index) => {
                 let detail = format!("  {}", agent_detail(agents[*index], now_ms));
                 if highlight_index == Some(*index) {
@@ -263,6 +284,7 @@ mod tests {
             tab_label: None,
             pane_label: None,
             last_line: None,
+            pin_rank: None,
         }
     }
 

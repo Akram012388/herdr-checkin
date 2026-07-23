@@ -28,7 +28,39 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const ROSTER_FILE_NAME: &str = "roster.json";
 const LOCK_FILE_NAME: &str = "roster.lock";
-const ROSTER_VERSION: u32 = 1;
+/// Bumped to 2 in Slice 6 (the `pins` field). A stored v1 file loads unchanged (`pins` is
+/// `#[serde(default)]`, so absent = empty) and is rewritten at version 2 on its next update — harmless.
+const ROSTER_VERSION: u32 = 2;
+
+/// A pinned agent (Slice 6 / issue #7). Keyed by **`agent_session` uuid**, never `pane_id` (pane ids
+/// are positional and reused, so a new agent in a recycled pane slot must not inherit the pin). The
+/// pins list order *is* the pin order (list index = the agent's [`RosterAgent::pin_rank`]).
+/// `pinned_at_ms` is when it was pinned; `last_seen_ms` is the last time this uuid was live in a
+/// sample — it stops advancing once the agent vanishes (the pin becomes a **tombstone**), and drives
+/// the GC that keeps the list bounded ([`gc_pins`]). If the uuid reappears (a resumed session) the
+/// pin re-applies silently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Pin {
+    pub(crate) agent_session: String,
+    pub(crate) pinned_at_ms: u64,
+    pub(crate) last_seen_ms: u64,
+}
+
+/// A tombstone (vanished-agent) pin is GC'd once it has gone unseen this long (~7 days), so a pin
+/// survives a normal close/reopen and even a machine reboot, but a long-dead session eventually lapses.
+const PIN_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+/// A hard cap on the pins list: past this, the oldest-seen tombstones are dropped first (live pins,
+/// whose `last_seen_ms` was just bumped, are the newest and always survive). Bounds `roster.json`.
+const PIN_CAP: usize = 50;
+
+/// The full in-memory `roster.json` payload the store's [`RosterStore::update`] hands to its change
+/// closure: the time-in-state [`Registry`] (Slice 5) plus the [`Pin`] list (Slice 6), so one locked
+/// read-modify-write covers both. The `version` is not exposed here — it is stamped on write.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RosterState {
+    pub(crate) registry: Registry,
+    pub(crate) pins: Vec<Pin>,
+}
 
 /// One pane's observed state in the registry, keyed by `pane_id` in [`Registry`]. `agent_session`
 /// (the stable session uuid) is `None` until the pane sampler back-fills it — the event payload that
@@ -55,10 +87,12 @@ struct PersistedRoster {
     version: u32,
     #[serde(default)]
     agents: Registry,
+    #[serde(default)]
+    pins: Vec<Pin>,
 }
 
 struct LoadedRoster {
-    registry: Registry,
+    state: RosterState,
     needs_repair: bool,
 }
 
@@ -78,7 +112,7 @@ impl RosterStore {
     /// [`crate::state::StateStore::update`], on `roster.json`'s own lock.
     pub(crate) fn update<T>(
         &self,
-        change: impl FnOnce(Registry) -> (Registry, T),
+        change: impl FnOnce(RosterState) -> (RosterState, T),
     ) -> Result<T, PluginError> {
         fs::create_dir_all(&self.state_dir).map_err(|error| {
             PluginError::new(format!(
@@ -89,8 +123,8 @@ impl RosterStore {
 
         let _lock = RosterLock::acquire(&self.state_dir.join(LOCK_FILE_NAME))?;
         let loaded = read_roster(&self.state_dir.join(ROSTER_FILE_NAME))?;
-        let previous = loaded.registry.clone();
-        let (next, result) = change(loaded.registry);
+        let previous = loaded.state.clone();
+        let (next, result) = change(loaded.state);
 
         if loaded.needs_repair || next != previous {
             write_roster(&self.state_dir.join(ROSTER_FILE_NAME), &next)?;
@@ -138,7 +172,7 @@ fn read_roster(path: &Path) -> Result<LoadedRoster, PluginError> {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(LoadedRoster {
-                registry: Registry::new(),
+                state: RosterState::default(),
                 needs_repair: false,
             });
         }
@@ -151,20 +185,23 @@ fn read_roster(path: &Path) -> Result<LoadedRoster, PluginError> {
     };
 
     match serde_json::from_str::<PersistedRoster>(&contents) {
-        Ok(state) => Ok(LoadedRoster {
-            needs_repair: state.version < ROSTER_VERSION,
-            registry: state.agents,
+        Ok(persisted) => Ok(LoadedRoster {
+            needs_repair: persisted.version < ROSTER_VERSION,
+            state: RosterState {
+                registry: persisted.agents,
+                pins: persisted.pins,
+            },
         }),
-        // A prunable cache: a corrupt file degrades to an empty registry (honest `~` timers), never
-        // an error that could stall the event/queue path that best-effort-calls us.
+        // A prunable cache: a corrupt file degrades to an empty state (honest `~` timers, no pins),
+        // never an error that could stall the event/queue path that best-effort-calls us.
         Err(_) => Ok(LoadedRoster {
-            registry: Registry::new(),
+            state: RosterState::default(),
             needs_repair: true,
         }),
     }
 }
 
-fn write_roster(path: &Path, registry: &Registry) -> Result<(), PluginError> {
+fn write_roster(path: &Path, state: &RosterState) -> Result<(), PluginError> {
     let parent = path.parent().ok_or_else(|| {
         PluginError::new(format!(
             "roster path has no parent directory: {}",
@@ -193,12 +230,13 @@ fn write_roster(path: &Path, registry: &Registry) -> Result<(), PluginError> {
                 temp_path.display()
             ))
         })?;
-    let state = PersistedRoster {
+    let persisted = PersistedRoster {
         version: ROSTER_VERSION,
-        agents: registry.clone(),
+        agents: state.registry.clone(),
+        pins: state.pins.clone(),
     };
     // Any failure after the temp file exists must not leave it behind as litter in the state dir.
-    serde_json::to_writer_pretty(&mut temp_file, &state).map_err(|error| {
+    serde_json::to_writer_pretty(&mut temp_file, &persisted).map_err(|error| {
         let _ = fs::remove_file(&temp_path);
         PluginError::new(format!(
             "failed to serialize roster {}: {error}",
@@ -237,8 +275,16 @@ fn write_roster(path: &Path, registry: &Registry) -> Result<(), PluginError> {
 /// pass), so this is gated to the test build to keep the release binary warning-clean.
 #[cfg(test)]
 pub(crate) fn load_registry(state_dir: &Path) -> Registry {
+    load_roster_state(state_dir).registry
+}
+
+/// Read the whole persisted state (registry + pins) without the lock, degrading to an empty state on
+/// any error (invariant #7). Test-only for the same reason as [`load_registry`] — production reads
+/// happen inside the locked [`reconcile_roster`] pass.
+#[cfg(test)]
+pub(crate) fn load_roster_state(state_dir: &Path) -> RosterState {
     read_roster(&state_dir.join(ROSTER_FILE_NAME))
-        .map(|loaded| loaded.registry)
+        .map(|loaded| loaded.state)
         .unwrap_or_default()
 }
 
@@ -323,6 +369,74 @@ pub(crate) fn reconcile_pane(
     Some(entry.status_since_ms)
 }
 
+// --- pure pin transitions (Slice 6) ----------------------------------------
+
+/// Toggle the pin for `agent_session`: remove it if present (unpin), else append it (pin). Appending
+/// keeps list order = pin order, so a freshly pinned agent lands at the bottom of the existing pins
+/// (highest rank) and floats above every unpinned row. Returns the new pinned state (`true` = now
+/// pinned). A session-less agent never reaches here (the caller guards on a real uuid).
+pub(crate) fn toggle_pin(pins: &mut Vec<Pin>, agent_session: &str, now_ms: u64) -> bool {
+    match pins.iter().position(|p| p.agent_session == agent_session) {
+        Some(index) => {
+            pins.remove(index);
+            false
+        }
+        None => {
+            pins.push(Pin {
+                agent_session: agent_session.to_string(),
+                pinned_at_ms: now_ms,
+                last_seen_ms: now_ms,
+            });
+            true
+        }
+    }
+}
+
+/// This session's rank in the pins list (its index), or `None` when it is not pinned. The list order
+/// is the pin order, so the index is exactly [`RosterAgent::pin_rank`].
+pub(crate) fn pin_rank(pins: &[Pin], agent_session: &str) -> Option<usize> {
+    pins.iter().position(|p| p.agent_session == agent_session)
+}
+
+/// Reconcile the pins list against a freshly sampled roster: refresh `last_seen_ms` for every pinned
+/// session that is currently live (so a present pin is never mistaken for a tombstone), then
+/// [`gc_pins`]. A pin whose session is absent keeps its stale `last_seen_ms` — it is a tombstone,
+/// retained so the pin re-applies if the session resumes, until GC lapses it.
+pub(crate) fn reconcile_pins(pins: &mut Vec<Pin>, live_sessions: &[Option<&str>], now_ms: u64) {
+    for session in live_sessions.iter().flatten() {
+        if let Some(pin) = pins.iter_mut().find(|p| p.agent_session == *session) {
+            pin.last_seen_ms = now_ms;
+        }
+    }
+    gc_pins(pins, now_ms);
+}
+
+/// Bound the pins list: drop tombstones unseen for longer than [`PIN_TTL_MS`], then, if still over
+/// [`PIN_CAP`], drop the oldest-seen pins until it fits. A live pin's `last_seen_ms` is `now` (just
+/// bumped by [`reconcile_pins`]), so it is always the newest and never GC'd — only stale tombstones
+/// are shed. Preserves pin order among the survivors (a stable partition, not a re-sort).
+fn gc_pins(pins: &mut Vec<Pin>, now_ms: u64) {
+    pins.retain(|pin| now_ms.saturating_sub(pin.last_seen_ms) <= PIN_TTL_MS);
+    if pins.len() <= PIN_CAP {
+        return;
+    }
+    // Over cap: find the `last_seen_ms` cutoff of the CAP newest pins and keep only those at or above
+    // it, without disturbing the list (pin) order of the survivors.
+    let mut seens: Vec<u64> = pins.iter().map(|p| p.last_seen_ms).collect();
+    seens.sort_unstable();
+    let cutoff = seens[pins.len() - PIN_CAP];
+    let mut kept = 0usize;
+    pins.retain(|pin| {
+        // Keep pins newer than the cutoff outright; for pins exactly at the cutoff (ties), keep only
+        // as many as the cap allows so the total lands at PIN_CAP, dropping the later-in-list ties.
+        let keep = pin.last_seen_ms > cutoff || (pin.last_seen_ms == cutoff && kept < PIN_CAP);
+        if keep {
+            kept += 1;
+        }
+        keep
+    });
+}
+
 // --- runtime bridges (best-effort throughout — invariant #7) ---------------
 
 /// Stamp the roster registry from a `status-changed` event, best-effort. Called from the dispatch
@@ -340,9 +454,14 @@ pub(crate) fn stamp_status_changed(runtime: &RuntimeEnv) {
         return;
     };
     let now_ms = runtime.now_ms;
-    let _ = RosterStore::new(&runtime.state_dir).update(|mut registry| {
-        stamp_status(&mut registry, &event.pane_id, &event.agent_status, now_ms);
-        (registry, ())
+    let _ = RosterStore::new(&runtime.state_dir).update(|mut state| {
+        stamp_status(
+            &mut state.registry,
+            &event.pane_id,
+            &event.agent_status,
+            now_ms,
+        );
+        (state, ())
     });
 }
 
@@ -353,11 +472,11 @@ pub(crate) fn seed_registry<'a>(
     panes: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) {
     let now_ms = runtime.now_ms;
-    let _ = RosterStore::new(&runtime.state_dir).update(|mut registry| {
+    let _ = RosterStore::new(&runtime.state_dir).update(|mut state| {
         for (pane_id, status) in panes {
-            seed_status(&mut registry, pane_id, status, now_ms);
+            seed_status(&mut state.registry, pane_id, status, now_ms);
         }
-        (registry, ())
+        (state, ())
     });
 }
 
@@ -367,12 +486,12 @@ pub(crate) fn seed_registry<'a>(
 /// and matching). Best-effort: a `roster.json` failure leaves every `status_since_ms` at `None`, so
 /// the rows honestly show `~` rather than blanking (invariant #7).
 pub(crate) fn reconcile_roster(state_dir: &Path, agents: &mut [RosterAgent], now_ms: u64) {
-    let result = RosterStore::new(state_dir).update(|mut registry| {
+    let result = RosterStore::new(state_dir).update(|mut state| {
         let sinces: Vec<Option<u64>> = agents
             .iter()
             .map(|agent| {
                 reconcile_pane(
-                    &mut registry,
+                    &mut state.registry,
                     &agent.pane_id,
                     agent.agent_session.as_deref(),
                     agent.agent_status.as_str(),
@@ -380,13 +499,41 @@ pub(crate) fn reconcile_roster(state_dir: &Path, agents: &mut [RosterAgent], now
                 )
             })
             .collect();
-        (registry, sinces)
+        // Pins (Slice 6): bump last_seen for every live pinned session (so a present pin never
+        // tombstones), GC lapsed/overflowing tombstones, then read each agent's rank from the list.
+        let live_sessions: Vec<Option<&str>> =
+            agents.iter().map(|a| a.agent_session.as_deref()).collect();
+        reconcile_pins(&mut state.pins, &live_sessions, now_ms);
+        let ranks: Vec<Option<usize>> = live_sessions
+            .iter()
+            .map(|session| session.and_then(|s| pin_rank(&state.pins, s)))
+            .collect();
+        (state, (sinces, ranks))
     });
-    if let Ok(sinces) = result {
-        for (agent, since) in agents.iter_mut().zip(sinces) {
+    if let Ok((sinces, ranks)) = result {
+        for ((agent, since), rank) in agents.iter_mut().zip(sinces).zip(ranks) {
             agent.status_since_ms = since;
+            agent.pin_rank = rank;
         }
     }
+}
+
+/// Toggle a pin for `agent_session` and persist it, returning the resulting pins list (so the caller
+/// can re-derive every visible agent's [`RosterAgent::pin_rank`] for instant feedback without waiting
+/// for the next sample). Best-effort: `None` on any `roster.json` failure, and the caller then leaves
+/// the on-screen roster untouched — the next reconcile restores from disk (invariant #7).
+pub(crate) fn toggle_pin_persist(
+    state_dir: &Path,
+    agent_session: &str,
+    now_ms: u64,
+) -> Option<Vec<Pin>> {
+    RosterStore::new(state_dir)
+        .update(|mut state| {
+            toggle_pin(&mut state.pins, agent_session, now_ms);
+            let pins = state.pins.clone();
+            (state, pins)
+        })
+        .ok()
 }
 
 #[cfg(test)]
@@ -506,9 +653,9 @@ mod tests {
         let dir = temp_state_dir("roster-store");
         let store = RosterStore::new(&dir);
         store
-            .update(|mut registry| {
-                stamp_status(&mut registry, "w1:p1", "blocked", 1_000);
-                (registry, ())
+            .update(|mut state| {
+                stamp_status(&mut state.registry, "w1:p1", "blocked", 1_000);
+                (state, ())
             })
             .expect("first write should succeed");
         let loaded = load_registry(&dir);
@@ -524,9 +671,9 @@ mod tests {
             "junk reads as an empty registry"
         );
         store
-            .update(|mut registry| {
-                stamp_status(&mut registry, "w2:p1", "done", 2_000);
-                (registry, ())
+            .update(|mut state| {
+                stamp_status(&mut state.registry, "w2:p1", "done", 2_000);
+                (state, ())
             })
             .expect("write over junk should succeed");
         let loaded = load_registry(&dir);
@@ -540,9 +687,9 @@ mod tests {
         let dir = temp_state_dir("roster-reconcile");
         // Seed one pane via a transition stamp; leave a second pane unknown to the registry.
         RosterStore::new(&dir)
-            .update(|mut registry| {
-                stamp_status(&mut registry, "w1:p1", "blocked", 1_000);
-                (registry, ())
+            .update(|mut state| {
+                stamp_status(&mut state.registry, "w1:p1", "blocked", 1_000);
+                (state, ())
             })
             .expect("seed write");
 
@@ -601,9 +748,9 @@ mod tests {
         // registry reads back empty, and reconcile then renders honest `~` (None) instead of a timer.
         let dir = temp_state_dir("roster-invariant-7");
         RosterStore::new(&dir)
-            .update(|mut registry| {
-                stamp_status(&mut registry, "w1:p1", "blocked", 1_000);
-                (registry, ())
+            .update(|mut state| {
+                stamp_status(&mut state.registry, "w1:p1", "blocked", 1_000);
+                (state, ())
             })
             .expect("seed the registry");
         fs::remove_file(dir.join(ROSTER_FILE_NAME)).expect("delete roster.json");
@@ -635,6 +782,160 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    // --- pins (Slice 6 / issue #7) -----------------------------------------
+
+    #[test]
+    fn toggle_pin_adds_then_removes_keyed_by_session() {
+        let mut pins = Vec::new();
+        assert!(toggle_pin(&mut pins, "uuid-A", 1_000), "first toggle pins");
+        assert_eq!(pin_rank(&pins, "uuid-A"), Some(0));
+        assert_eq!(pins[0].pinned_at_ms, 1_000);
+        // A second pin appends (list order = pin order), so the newer pin ranks below the first.
+        assert!(toggle_pin(&mut pins, "uuid-B", 2_000));
+        assert_eq!(pin_rank(&pins, "uuid-B"), Some(1));
+        // Toggling an existing pin unpins it and the survivor's rank compacts back to the front.
+        assert!(!toggle_pin(&mut pins, "uuid-A", 3_000), "re-toggle unpins");
+        assert_eq!(pin_rank(&pins, "uuid-A"), None);
+        assert_eq!(pin_rank(&pins, "uuid-B"), Some(0));
+    }
+
+    #[test]
+    fn reconcile_pins_bumps_last_seen_for_live_pins_only() {
+        // A pinned session that is live gets its last_seen refreshed (never tombstoning); a pinned
+        // session absent from the sample keeps its stale last_seen (a tombstone, retained).
+        let mut pins = vec![
+            Pin {
+                agent_session: "live".to_string(),
+                pinned_at_ms: 1_000,
+                last_seen_ms: 1_000,
+            },
+            Pin {
+                agent_session: "gone".to_string(),
+                pinned_at_ms: 1_000,
+                last_seen_ms: 1_000,
+            },
+        ];
+        reconcile_pins(&mut pins, &[Some("live"), None], 5_000);
+        assert_eq!(pins[0].last_seen_ms, 5_000, "the live pin advances");
+        assert_eq!(pins[1].last_seen_ms, 1_000, "the vanished pin tombstones");
+    }
+
+    #[test]
+    fn gc_pins_drops_tombstones_past_the_ttl() {
+        let mut pins = vec![
+            Pin {
+                agent_session: "fresh".to_string(),
+                pinned_at_ms: 0,
+                last_seen_ms: 0,
+            },
+            Pin {
+                agent_session: "ancient".to_string(),
+                pinned_at_ms: 0,
+                last_seen_ms: 0,
+            },
+        ];
+        // "fresh" was seen just now; "ancient" lapsed past the 7-day TTL and is GC'd.
+        reconcile_pins(&mut pins, &[Some("fresh")], PIN_TTL_MS + 10);
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].agent_session, "fresh");
+    }
+
+    #[test]
+    fn gc_pins_caps_the_list_dropping_the_oldest_seen() {
+        // Over the cap, the oldest-seen tombstones are shed until PIN_CAP remain; a live pin (seen
+        // now) is always among the newest and survives.
+        let mut pins: Vec<Pin> = (0..PIN_CAP as u64 + 5)
+            .map(|i| Pin {
+                agent_session: format!("uuid-{i}"),
+                pinned_at_ms: 0,
+                last_seen_ms: i, // strictly increasing, so the lowest ids are the oldest-seen
+            })
+            .collect();
+        gc_pins(&mut pins, 1_000_000);
+        assert_eq!(pins.len(), PIN_CAP, "the list is bounded to the cap");
+        // The five oldest-seen (uuid-0..uuid-4) were dropped; the rest survive in pin order.
+        assert_eq!(pins[0].agent_session, "uuid-5");
+        assert!(pins.iter().all(|p| p.agent_session != "uuid-0"));
+    }
+
+    #[test]
+    fn reconcile_roster_fills_pin_rank_and_is_uuid_keyed_not_pane_keyed() {
+        // Acceptance: pinning is keyed by session uuid, so a DIFFERENT agent respawned in the same
+        // positional pane slot does NOT inherit the pin.
+        let dir = temp_state_dir("roster-pin-uuid-keyed");
+        // Pin uuid-A (the agent currently in w1:p1).
+        toggle_pin_persist(&dir, "uuid-A", 1_000).expect("pin write");
+
+        // First reconcile: uuid-A is live in w1:p1 -> it carries pin_rank 0.
+        let mut agents = vec![sample_agent("w1:p1", AgentStatus::Blocked, Some("uuid-A"))];
+        reconcile_roster(&dir, &mut agents, 2_000);
+        assert_eq!(agents[0].pin_rank, Some(0), "the pinned agent floats");
+
+        // Kill uuid-A, spawn uuid-B in the SAME pane slot w1:p1. The pin must not misapply.
+        let mut reused = vec![sample_agent("w1:p1", AgentStatus::Working, Some("uuid-B"))];
+        reconcile_roster(&dir, &mut reused, 3_000);
+        assert_eq!(
+            reused[0].pin_rank, None,
+            "a new session in a reused pane slot never inherits the old pin (uuid-keyed)"
+        );
+        // The pin for uuid-A survives as a tombstone, ready to re-apply if the session resumes.
+        assert_eq!(pin_rank(&load_roster_state(&dir).pins, "uuid-A"), Some(0));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_pin_survives_a_store_reopen() {
+        // Acceptance: pins persist across popup reopen (a fresh RosterStore reading roster.json).
+        let dir = temp_state_dir("roster-pin-persist");
+        let pins = toggle_pin_persist(&dir, "uuid-A", 1_000).expect("pin write");
+        assert_eq!(pins.len(), 1);
+        // A brand-new store instance (as a reopened popup would build) still sees the pin on disk.
+        let reopened = load_roster_state(&dir);
+        assert_eq!(pin_rank(&reopened.pins, "uuid-A"), Some(0));
+        // And toggling again through a fresh store unpins it, persisted.
+        toggle_pin_persist(&dir, "uuid-A", 2_000).expect("unpin write");
+        assert!(load_roster_state(&dir).pins.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn invariant_7_deleting_roster_json_only_degrades_pins() {
+        // roster.json is a prunable observation cache: deleting it loses pins (a nicety) but never a
+        // ping, and reconcile then simply reports every row unpinned.
+        let dir = temp_state_dir("roster-pin-invariant-7");
+        toggle_pin_persist(&dir, "uuid-A", 1_000).expect("pin write");
+        fs::remove_file(dir.join(ROSTER_FILE_NAME)).expect("delete roster.json");
+        assert!(load_roster_state(&dir).pins.is_empty(), "the pin is gone");
+        let mut agents = vec![sample_agent("w1:p1", AgentStatus::Blocked, Some("uuid-A"))];
+        reconcile_roster(&dir, &mut agents, 5_000);
+        assert_eq!(
+            agents[0].pin_rank, None,
+            "with the file gone the row is simply unpinned, never a crash"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn version_bump_preserves_a_v1_registry_and_adds_empty_pins() {
+        // A stored v1 roster.json (registry only, no pins field) loads unchanged and gains an empty
+        // pins list — old files keep working across the schema bump.
+        let dir = temp_state_dir("roster-v1-compat");
+        fs::create_dir_all(&dir).expect("mkdir");
+        fs::write(
+            dir.join(ROSTER_FILE_NAME),
+            r#"{"version":1,"agents":{"w1:p1":{"status":"blocked","status_since_ms":1000,"first_seen_ms":1000,"last_seen_ms":1000}}}"#,
+        )
+        .expect("write a v1 file");
+        let state = load_roster_state(&dir);
+        assert_eq!(
+            state.registry.get("w1:p1").map(|e| e.status.as_str()),
+            Some("blocked"),
+            "the v1 registry survives"
+        );
+        assert!(state.pins.is_empty(), "pins default to empty for a v1 file");
+        let _ = fs::remove_dir_all(dir);
+    }
+
     fn sample_agent(pane_id: &str, status: AgentStatus, session: Option<&str>) -> RosterAgent {
         RosterAgent {
             pane_id: pane_id.to_string(),
@@ -651,6 +952,7 @@ mod tests {
             tab_label: None,
             pane_label: None,
             last_line: None,
+            pin_rank: None,
         }
     }
 }
