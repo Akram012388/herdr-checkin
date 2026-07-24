@@ -75,7 +75,7 @@ The popup is a session-level singleton, so there's no open/focus/close toggle to
 `open-pane` opens it, and it dismisses itself on `q`/`Esc` (or on a successful `Enter` jump).
 
 The popup consumes Herdr's resolved palette when `HERDR_PLUGIN_PANE_THEME_JSON` is available. The
-current producing build is the `0.7.5-akram.1` downstream candidate. Stock Herdr 0.7.5 does not
+producing builds are the `0.7.5-akram.*` downstream candidates. Stock Herdr 0.7.5 does not
 provide that snapshot, but remains supported: Check-in opens with its established terminal-native
 styling. A present but malformed or unsupported snapshot fails with an actionable error before raw
 terminal mode begins.
@@ -83,8 +83,8 @@ terminal mode begins.
 ## Install
 
 Core functionality requires **Herdr >= 0.7.5** and a local Rust toolchain (the manifest builds from
-source with Cargo). Full theme inheritance currently requires the `0.7.5-akram.1` downstream
-candidate; the minimum remains 0.7.5 because the legacy styling fallback is intentionally supported.
+source with Cargo). Full theme inheritance currently requires a `0.7.5-akram.*` downstream
+build; the minimum remains 0.7.5 because the legacy styling fallback is intentionally supported.
 
 ```sh
 herdr plugin install Akram012388/herdr-checkin

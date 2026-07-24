@@ -2,8 +2,8 @@ id = "Akram012388.checkin"
 name = "Check-in"
 version = "0.4.0"
 # Core functionality and the terminal-native fallback support stock Herdr 0.7.5. Theme inheritance
-# is capability-gated by HERDR_PLUGIN_PANE_THEME_JSON; its current producing build is the
-# 0.7.5-akram.1 downstream candidate.
+# is capability-gated by HERDR_PLUGIN_PANE_THEME_JSON; its producing builds are the
+# 0.7.5-akram.* downstream candidates.
 min_herdr_version = "0.7.5"
 description = "Durable attention queue for agent panes: queue agents that go blocked or done, then jump to the oldest waiter on demand."
 platforms = ["linux", "macos"]

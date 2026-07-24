@@ -55,9 +55,10 @@ Checkout: `../../herdr`
   - one upstream-ready commit over `upstream/master`
   - upstream [discussion #1796](https://github.com/ogulcancelik/herdr/discussions/1796) is posted
     and awaiting maintainer direction; no upstream issue or PR exists
-- `akram` at `23147f9`, rebased onto the latest `upstream/master` (`c0fb777`, 10 new upstream
-  commits); local-only until the next validated wrapper run pushes it (`origin/akram` still holds
-  the pre-rebase stack by design: the wrapper publishes only after the full suite passes)
+- `akram` at `23147f9`, rebased onto the latest `upstream/master` (`c0fb777`), fully validated by
+  the wrapper on 2026-07-24 (complete serialized suite green), pushed and synced with
+  `origin/akram`; the built candidate `0.7.5-akram.20260724T1000` is installed and the live
+  server was handed off to it (protocol 18, all panes preserved)
   - the wrapper now supports release cadence: `--release` rebases onto the newest upstream
     release tag (refusing when the tag is already contained, which would rewind the base), and
     every mode prints a release report comparing the newest tag against the stack and installed
@@ -96,11 +97,12 @@ Checkout: `../../herdr`
     plugin-pane theme contract (raw 256-slot resolved RGB via terminal queries vs semantic
     launch-time env snapshot); no overlap to reconcile, keep #1796 as posted and cite #1759 as
     adjacent prior art if the maintainer engages. #1796 and #1733 still have zero replies
-  - local release candidate reports `herdr 0.7.5-akram.1`
-  - `0.7.5-akram.1` is installed at `~/.local/bin/herdr`; client and live-handoff server both run
-    protocol 18
-  - the pre-modal downstream binary and official `0.7.5` are backed up under
-    `~/.local/state/herdr-akram/backups/`
+  - local release candidate reports `herdr 0.7.5-akram.20260724T1000` (date-based build IDs are
+    now stamped per sync)
+  - `0.7.5-akram.20260724T1000` is installed at `~/.local/bin/herdr`; client and live-handoff
+    server both run protocol 18
+  - the prior `0.7.5-akram.1` builds and official `0.7.5` are backed up under
+    `~/.local/state/herdr-akram/backups/`; the validation marker matches the pushed head
 
 The `akram` branch changes:
 
