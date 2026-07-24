@@ -55,7 +55,9 @@ Checkout: `../../herdr`
   - one upstream-ready commit over `upstream/master`
   - upstream [discussion #1796](https://github.com/ogulcancelik/herdr/discussions/1796) is posted
     and awaiting maintainer direction; no upstream issue or PR exists
-- `akram` at `bb47c40`
+- `akram` at `9a56a3d`, rebased onto the latest `upstream/master` (`c0fb777`, 10 new upstream
+  commits); local-only until the next validated wrapper run pushes it (`origin/akram` still holds
+  the pre-rebase stack by design: the wrapper publishes only after the full suite passes)
   - contains the theme work, full-frame popup presentation, downstream update/install/backup/rollback
     management, and two separately reviewable stream/API test fixes
   - now also carries the smart update wrapper `scripts/akram-update.sh` (aliased as
@@ -67,11 +69,19 @@ Checkout: `../../herdr`
     install: newest `HERDR_AKRAM_KEEP_BACKUPS` (default 5) downstream backups and
     `refs/akram-backups/` refs are kept; official baselines and the active rollback target are
     never pruned
-  - clean, pushed, and synced with `origin/akram`
-  - as of 2026-07-24, `upstream/master` is 10 commits ahead of the last sync (theme branch still
-    rebases cleanly), and an upstream branch `akbash/1752-forward-host-palette` appeared —
-    possibly maintainer work relevant to the pane-theme discussion; check it when monitoring
-    #1796
+  - validation runs as a stock build: the first terminal-driven update run failed 24 tests
+    because the wrapper's compile-time `HERDR_BUILD_CHANNEL=akram` leaked into `cargo test`
+    (turning the test binary into a downstream build whose own update rejection broke upstream
+    update tests, poisoning `test_config_env_lock` for 20 more) and two update tests assert a
+    noninteractive stdin. The sync script now scrubs the identity from clippy/test and feeds the
+    suite `/dev/null` stdin; the wrapper records the exact validated commit
+    (`last-validated-commit` in the state dir) and never fast-paths or pushes an unvalidated head
+  - upstream branch `akbash/1752-forward-host-palette` investigated (2026-07-24): it is the
+    maintainer's own automation (`akbash-bot`) fixing issue #1752 via merged PR #1759 — live OSC
+    4/10/11 host-palette forwarding into every pane's Ghostty core. Orthogonal to the #1796
+    plugin-pane theme contract (raw 256-slot resolved RGB via terminal queries vs semantic
+    launch-time env snapshot); no overlap to reconcile, keep #1796 as posted and cite #1759 as
+    adjacent prior art if the maintainer engages. #1796 and #1733 still have zero replies
   - local release candidate reports `herdr 0.7.5-akram.1`
   - `0.7.5-akram.1` is installed at `~/.local/bin/herdr`; client and live-handoff server both run
     protocol 18
