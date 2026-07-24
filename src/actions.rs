@@ -144,7 +144,9 @@ pub(crate) fn startup(runtime: &RuntimeEnv, herdr: &dyn Herdr) -> Result<(), Plu
     // Seed the roster registry additively (invariant #4) so time-in-state survives a herdr restart —
     // best-effort and *after* the queue re-seed, so a `roster.json` problem can never abort re-seeding
     // the durable queue (invariant #7). Every agent pane is seeded, not just waiters: the Agents view
-    // times all agents. A surviving entry keeps its clock; a missing one starts timing from now.
+    // times all agents. A surviving entry keeps its clock; a missing one starts timing from now. The
+    // same locked update sweeps entries for departed panes — the registry's only removal path, so
+    // `roster.json` stays bounded (see `prune_departed`).
     crate::roster_state::seed_registry(
         runtime,
         panes

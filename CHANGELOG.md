@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`roster.json` no longer grows without bound.** The time-in-state registry had no removal path:
+  `pane.closed` evicts the durable queue but never touched the registry, so closed-pane entries
+  accumulated forever and every event stamp paid a full-file parse and rewrite that scaled with
+  them. The `startup` seed's existing locked update now also sweeps entries for departed panes —
+  panes absent from the live `pane list` whose last observation predates the startup snapshot —
+  capping the registry at the live roster plus panes closed since the last server start. Live
+  entries are never touched (seeding stays additive and idempotent), entries recorded at or after
+  the snapshot are kept as too new to judge (the same guard `next`/`peek` use), and the sweep
+  removes only observation-cache data, never a queued ping.
+
 ## [0.4.0] - 2026-07-22
 
 The triage-popup release: the status pane becomes a two-tab attention console you can **reply into**,

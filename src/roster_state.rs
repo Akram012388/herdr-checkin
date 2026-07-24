@@ -21,7 +21,7 @@ use crate::state::{current_unix_ms, PluginError};
 use crate::RuntimeEnv;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -288,6 +288,28 @@ pub(crate) fn seed_status(registry: &mut Registry, pane_id: &str, status: &str, 
         });
 }
 
+/// Drop registry entries for panes that have departed: not in `live_pane_ids` and last recorded
+/// strictly before `snapshot_ms`. Without this the registry would grow monotonically — `pane.closed`
+/// evicts the queue but nothing removed closed panes here, and every stamp pays a full-file
+/// parse+serialize that scales with entry count. Run by `startup`'s seed (one locked write per
+/// server start; the steady-state event/sampler paths never pay for it).
+///
+/// The `snapshot_ms` guard mirrors `next`/`peek`'s prune discipline: the seed's `pane list` is
+/// fetched after `snapshot_ms` (the startup process's own clock, captured at spawn), so an entry
+/// stamped at or after it — a pane a concurrent event observed while `startup` raced the live event
+/// loop — is too new to judge and is kept. A mistaken prune would only cost a timer (the row shows
+/// `~` until the next transition re-stamps it), never a ping (invariant #7), but the guard keeps
+/// even that from happening in the race window.
+pub(crate) fn prune_departed(
+    registry: &mut Registry,
+    live_pane_ids: &HashSet<&str>,
+    snapshot_ms: u64,
+) {
+    registry.retain(|pane_id, entry| {
+        live_pane_ids.contains(pane_id.as_str()) || entry.last_seen_ms >= snapshot_ms
+    });
+}
+
 /// The pane sampler's per-pane reconcile: back-fill the live session uuid and detect a reused pane
 /// slot, returning the `status_since_ms` the row should trust (or `None` — render `~` — when the
 /// pane has no registry entry). This never fabricates a transition time from a status difference
@@ -347,15 +369,24 @@ pub(crate) fn stamp_status_changed(runtime: &RuntimeEnv) {
 
 /// Seed the registry from `startup`'s `pane list`, additively (invariant #4), best-effort. Runs
 /// after the queue re-seed so a `roster.json` problem can never abort re-seeding the durable queue.
+///
+/// The same locked update also sweeps departed panes via [`prune_departed`] — the registry's only
+/// removal path, so `roster.json` stays bounded by the live roster plus whatever closed since the
+/// last server start. Seeding stays additive (no surviving live entry is ever touched); the sweep
+/// removes only observation-cache entries for panes that are gone (invariant #7), and running twice
+/// is still a no-op.
 pub(crate) fn seed_registry<'a>(
     runtime: &RuntimeEnv,
     panes: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) {
     let now_ms = runtime.now_ms;
+    let panes: Vec<(&str, &str)> = panes.into_iter().collect();
     let _ = RosterStore::new(&runtime.state_dir).update(|mut registry| {
-        for (pane_id, status) in panes {
+        for &(pane_id, status) in &panes {
             seed_status(&mut registry, pane_id, status, now_ms);
         }
+        let live: HashSet<&str> = panes.iter().map(|&(pane_id, _)| pane_id).collect();
+        prune_departed(&mut registry, &live, now_ms);
         (registry, ())
     });
 }
@@ -445,6 +476,53 @@ mod tests {
             "seed never overwrites a surviving entry"
         );
         assert_eq!(e.status_since_ms, 1_000, "and never resets its clock");
+    }
+
+    #[test]
+    fn prune_departed_drops_only_stale_departed_entries() {
+        let mut registry = Registry::new();
+        stamp_status(&mut registry, "w1:p1", "blocked", 1_000); // live, however old
+        stamp_status(&mut registry, "w2:p1", "done", 2_000); // departed, recorded before the snapshot
+        stamp_status(&mut registry, "w3:p1", "working", 9_500); // departed but too new to judge
+        let live: HashSet<&str> = ["w1:p1"].into_iter().collect();
+
+        prune_departed(&mut registry, &live, 9_000);
+
+        assert_eq!(
+            entry(&registry, "w1:p1").status_since_ms,
+            1_000,
+            "a live pane is kept with its timer untouched, however old"
+        );
+        assert!(
+            !registry.contains_key("w2:p1"),
+            "a departed pane recorded before the snapshot is swept"
+        );
+        assert!(
+            registry.contains_key("w3:p1"),
+            "an entry stamped at or after the snapshot is too new to judge (a concurrent event racing startup)"
+        );
+    }
+
+    #[test]
+    fn seed_registry_sweeps_departed_panes_in_the_same_update() {
+        // The growth cap: a pane that closed while the server was down (or before this restart) has
+        // no eviction path but startup's sweep — seeding at a later clock removes it, while the
+        // still-live pane keeps its surviving entry untouched (invariant #4 for live panes).
+        let dir = temp_state_dir("roster-seed-sweep");
+        let rt_a = crate::test_support::runtime(dir.clone(), 1_000);
+        seed_registry(&rt_a, [("w1:p1", "blocked"), ("w2:p1", "idle")]);
+
+        let rt_b = crate::test_support::runtime(dir.clone(), 9_000);
+        seed_registry(&rt_b, [("w1:p1", "blocked")]);
+
+        let registry = load_registry(&dir);
+        assert_eq!(registry.len(), 1, "the departed pane was swept");
+        assert_eq!(
+            entry(&registry, "w1:p1").status_since_ms,
+            1_000,
+            "the surviving live entry keeps its clock"
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

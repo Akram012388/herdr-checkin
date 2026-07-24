@@ -14,11 +14,16 @@ Start here for the current state of Check-in and its Herdr pane-theme dependency
 - Validation on the current tree:
   - `cargo fmt --check` — pass
   - `cargo clippy --all-targets -- -D warnings` — pass
-  - `cargo test` — pass: 177 library tests + 6 CLI tests
+  - `cargo test` — pass: 179 library tests + 6 CLI tests
   - `cargo build --release` — pass
 
 Latest Check-in changes:
 
+- the `roster.json` registry now has a removal path: `startup`'s seed sweeps entries for departed
+  panes (not in the live `pane list`, last observed before the startup snapshot) inside its existing
+  locked update, so the registry stays bounded instead of accumulating closed panes forever. Live
+  entries are untouched, too-new-to-judge entries are kept (the `next`/`peek` guard discipline), and
+  the steady-state event/sampler paths pay nothing new
 - compatibility copy now distinguishes stock Herdr 0.7.5 from the theme-producing
   `0.7.5-akram.1` downstream candidate
 - README now documents both Queue and Agents tabs
@@ -161,7 +166,9 @@ actual producing candidate explicitly.
 4. Startup re-seeding is additive and idempotent.
 5. Tab switching never touches popup lifecycle.
 6. `queue.rs` and `roster.rs` stay independent of the Herdr trait.
-7. `roster.json` is a prunable observation cache; deleting it may lose timers, never a ping.
+7. `roster.json` is a prunable observation cache; deleting it may lose timers, never a ping. Its
+   only removal path is `startup`'s departed-pane sweep, which never touches live or
+   too-new-to-judge entries.
 8. CLI calls for the live roster run on the sampler thread, never the render tick.
 
 ## Next actions
