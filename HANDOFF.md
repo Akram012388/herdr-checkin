@@ -55,9 +55,17 @@ Checkout: `../../herdr`
   - one upstream-ready commit over `upstream/master`
   - upstream [discussion #1796](https://github.com/ogulcancelik/herdr/discussions/1796) is posted
     and awaiting maintainer direction; no upstream issue or PR exists
-- `akram` at `9a56a3d`, rebased onto the latest `upstream/master` (`c0fb777`, 10 new upstream
+- `akram` at `6258633`, rebased onto the latest `upstream/master` (`c0fb777`, 10 new upstream
   commits); local-only until the next validated wrapper run pushes it (`origin/akram` still holds
   the pre-rebase stack by design: the wrapper publishes only after the full suite passes)
+  - carries a downstream test patch: upstream `e608a75` fakes an agent with `exec /bin/sleep`,
+    but current macOS strips the environment block from `sysctl(KERN_PROCARGS2)` for Apple
+    platform binaries, so the `HERDR_AGENT` hint is invisible and
+    `live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session` fails deterministically on
+    pure `upstream/master` too (verified in an isolated worktree; non-platform binaries keep env
+    readable, 5172 vs 168 procargs bytes). The patch execs Homebrew python3 instead; all 20
+    live-handoff tests pass. Production detection is unaffected (real agents are non-platform
+    binaries). Reporting this upstream is Akram's call and subject to the usual gates
   - contains the theme work, full-frame popup presentation, downstream update/install/backup/rollback
     management, and two separately reviewable stream/API test fixes
   - now also carries the smart update wrapper `scripts/akram-update.sh` (aliased as
