@@ -55,10 +55,23 @@ Checkout: `../../herdr`
   - one upstream-ready commit over `upstream/master`
   - upstream [discussion #1796](https://github.com/ogulcancelik/herdr/discussions/1796) is posted
     and awaiting maintainer direction; no upstream issue or PR exists
-- `akram` at `31afdd0`
+- `akram` at `bb47c40`
   - contains the theme work, full-frame popup presentation, downstream update/install/backup/rollback
     management, and two separately reviewable stream/API test fixes
+  - now also carries the smart update wrapper `scripts/akram-update.sh` (aliased as
+    `herdr-akram-update` in `~/.zshrc`): refuses to run inside a Herdr pane, fast-paths when
+    `akram` already contains `upstream/master`, stamps date-based `HERDR_BUILD_ID` values per
+    sync, pushes the rebased stack with `--force-with-lease` on success, and reports
+    `feature/plugin-pane-theme` drift via a `git merge-tree` test without rebasing it
+  - `akram-manage-install.sh` gained `prune [keep]` and auto-prunes after each successful
+    install: newest `HERDR_AKRAM_KEEP_BACKUPS` (default 5) downstream backups and
+    `refs/akram-backups/` refs are kept; official baselines and the active rollback target are
+    never pruned
   - clean, pushed, and synced with `origin/akram`
+  - as of 2026-07-24, `upstream/master` is 10 commits ahead of the last sync (theme branch still
+    rebases cleanly), and an upstream branch `akbash/1752-forward-host-palette` appeared —
+    possibly maintainer work relevant to the pane-theme discussion; check it when monitoring
+    #1796
   - local release candidate reports `herdr 0.7.5-akram.1`
   - `0.7.5-akram.1` is installed at `~/.local/bin/herdr`; client and live-handoff server both run
     protocol 18
@@ -69,6 +82,7 @@ The `akram` branch changes:
 
 - `scripts/akram-manage-install.sh`
 - `scripts/akram-sync-and-build.sh`
+- `scripts/akram-update.sh`
 - `scripts/akram-downstream.md`
 - `src/build_info.rs`
 - `src/cli.rs`
