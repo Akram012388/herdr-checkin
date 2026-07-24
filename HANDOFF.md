@@ -55,9 +55,15 @@ Checkout: `../../herdr`
   - one upstream-ready commit over `upstream/master`
   - upstream [discussion #1796](https://github.com/ogulcancelik/herdr/discussions/1796) is posted
     and awaiting maintainer direction; no upstream issue or PR exists
-- `akram` at `6258633`, rebased onto the latest `upstream/master` (`c0fb777`, 10 new upstream
+- `akram` at `23147f9`, rebased onto the latest `upstream/master` (`c0fb777`, 10 new upstream
   commits); local-only until the next validated wrapper run pushes it (`origin/akram` still holds
   the pre-rebase stack by design: the wrapper publishes only after the full suite passes)
+  - the wrapper now supports release cadence: `--release` rebases onto the newest upstream
+    release tag (refusing when the tag is already contained, which would rewind the base), and
+    every mode prints a release report comparing the newest tag against the stack and installed
+    binary — the only new-release signal, since the downstream build rejects the official update
+    checker. Intended cadence: `--check` for awareness, `--release` when it announces a release,
+    master-tip mode for opportunistic pulls or validating an in-flight stack
   - carries a downstream test patch: upstream `e608a75` fakes an agent with `exec /bin/sleep`,
     but current macOS strips the environment block from `sysctl(KERN_PROCARGS2)` for Apple
     platform binaries, so the `HERDR_AGENT` hint is invisible and
