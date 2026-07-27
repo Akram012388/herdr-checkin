@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Deprecated
+- **Project retired.** Check-in is no longer maintained. Akram returned to the official Herdr CLI,
+  unlinked the local plugin, and retired the downstream pane-theme work.
+
 ### Fixed
 - **`roster.json` no longer grows without bound.** The time-in-state registry had no removal path:
   `pane.closed` evicts the durable queue but never touched the registry, so closed-pane entries

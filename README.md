@@ -1,5 +1,10 @@
 # herdr-checkin
 
+> [!IMPORTANT]
+> This project was retired on 2026-07-27 and is no longer maintained. Akram now uses the official
+> Herdr CLI without Check-in or the downstream pane-theme fork. The repository remains available as
+> a historical reference, but no releases, fixes, or upstream proposals are planned.
+
 A durable attention queue for agent panes in [herdr](https://herdr.dev).
 
 Herdr's native jump-to-notification only reaches the toast that is currently on screen.
